@@ -1199,12 +1199,12 @@ private:
         }
     }
 
-    void OpenSettings() {
+    void OpenSettings(SettingsCategory targetCategory = SettingsCategory::All) {
         page_ = Page::Settings;
         actionsOpen_ = false;
         dragging_ = false;
-        settingsCategory_ = SettingsCategory::All;
-        settingsSelected_ = 0;
+        settingsCategory_ = targetCategory;
+        settingsSelected_ = (targetCategory == SettingsCategory::All) ? 0 : FirstRowInCategory(targetCategory);
         settingsScroll_ = 0.0f;
         settingsDraggingScroll_ = false;
         settingsStatus_.clear();
@@ -1271,6 +1271,7 @@ private:
     void UpdateResults() {
         results_.clear();
         hoverLockRow_ = -1;
+        int topAppScore = -1;
         if (apps_.size() > baseAppsCount_) {
             apps_.resize(baseAppsCount_);
         }
@@ -1321,6 +1322,7 @@ private:
                 return appA.name < appB.name;
             });
             for (const auto& item : ranked) results_.push_back(item.appIndex);
+            topAppScore = ranked.empty() ? -1 : ranked.front().score;
         }
         if (!input_.text.empty()) {
             auto calc = takeoff::EvaluateExpression(input_.text);
@@ -1356,7 +1358,12 @@ private:
             entry.normalizedName = Normalize(entry.name);
             const size_t taskIdx = apps_.size();
             apps_.push_back(std::move(entry));
-            results_.insert(results_.begin(), taskIdx);
+            // Don't force the TaskAdd row above a strong app match already
+            // leading results_ (e.g. "task manager" shouldn't bury the real
+            // Task Manager app under an "add task" row - see review finding).
+            constexpr int kStrongMatchThreshold = 9000;
+            const size_t insertPos = (topAppScore >= kStrongMatchThreshold) ? 1 : 0;
+            results_.insert(results_.begin() + std::min(insertPos, results_.size()), taskIdx);
         }
         selected_ = std::clamp(selected_, 0, (std::max)(0, static_cast<int>(results_.size()) - 1));
         EnsureVisible();
@@ -1866,8 +1873,10 @@ private:
             if (app.path.empty()) {
                 // No vault configured yet - open Settings instead of silently
                 // doing nothing (spec: result row reads "Set up your vault in
-                // Settings" and must not add anything when activated).
-                OpenSettings();
+                // Settings" and must not add anything when activated). Land
+                // directly on the Vault category/row so onboarding doesn't
+                // strand the user on an unrelated "All" settings view.
+                OpenSettings(SettingsCategory::Vault);
                 return;
             }
             Hide();

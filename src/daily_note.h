@@ -10,6 +10,7 @@
 
 #include <cwctype>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -51,13 +52,43 @@ inline std::wstring FormatDateTokens(const std::wstring& format, int year, int m
     return result;
 }
 
+// Returns true if every letter in `format` is consumed by a recognized
+// YYYY/MM/DD token (in any combination/order, with any non-letter
+// separators around them). Used to detect formats FormatDateTokens can't
+// fully honor, so callers can fall back instead of silently producing a
+// garbled path.
+//
+// Note: a naive "MM" check would greedily match a longer run like "MMMM"
+// (Moment.js's full-month-name token) as two consecutive MM tokens and
+// incorrectly call it fully supported - exactly the silent-garbling bug
+// this function exists to catch. Guard against that by requiring the "MM"
+// match not be immediately followed by another 'M'.
+inline bool IsDateFormatFullySupported(const std::wstring& format) {
+    size_t i = 0;
+    while (i < format.size()) {
+        if (format.compare(i, 4, L"YYYY") == 0) { i += 4; }
+        else if (format.compare(i, 2, L"MM") == 0 &&
+                 (i + 2 >= format.size() || format[i + 2] != L'M')) { i += 2; }
+        else if (format.compare(i, 2, L"DD") == 0) { i += 2; }
+        else if (std::iswalpha(format[i])) { return false; }
+        else { ++i; }
+    }
+    return true;
+}
+
 inline std::wstring ResolveTodayPath(const DailyNoteConfig& config, const std::wstring& vaultPath,
     int year, int month, int day) {
     fs::path base(vaultPath);
     if (!config.folder.empty()) {
         base /= config.folder;
     }
-    const std::wstring filename = FormatDateTokens(config.format, year, month, day) + L".md";
+    // Fall back to the safe default format whenever the configured format
+    // contains anything FormatDateTokens can't fully account for (e.g. a
+    // Moment.js token like MMMM), rather than silently producing a garbled
+    // filename. Expanding token support is out of scope here.
+    const std::wstring& formatToUse =
+        IsDateFormatFullySupported(config.format) ? config.format : std::wstring(L"YYYY-MM-DD");
+    const std::wstring filename = FormatDateTokens(formatToUse, year, month, day) + L".md";
     return (base / filename).wstring();
 }
 
@@ -119,6 +150,25 @@ inline bool AppendTask(const std::wstring& notePath, std::wstring_view taskText)
 
     const bool isNewFile = !fs::exists(path, ec);
 
+    // Obsidian doesn't guarantee a trailing newline on saved notes. Appending
+    // straight onto a file whose last byte isn't '\n' would merge the new
+    // task into the previous line, corrupting both. Detect that case with a
+    // separate read handle (FILE_APPEND_DATA doesn't reliably support reads)
+    // and prepend a newline to compensate.
+    bool needsLeadingNewline = false;
+    if (!isNewFile) {
+        std::ifstream check(path, std::ios::binary | std::ios::ate);
+        if (check) {
+            const std::streamoff size = check.tellg();
+            if (size > 0) {
+                check.seekg(-1, std::ios::end);
+                char lastChar = 0;
+                check.read(&lastChar, 1);
+                needsLeadingNewline = (lastChar != '\n');
+            }
+        }
+    }
+
     HANDLE file = CreateFileW(notePath.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
         OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return false;
@@ -126,6 +176,8 @@ inline bool AppendTask(const std::wstring& notePath, std::wstring_view taskText)
     std::wstring content;
     if (isNewFile) {
         content = L"---\ncreated: " + FormatIsoTimestamp() + L"\n---\n\n";
+    } else if (needsLeadingNewline) {
+        content = L"\n";
     }
     content += BuildTaskLine(taskText);
 

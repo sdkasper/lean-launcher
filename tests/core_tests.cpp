@@ -744,25 +744,35 @@ int main() {
 
     // 6. Settings Scroll and Viewport Invariants:
     // Guarantees Settings content cleanly fits and scrolls without overlapping FooterTop (440px).
+    //
+    // This is an independent hand-derived sanity check, not a call into the real
+    // SettingsContentBottom() (that's a private member of a class defined in
+    // main.cpp's anonymous namespace, unreachable from this test binary). As of
+    // the 5-category/10-row layout (Shortcuts/System/Search/Vault, row 9 being
+    // the newest - the single-row Vault card - and now the last row in the All
+    // view), the real All-category SettingsContentBottom() is 636.0f; this
+    // block's constants are kept in sync with that value by hand.
     constexpr float kWindowHeight = 482.0f;
     constexpr float kFooterH = 42.0f;
     constexpr float kSettingsHeaderH = 46.0f;
     constexpr float kSettingsRowH = 47.0f;
     constexpr float footerTop = kWindowHeight - kFooterH; // 440.0f
-    constexpr float generalTop = 280.0f;
-    constexpr float row7Top = generalTop + 3 * kSettingsRowH; // 421.0f
-    constexpr float row7Bottom = row7Top + kSettingsRowH;     // 468.0f
-    constexpr float contentBottom = row7Bottom + 14.0f;       // 482.0f
-    constexpr float maxScroll = contentBottom - footerTop;    // 42.0f
+    // Row 9 (Vault) is a one-off section, not part of the repeating row grid,
+    // so its top is taken directly from source (header@553, card@573) rather
+    // than derived from a generalTop + N*rowH formula.
+    constexpr float row9Top = 573.0f;
+    constexpr float row9Bottom = row9Top + kSettingsRowH;      // 620.0f
+    constexpr float contentBottom = row9Bottom + 16.0f;        // 636.0f (16px bottom padding)
+    constexpr float maxScroll = contentBottom - footerTop;     // 196.0f
 
     Check(footerTop == 440.0f, "footer top is exactly 440px");
-    Check(row7Bottom > footerTop, "unscrolled row 7 exceeds footer top, proving scroll is required");
-    Check(maxScroll == 42.0f, "settings max scroll is 42px");
+    Check(row9Bottom > footerTop, "unscrolled row 9 (Vault, the last row) exceeds footer top, proving scroll is required");
+    Check(maxScroll == 196.0f, "settings max scroll is 196px");
 
     // When scrolled to maxScroll:
-    const float scrolledRow7Bottom = row7Bottom - maxScroll;
-    Check(scrolledRow7Bottom < footerTop, "scrolled row 7 bottom is strictly above footer top");
-    Check(footerTop - scrolledRow7Bottom >= 14.0f, "row 7 has at least 14px clearance above footer");
+    const float scrolledRow9Bottom = row9Bottom - maxScroll;
+    Check(scrolledRow9Bottom < footerTop, "scrolled row 9 bottom is strictly above footer top");
+    Check(footerTop - scrolledRow9Bottom >= 16.0f, "row 9 has at least 16px clearance above footer");
 
     // Check viewport height and scrollable area:
     constexpr float viewportHeight = footerTop - kSettingsHeaderH; // 394.0f
@@ -772,9 +782,11 @@ int main() {
     constexpr float kCategoryShortcutsContentH = 36.0f + 2 * kSettingsRowH + 12.0f; // 142px
     constexpr float kCategorySystemContentH = 36.0f + 5 * kSettingsRowH + 12.0f;    // 283px
     constexpr float kCategorySearchContentH = 36.0f + 2 * kSettingsRowH + 12.0f;    // 142px
+    constexpr float kCategoryVaultContentH = 36.0f + 1 * kSettingsRowH + 16.0f;     // 99px
     Check(kCategoryShortcutsContentH < viewportHeight, "Shortcuts category has zero overflow in viewport");
     Check(kCategorySystemContentH < viewportHeight, "System category has zero overflow in viewport");
     Check(kCategorySearchContentH < viewportHeight, "Search category has zero overflow in viewport");
+    Check(kCategoryVaultContentH < viewportHeight, "Vault category has zero overflow in viewport");
 
     // --- Calculator Tests ---
     // AppCategory::Calculator distinction
@@ -1046,6 +1058,26 @@ int main() {
             "ResolveTodayPath with empty folder falls back to vault root");
     }
 
+    // IsDateFormatFullySupported: true only when every letter is consumed by a
+    // recognized YYYY/MM/DD token.
+    Check(IsDateFormatFullySupported(L"YYYY-MM-DD"), "IsDateFormatFullySupported true for YYYY-MM-DD");
+    Check(IsDateFormatFullySupported(L"YYYY/MM/YYYY-MM-DD"),
+        "IsDateFormatFullySupported true for repeated-token folder+filename format");
+    Check(!IsDateFormatFullySupported(L"MMMM-DD-YYYY"),
+        "IsDateFormatFullySupported false for unsupported MMMM token");
+    Check(!IsDateFormatFullySupported(L"dddd, MMMM Do YYYY"),
+        "IsDateFormatFullySupported false for unsupported dddd/MMMM/Do tokens");
+
+    {
+        // Regression: an unsupported format token must not silently produce a
+        // garbled filename - ResolveTodayPath should fall back to YYYY-MM-DD.
+        DailyNoteConfig config;
+        config.format = L"MMMM-DD-YYYY";
+        const std::wstring path = ResolveTodayPath(config, L"D:\\Vault", 2026, 9, 14);
+        Check(path.size() >= 13 && path.compare(path.size() - 13, 13, L"2026-09-14.md") == 0,
+            "ResolveTodayPath falls back to YYYY-MM-DD for an unsupported format instead of garbling the filename");
+    }
+
     {
         std::wstring text;
         Check(TryParseTaskPrefix(L"task buy milk", text) && text == L"buy milk",
@@ -1099,6 +1131,38 @@ int main() {
         Check(std::count(secondContent.begin(), secondContent.end(), '\n') ==
               static_cast<long>(std::count(firstContent.begin(), firstContent.end(), '\n')) + 1,
             "AppendTask on an existing file adds exactly one new line, no duplicate frontmatter");
+
+        DeleteFileW(notePath.c_str());
+    }
+
+    // Regression: AppendTask must not corrupt the previous line when the note
+    // has no trailing newline (Obsidian doesn't guarantee one on save).
+    {
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring notePath = std::wstring(tempDir) + L"LeanLauncherTest_NoTrailingNewline.md";
+        DeleteFileW(notePath.c_str());  // ensure clean starting state
+
+        // Write content directly (not via AppendTask) so we control the exact
+        // bytes - specifically, no trailing '\n' after "existing task".
+        {
+            std::ofstream seed(notePath, std::ios::binary);
+            seed << "- [ ] existing task";
+        }
+
+        Check(AppendTask(notePath, L"buy milk"),
+            "AppendTask on a no-trailing-newline file returns true");
+
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        check.close();
+        const std::string content = ss.str();
+
+        Check(content.find("- [ ] existing task\n- [ ] buy milk\n") != std::string::npos,
+            "AppendTask inserts a newline so the previous line and the new task are both intact, each on its own line");
+        Check(content.find("existing task- [ ]") == std::string::npos,
+            "AppendTask never merges the new task into the previous line");
 
         DeleteFileW(notePath.c_str());
     }
