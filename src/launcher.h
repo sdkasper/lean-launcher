@@ -1033,13 +1033,14 @@ private:
         }
     }
 
-    enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search };
+    enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, Vault };
 
     static bool IsRowInCategory(int row, SettingsCategory cat) {
-        if (cat == SettingsCategory::All) return row >= 0 && row <= 8;
+        if (cat == SettingsCategory::All) return row >= 0 && row <= 9;
         if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
         if (cat == SettingsCategory::Search) return row >= 7 && row <= 8;
+        if (cat == SettingsCategory::Vault) return row == 9;
         return false;
     }
 
@@ -1047,6 +1048,7 @@ private:
         if (cat == SettingsCategory::Shortcuts) return 0;
         if (cat == SettingsCategory::System) return 4;
         if (cat == SettingsCategory::Search) return 7;
+        if (cat == SettingsCategory::Vault) return 9;
         return 0;
     }
 
@@ -1054,17 +1056,18 @@ private:
         if (cat == SettingsCategory::Shortcuts) return 3;
         if (cat == SettingsCategory::System) return 6;
         if (cat == SettingsCategory::Search) return 8;
-        return 8;
+        if (cat == SettingsCategory::Vault) return 9;
+        return 9;
     }
 
     int NextSettingsRow(int current, int delta) const {
         std::vector<int> activeRows;
-        for (int r = 0; r <= 8; ++r) {
+        for (int r = 0; r <= 9; ++r) {
             if (IsRowInCategory(r, settingsCategory_)) {
                 activeRows.push_back(r);
             }
         }
-        activeRows.push_back(9);
+        activeRows.push_back(10);
         auto it = std::find(activeRows.begin(), activeRows.end(), current);
         if (it == activeRows.end()) {
             return activeRows.empty() ? 0 : activeRows.front();
@@ -1089,6 +1092,9 @@ private:
         } else if (cat == SettingsCategory::Search) {
             x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f;
             w = 68.0f;
+        } else if (cat == SettingsCategory::Vault) {
+            x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f + 68.0f + 6.0f;
+            w = 68.0f;
         }
         return D2D1::RectF(x, y, x + w, y + h);
     }
@@ -1099,13 +1105,15 @@ private:
 
     float SettingsContentBottom() const {
         if (settingsCategory_ == SettingsCategory::All) {
-            return 551.0f;
+            return 636.0f;  // was 551; +85 for the new one-row Vault card + its header/gap
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 240.0f;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 193.0f;
         } else if (settingsCategory_ == SettingsCategory::Search) {
             return 146.0f;
+        } else if (settingsCategory_ == SettingsCategory::Vault) {
+            return 99.0f;  // 36 header offset + 1 row (47) + 16 bottom padding
         }
         return 200.0f;
     }
@@ -1126,13 +1134,16 @@ private:
         if (settingsCategory_ == SettingsCategory::All) {
             if (row < 4) return 36.0f + row * kSettingsRowHeight;
             if (row < 7) return 262.0f + (row - 4) * kSettingsRowHeight;
-            return 441.0f + (row - 7) * kSettingsRowHeight;
+            if (row < 9) return 441.0f + (row - 7) * kSettingsRowHeight;
+            return 573.0f;  // row 9 (Vault), All-view only section: header@553, card@573
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 36.0f + row * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 36.0f + (row - 4) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Search) {
             return 36.0f + (row - 7) * kSettingsRowHeight;
+        } else if (settingsCategory_ == SettingsCategory::Vault) {
+            return 36.0f;
         }
         return 0.0f;
     }
@@ -1141,7 +1152,7 @@ private:
         if (x < 16.0f || x > width_ - 16.0f) return -1;
         if (y < kSettingsHeaderHeight || y >= FooterTop()) return -1;
         const float contentY = (y - kSettingsHeaderHeight) + settingsScroll_;
-        for (int r = 0; r <= 8; ++r) {
+        for (int r = 0; r <= 9; ++r) {
             if (!IsRowInCategory(r, settingsCategory_)) continue;
             const float rTop = SettingsRowTop(r);
             if (contentY >= rTop && contentY < rTop + kSettingsRowHeight) {
@@ -1161,11 +1172,11 @@ private:
     }
 
     void EnsureSettingsVisible(int row) {
-        if (row == 9) {
+        if (row == 10) {
             settingsScroll_ = 0.0f;
             return;
         }
-        if (row < 0 || row > 8 || !IsRowInCategory(row, settingsCategory_)) return;
+        if (row < 0 || row > 9 || !IsRowInCategory(row, settingsCategory_)) return;
         const float rTop = SettingsRowTop(row);
         const float rBottom = rTop + kSettingsRowHeight;
         const float maxScroll = SettingsMaxScroll();
@@ -1174,8 +1185,9 @@ private:
             if (row == 0) sectionHeaderTop = 16.0f;
             else if (row == 4) sectionHeaderTop = 242.0f;
             else if (row == 7) sectionHeaderTop = 421.0f;
+            else if (row == 9) sectionHeaderTop = 553.0f;
         } else {
-            if (row == 0 || row == 4 || row == 7) sectionHeaderTop = 16.0f;
+            if (row == 0 || row == 4 || row == 7 || row == 9) sectionHeaderTop = 16.0f;
         }
         const float visibleTop = sectionHeaderTop;
         const float visibleBottom = rBottom + 8.0f;
@@ -1199,6 +1211,7 @@ private:
         recordingRow_ = -1;
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
+        knownVaults_ = leanlauncher::obsidian::FindKnownVaults();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
@@ -1382,10 +1395,31 @@ private:
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
+    void CycleVaultSelection() {
+        if (knownVaults_.empty()) {
+            settingsStatus_ = L"No Obsidian vaults found. Open a vault in Obsidian, then reopen Settings.";
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        size_t nextIndex = 0;
+        const auto it = std::find(knownVaults_.begin(), knownVaults_.end(), obsidianVaultPath_);
+        if (it != knownVaults_.end()) {
+            nextIndex = (static_cast<size_t>(std::distance(knownVaults_.begin(), it)) + 1) % knownVaults_.size();
+        }
+        obsidianVaultPath_ = knownVaults_[nextIndex];
+        dailyNoteConfig_ = leanlauncher::obsidian::ReadDailyNoteConfig(obsidianVaultPath_);
+        SaveSettings();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
     void ChangeSetting(int row) {
         settingsStatus_.clear();
-        if (row == 9) {
+        if (row == 10) {
             ResetToDefaults();
+            return;
+        }
+        if (row == 9) {
+            CycleVaultSelection();
             return;
         }
         if (row < 4) {
@@ -2101,7 +2135,8 @@ private:
                     SettingsCategory::All,
                     SettingsCategory::Shortcuts,
                     SettingsCategory::System,
-                    SettingsCategory::Search
+                    SettingsCategory::Search,
+                    SettingsCategory::Vault
                 };
                 for (auto cat : categories) {
                     const auto r = CategoryTabRect(cat);
@@ -2117,7 +2152,7 @@ private:
                 }
                 const auto resetRect = ResetButtonRect();
                 if (x >= resetRect.left && x <= resetRect.right && y >= resetRect.top && y <= resetRect.bottom) {
-                    settingsSelected_ = 9;
+                    settingsSelected_ = 10;
                     ResetToDefaults();
                     return;
                 }
@@ -2288,7 +2323,7 @@ private:
             int row = -1;
             if (y < kSettingsHeaderHeight) {
                 if (x >= resetRect.left && x <= resetRect.right && y >= resetRect.top && y <= resetRect.bottom) {
-                    row = 9;
+                    row = 10;
                 }
             } else if (y >= kSettingsHeaderHeight && y < FooterTop() && x < width_ - 14.0f) {
                 row = SettingsRowAtPoint(x, y);
@@ -3307,7 +3342,7 @@ private:
 
     void DrawSettingsRow(int index, float top, std::wstring_view title,
         std::wstring_view description, std::wstring_view value = {}, bool toggle = false,
-        bool enabled = false) {
+        bool enabled = false, bool plainValue = false) {
         const bool selected = (index == settingsSelected_);
         const auto row = D2D1::RectF(18, top + 1, width_ - 18, top + kSettingsRowHeight - 1);
         if (selected) {
@@ -3330,6 +3365,9 @@ private:
             Text(L"Press keys\u2026", D2D1::RectF(width_ - 240, top, width_ - 36, top + kSettingsRowHeight),
                 hintFormat_.Get(), highContrast_ ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0x6EA8FE),
                 DWRITE_TEXT_ALIGNMENT_TRAILING);
+        } else if (plainValue) {
+            Text(value, D2D1::RectF(width_ - 260, top, width_ - 36, top + kSettingsRowHeight),
+                hintFormat_.Get(), secondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
         } else {
             const float badgesW = KeyBadgesWidth(value);
             DrawKeyBadges(value, width_ - 36 - badgesW, top + kSettingsRowHeight / 2);
@@ -3408,6 +3446,28 @@ private:
                 L"Open Google when no results match your query", {}, true, settings_.enableWebSearch);
         }
 
+        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Vault) {
+            const float hY = (settingsCategory_ == SettingsCategory::All) ? 553.0f : 16.0f;
+            const float cY = (settingsCategory_ == SettingsCategory::All) ? 573.0f : 36.0f;
+            drawCard(L"OBSIDIAN", hY, cY, 1);
+
+            std::wstring vaultValue = L"None found";
+            std::wstring vaultDescription = L"No Obsidian vaults found. Install Obsidian and open a vault, then reopen Settings.";
+            if (!knownVaults_.empty()) {
+                if (obsidianVaultPath_.empty()) {
+                    vaultValue = L"Not set";
+                    vaultDescription = L"Press Enter to select a detected vault";
+                } else {
+                    vaultValue = fs::path(obsidianVaultPath_).filename().wstring();
+                    vaultDescription = dailyNoteConfig_.found
+                        ? L"Tasks are added to today's daily note in this vault"
+                        : L"Could not read this vault's daily notes config — using vault root + YYYY-MM-DD.md";
+                }
+            }
+            DrawSettingsRow(9, cY + offsetY, L"Obsidian Vault", vaultDescription, vaultValue,
+                false, false, true);
+        }
+
         target_->PopAxisAlignedClip();
 
         // Subtle modern scrollbar thumb if content exceeds viewport
@@ -3453,10 +3513,11 @@ private:
             SettingsCategory::All,
             SettingsCategory::Shortcuts,
             SettingsCategory::System,
-            SettingsCategory::Search
+            SettingsCategory::Search,
+            SettingsCategory::Vault
         };
-        const wchar_t* catLabels[] = {L"All", L"Shortcuts", L"System", L"Search"};
-        for (int i = 0; i < 4; ++i) {
+        const wchar_t* catLabels[] = {L"All", L"Shortcuts", L"System", L"Search", L"Vault"};
+        for (int i = 0; i < 5; ++i) {
             const auto cat = categories[i];
             const auto tabRect = CategoryTabRect(cat);
             const bool active = (settingsCategory_ == cat);
@@ -3475,7 +3536,7 @@ private:
 
         // Reset to default button
         const auto resetRect = ResetButtonRect();
-        const bool resetSelected = (settingsSelected_ == 9);
+        const bool resetSelected = (settingsSelected_ == 10);
         const bool resetHover = mouseKnown_ && mouseX_ >= resetRect.left && mouseX_ <= resetRect.right && mouseY_ >= resetRect.top && mouseY_ <= resetRect.bottom;
         const bool resetHighlight = resetSelected || resetHover;
         Fill(resetRect, highContrast_
@@ -3562,6 +3623,7 @@ private:
     Settings settings_;
     std::wstring obsidianVaultPath_;
     leanlauncher::obsidian::DailyNoteConfig dailyNoteConfig_;
+    std::vector<std::wstring> knownVaults_;  // <-- new in this task
     Page page_ = Page::Launcher;
     wchar_t pendingSurrogate_ = 0;
     std::wstring composition_, status_, settingsStatus_;
