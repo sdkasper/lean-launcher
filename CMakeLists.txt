@@ -11,6 +11,7 @@ add_executable(${target} WIN32
     src/updates.h
     src/calculator.h
     src/obsidian_config.h
+    src/daily_note.h
     src/LeanLauncher.manifest
     src/LeanLauncher.rc
 )

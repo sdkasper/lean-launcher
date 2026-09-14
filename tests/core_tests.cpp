@@ -4,10 +4,13 @@
 #include "../src/file_index.h"
 #include "../src/calculator.h"
 #include "../src/obsidian_config.h"
+#include "../src/daily_note.h"
 
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 
 void Check(bool condition, const char* description) {
     if (!condition) {
@@ -1017,6 +1020,87 @@ int main() {
 
         DailyNoteConfig empty = ParseDailyNoteConfigJson("{}");
         Check(!empty.found, "ParseDailyNoteConfigJson reports not-found for empty object");
+    }
+
+    // --- daily_note.h: pure-function tests ---
+    Check(FormatDateTokens(L"YYYY-MM-DD", 2026, 9, 14) == L"2026-09-14",
+        "FormatDateTokens basic YYYY-MM-DD");
+    Check(FormatDateTokens(L"YYYY/MM/YYYY-MM-DD", 2026, 1, 5) == L"2026/01/2026-01-05",
+        "FormatDateTokens repeated tokens across folder+filename format");
+    Check(FormatDateTokens(L"YYYY", 2026, 9, 14) == L"2026", "FormatDateTokens year only");
+    Check(FormatDateTokens(L"literal", 2026, 9, 14) == L"literal", "FormatDateTokens no tokens passes through");
+
+    {
+        DailyNoteConfig config;
+        config.folder = L"06 BJ/10 Daily";
+        config.format = L"YYYY/MM/YYYY-MM-DD";
+        const std::wstring path = ResolveTodayPath(config, L"D:\\Vault", 2026, 9, 14);
+        Check(path == L"D:\\Vault\\06 BJ/10 Daily\\2026/09/2026-09-14.md",
+            "ResolveTodayPath joins vault + folder + formatted filename");
+    }
+    {
+        DailyNoteConfig rootConfig;  // no folder: notes live at vault root
+        rootConfig.format = L"YYYY-MM-DD";
+        const std::wstring path = ResolveTodayPath(rootConfig, L"D:\\Vault", 2026, 9, 14);
+        Check(path == L"D:\\Vault\\2026-09-14.md",
+            "ResolveTodayPath with empty folder falls back to vault root");
+    }
+
+    {
+        std::wstring text;
+        Check(TryParseTaskPrefix(L"task buy milk", text) && text == L"buy milk",
+            "TryParseTaskPrefix parses basic 'task <text>'");
+        Check(TryParseTaskPrefix(L"Task buy milk", text) && text == L"buy milk",
+            "TryParseTaskPrefix is case-insensitive on the prefix");
+        Check(TryParseTaskPrefix(L"task   buy milk", text) && text == L"buy milk",
+            "TryParseTaskPrefix trims extra spaces after the prefix");
+        Check(!TryParseTaskPrefix(L"task", text), "TryParseTaskPrefix rejects bare 'task' with no text");
+        Check(!TryParseTaskPrefix(L"task ", text), "TryParseTaskPrefix rejects 'task ' with only trailing space");
+        Check(!TryParseTaskPrefix(L"tasker 5", text), "TryParseTaskPrefix requires a space after 'task'");
+        Check(!TryParseTaskPrefix(L"notepad", text), "TryParseTaskPrefix rejects unrelated queries");
+        Check(!TryParseTaskPrefix(L"", text), "TryParseTaskPrefix rejects empty input");
+    }
+
+    {
+        Check(BuildTaskLine(L"buy milk") == L"- [ ] buy milk\n", "BuildTaskLine basic construction");
+        Check(BuildTaskLine(L"line1\r\nline2") == L"- [ ] line1line2\n",
+            "BuildTaskLine strips embedded CR/LF so one task never becomes two lines");
+        Check(BuildTaskLine(L"") == L"- [ ] \n", "BuildTaskLine tolerates empty text");
+        Check(BuildTaskLine(L"[[Some Note]] and #tag") == L"- [ ] [[Some Note]] and #tag\n",
+            "BuildTaskLine passes through wikilinks and tags unescaped (valid Markdown as-is)");
+    }
+
+    {
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring notePath = std::wstring(tempDir) + L"LeanLauncherTest_2026-09-14.md";
+        DeleteFileW(notePath.c_str());  // ensure clean starting state
+
+        Check(AppendTask(notePath, L"first task"), "AppendTask creates a new file and returns true");
+
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        const std::string firstContent = ss.str();
+        Check(firstContent.find("---\ncreated:") != std::string::npos,
+            "AppendTask writes minimal frontmatter for a new file");
+        Check(firstContent.find("- [ ] first task\n") != std::string::npos,
+            "AppendTask writes the task line for a new file");
+
+        Check(AppendTask(notePath, L"second task"), "AppendTask appends to an existing file and returns true");
+        check.close();
+        std::ifstream check2(notePath, std::ios::binary);
+        std::ostringstream ss2;
+        ss2 << check2.rdbuf();
+        const std::string secondContent = ss2.str();
+        Check(secondContent.find("- [ ] first task\n") != std::string::npos &&
+              secondContent.find("- [ ] second task\n") != std::string::npos,
+            "AppendTask preserves the first task and adds the second");
+        Check(std::count(secondContent.begin(), secondContent.end(), '\n') ==
+              static_cast<long>(std::count(firstContent.begin(), firstContent.end(), '\n')) + 1,
+            "AppendTask on an existing file adds exactly one new line, no duplicate frontmatter");
+
+        DeleteFileW(notePath.c_str());
     }
 
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";
