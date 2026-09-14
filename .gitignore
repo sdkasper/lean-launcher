@@ -1,0 +1,39 @@
+# Build directories
+/build/
+/x64/
+/QuickLaunch/
+/Takeoff/
+/out/
+/dist/
+/dist_release/
+*.zip
+*.sha256
+
+# Visual Studio & IDEs
+/.vs/
+/*.user
+/*.suo
+/*.userosscache
+/*.sln.docstates
+.vscode/
+
+# Compiled objects and binaries
+*.obj
+*.pdb
+*.idb
+*.iobj
+*.ipdb
+*.res
+*.tlog
+*.recipe
+*.ilk
+*.exe
+*.dll
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# OS files
+Thumbs.db
+.DS_Store

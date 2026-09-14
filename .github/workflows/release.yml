@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Configure CMake
+        run: cmake -S . -B build -A x64
+
+      - name: Build LeanLauncher (Release x64)
+        run: cmake --build build --config Release --target LeanLauncher
+
+      - name: Run Core Tests
+        run: |
+          cmake --build build --config Release --target LeanLauncherCoreTests
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package Release
+        id: package
+        shell: pwsh
+        run: |
+          $inputTag = "${{ github.event.inputs.tag_name }}"
+          $refTag = "${{ github.ref_name }}"
+          $tag = if ($inputTag) { $inputTag } else { $refTag }
+          $versionExeName = "LeanLauncher-$tag.exe"
+          $archiveName = "LeanLauncher-$tag-windows-x64.zip"
+          $distDir = "dist_release"
+
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+          Copy-Item "build/Release/LeanLauncher.exe" -Destination "build/Release/$versionExeName"
+          Copy-Item "build/Release/LeanLauncher.exe" -Destination $distDir/
+          Copy-Item "README.md" -Destination $distDir/
+          Copy-Item "LICENSE" -Destination $distDir/
+
+          Compress-Archive -Path "$distDir/*" -DestinationPath $archiveName -Force
+          $sha256 = (Get-FileHash -Path $archiveName -Algorithm SHA256).Hash
+          "$sha256  $archiveName" | Out-File -FilePath "$archiveName.sha256" -Encoding ascii
+
+          Write-Output "tag=$tag" >> $env:GITHUB_OUTPUT
+          Write-Output "archive=$archiveName" >> $env:GITHUB_OUTPUT
+          Write-Output "sha256=$archiveName.sha256" >> $env:GITHUB_OUTPUT
+          Write-Output "version_exe=build/Release/$versionExeName" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.tag }}
+          files: |
+            ${{ steps.package.outputs.version_exe }}
+            build/Release/LeanLauncher.exe
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.sha256 }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+

@@ -1,0 +1,38 @@
+#include "resource.h"
+#include <winres.h>
+
+IDI_APPICON ICON "app.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 1,0,3,0
+PRODUCTVERSION 1,0,3,0
+FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+FILEFLAGS 0x1L
+#else
+FILEFLAGS 0x0L
+#endif
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Akira"
+            VALUE "FileDescription", "Takeoff - Fast Native Windows App Launcher"
+            VALUE "FileVersion", "1.0.3.0"
+            VALUE "InternalName", "Takeoff.exe"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Akira"
+            VALUE "OriginalFilename", "Takeoff.exe"
+            VALUE "ProductName", "Takeoff"
+            VALUE "ProductVersion", "1.0.3.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
