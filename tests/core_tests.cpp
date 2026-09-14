@@ -3,6 +3,7 @@
 #include "../src/updates.h"
 #include "../src/file_index.h"
 #include "../src/calculator.h"
+#include "../src/obsidian_config.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -969,6 +970,53 @@ int main() {
         Check(mockApps[results[0]].name == L"1000", "result name is 1000 without commas");
         Check(mockApps[results[0]].path == L"1000", "result path is raw 1000 for clipboard copy");
         Check(mockApps[results[0]].parameters == L"125 * 8", "parameters stores original expression");
+    }
+
+    // --- Obsidian config parsing tests (pure functions, no filesystem) ---
+    using namespace leanlauncher::obsidian;
+
+    {
+        std::wstring value;
+        Check(ExtractStringField("{\"folder\":\"06 BJ/10 Daily\"}", "folder", value) &&
+              value == L"06 BJ/10 Daily", "ExtractStringField finds folder value");
+        Check(ExtractStringField("{\"format\":\"YYYY/MM/YYYY-MM-DD\"}", "format", value) &&
+              value == L"YYYY/MM/YYYY-MM-DD", "ExtractStringField finds format value");
+        Check(!ExtractStringField("{\"other\":\"x\"}", "folder", value),
+              "ExtractStringField returns false when key is absent");
+        Check(ExtractStringField("{\"path\":\"C:\\\\Users\\\\Sascha\\\\Lean Notes\"}", "path", value) &&
+              value == L"C:\\Users\\Sascha\\Lean Notes",
+              "ExtractStringField unescapes backslashes in Windows paths");
+    }
+
+    {
+        const std::string obsidianJson =
+            "{\"vaults\":{"
+            "\"a1b2\":{\"path\":\"C:\\\\Users\\\\Sascha\\\\Lean Notes\",\"ts\":1,\"open\":true},"
+            "\"c3d4\":{\"path\":\"D:\\\\Work\\\\Notes\",\"ts\":2}"
+            "}}";
+        auto paths = FindVaultPathsInJson(obsidianJson);
+        Check(paths.size() == 2, "FindVaultPathsInJson finds both vault paths");
+        Check(paths[0] == L"C:\\Users\\Sascha\\Lean Notes", "first vault path matches");
+        Check(paths[1] == L"D:\\Work\\Notes", "second vault path matches");
+        Check(FindVaultPathsInJson("{}").empty(), "FindVaultPathsInJson returns empty for no vaults key");
+    }
+
+    {
+        const std::string dailyNotesJson = "{\"folder\":\"06 BJ/10 Daily\",\"format\":\"YYYY/MM/YYYY-MM-DD\"}";
+        DailyNoteConfig config = ParseDailyNoteConfigJson(dailyNotesJson);
+        Check(config.found, "ParseDailyNoteConfigJson marks config as found");
+        Check(config.folder == L"06 BJ/10 Daily", "ParseDailyNoteConfigJson reads folder");
+        Check(config.format == L"YYYY/MM/YYYY-MM-DD", "ParseDailyNoteConfigJson reads format");
+
+        DailyNoteConfig missingFolder = ParseDailyNoteConfigJson("{\"format\":\"YYYY-MM-DD\"}");
+        Check(missingFolder.found && missingFolder.folder.empty(),
+              "ParseDailyNoteConfigJson tolerates a missing folder (vault-root notes)");
+
+        DailyNoteConfig unparseable = ParseDailyNoteConfigJson("not json at all");
+        Check(!unparseable.found, "ParseDailyNoteConfigJson reports not-found for garbage input");
+
+        DailyNoteConfig empty = ParseDailyNoteConfigJson("{}");
+        Check(!empty.found, "ParseDailyNoteConfigJson reports not-found for empty object");
     }
 
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";
