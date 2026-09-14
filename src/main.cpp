@@ -32,6 +32,8 @@
 #include "updates.h"
 #include "file_index.h"
 #include "calculator.h"
+#include "obsidian_config.h"
+#include "daily_note.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;

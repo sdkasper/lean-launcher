@@ -1103,5 +1103,33 @@ int main() {
         DeleteFileW(notePath.c_str());
     }
 
+    // 13. Task-add integration: prefix detection -> synthetic result -> append
+    {
+        std::wstring taskText;
+        Check(TryParseTaskPrefix(L"task write plan", taskText) && taskText == L"write plan",
+            "task-add pipeline: prefix parses correctly before result construction");
+
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring vaultRoot = std::wstring(tempDir) + L"LeanLauncherTestVault";
+        CreateDirectoryW(vaultRoot.c_str(), nullptr);
+
+        DailyNoteConfig config;  // empty folder + default format = vault root note
+        int year = 0, month = 0, day = 0;
+        GetTodayYmd(year, month, day);
+        const std::wstring notePath = ResolveTodayPath(config, vaultRoot, year, month, day);
+        DeleteFileW(notePath.c_str());
+
+        Check(AppendTask(notePath, taskText), "task-add pipeline: AppendTask writes the resolved path");
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        Check(ss.str().find("- [ ] write plan\n") != std::string::npos,
+            "task-add pipeline: end-to-end content matches what was typed");
+        check.close();
+        DeleteFileW(notePath.c_str());
+        RemoveDirectoryW(vaultRoot.c_str());
+    }
+
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";
 }
