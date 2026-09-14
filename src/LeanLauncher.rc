@@ -4,8 +4,8 @@
 IDI_APPICON ICON "app.ico"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,0,3,0
-PRODUCTVERSION 1,0,3,0
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
 FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
 FILEFLAGS 0x1L
@@ -20,14 +20,14 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "CompanyName", "Akira"
-            VALUE "FileDescription", "Takeoff - Fast Native Windows App Launcher"
-            VALUE "FileVersion", "1.0.3.0"
-            VALUE "InternalName", "Takeoff.exe"
-            VALUE "LegalCopyright", "Copyright (C) 2026 Akira"
-            VALUE "OriginalFilename", "Takeoff.exe"
-            VALUE "ProductName", "Takeoff"
-            VALUE "ProductVersion", "1.0.3.0"
+            VALUE "CompanyName", "LeanProductivity"
+            VALUE "FileDescription", "Lean Launcher - Quick Obsidian Task Capture"
+            VALUE "FileVersion", "0.1.0.0"
+            VALUE "InternalName", "LeanLauncher.exe"
+            VALUE "LegalCopyright", "Copyright (C) 2026 LeanProductivity"
+            VALUE "OriginalFilename", "LeanLauncher.exe"
+            VALUE "ProductName", "Lean Launcher"
+            VALUE "ProductVersion", "0.1.0.0"
         END
     END
     BLOCK "VarFileInfo"
