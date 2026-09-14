@@ -47,14 +47,14 @@ using takeoff::kFilesReadyMessage;
 
 namespace {
 
-#if defined(TAKEOFF_UI_TEST) || defined(QUICKLAUNCH_UI_TEST)
+#if defined(LEANLAUNCHER_UI_TEST)
 constexpr bool kUiTest = true;
-constexpr wchar_t kWindowClass[] = L"TakeoffTestWindow";
-constexpr wchar_t kMutexName[] = L"Local\\Takeoff.UiTest";
+constexpr wchar_t kWindowClass[] = L"LeanLauncherTestWindow";
+constexpr wchar_t kMutexName[] = L"Local\\LeanLauncher.UiTest";
 #else
 constexpr bool kUiTest = false;
-constexpr wchar_t kWindowClass[] = L"TakeoffWindow";
-constexpr wchar_t kMutexName[] = L"Local\\Takeoff.SingleInstance";
+constexpr wchar_t kWindowClass[] = L"LeanLauncherWindow";
+constexpr wchar_t kMutexName[] = L"Local\\LeanLauncher.SingleInstance";
 #endif
 constexpr int kHotkeyId = 1;
 constexpr UINT kAppsReadyMessage = WM_APP + 1;

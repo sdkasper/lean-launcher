@@ -29,7 +29,7 @@ public:
         }
         // Not layered: DWM supplies the backdrop; Direct2D supplies premultiplied content.
         hwnd_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            kWindowClass, L"Takeoff", WS_POPUP | WS_THICKFRAME,
+            kWindowClass, L"Lean Launcher", WS_POPUP | WS_THICKFRAME,
             CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, nullptr, nullptr, instance, this);
         if (!hwnd_) return false;
         dpi_ = GetDpiForWindow(hwnd_);
@@ -85,10 +85,10 @@ private:
     static constexpr float kSettingsRowHeight = 47.0f;
     static constexpr int kVisibleRows = 8;
     static constexpr float kTextLeft = 48.0f;
-    static constexpr wchar_t kSettingsRegistryPath[] = L"Software\\Takeoff";
+    static constexpr wchar_t kSettingsRegistryPath[] = L"Software\\LeanLauncher";
     static constexpr wchar_t kStartupRegistryPath[] =
         L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-    static constexpr wchar_t kStartupValueName[] = L"Takeoff";
+    static constexpr wchar_t kStartupValueName[] = L"LeanLauncher";
 
     static constexpr DWORD kDwmwaUseImmersiveDarkMode = 20;
     static constexpr DWORD kDwmwaWindowCornerPreference = 33;
@@ -501,8 +501,6 @@ private:
         if constexpr (!kUiTest) {
             HKEY key = nullptr;
             if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsRegistryPath, 0, KEY_READ, &key) ==
-                    ERROR_SUCCESS ||
-                RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\QuickLaunch", 0, KEY_READ, &key) ==
                     ERROR_SUCCESS) {
                 const DWORD version = ReadDword(key, L"SettingsVersion", 0);
                 if (version >= 2) {
@@ -767,7 +765,7 @@ private:
             return false;
         }
 
-        std::wstring shortcutPath = std::wstring(programsPath) + L"\\Takeoff.lnk";
+        std::wstring shortcutPath = std::wstring(programsPath) + L"\\Lean Launcher.lnk";
         CoTaskMemFree(programsPath);
 
         ComPtr<IShellLinkW> shellLink;
@@ -778,7 +776,7 @@ private:
         shellLink->SetPath(executable);
         fs::path exeFs(executable);
         shellLink->SetWorkingDirectory(exeFs.parent_path().c_str());
-        shellLink->SetDescription(L"Takeoff App Launcher");
+        shellLink->SetDescription(L"Lean Launcher - Quick Obsidian Task Capture");
 
         ComPtr<IPersistFile> persistFile;
         if (FAILED(shellLink.As(&persistFile))) {
@@ -835,7 +833,7 @@ private:
                 MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
                 GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
             data.hIcon = icon ? icon : LoadIconW(nullptr, IDI_APPLICATION);
-            wcscpy_s(data.szTip, L"Takeoff");
+            wcscpy_s(data.szTip, L"Lean Launcher");
             if (Shell_NotifyIconW(trayIconAdded_ ? NIM_MODIFY : NIM_ADD, &data)) {
                 trayIconAdded_ = true;
                 data.uVersion = NOTIFYICON_VERSION_4;
@@ -860,7 +858,7 @@ private:
             wchar_t localAppData[MAX_PATH]{};
             if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH) > 0 && localAppData[0]) {
                 std::error_code ec;
-                std::filesystem::path updateDir = std::filesystem::path(localAppData) / L"Takeoff" / L"updates";
+                std::filesystem::path updateDir = std::filesystem::path(localAppData) / L"LeanLauncher" / L"updates";
                 for (const auto& entry : std::filesystem::directory_iterator(updateDir, ec)) {
                     if (entry.is_regular_file(ec) && entry.path().extension() == L".exe") {
                         if (takeoff::ValidateExecutableFile(entry.path().wstring())) {
@@ -892,7 +890,7 @@ private:
             AppendMenuW(menu, MF_STRING, 5, L"Restart to Update");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         }
-        AppendMenuW(menu, MF_STRING, 1, L"Open Takeoff");
+        AppendMenuW(menu, MF_STRING, 1, L"Open Lean Launcher");
         AppendMenuW(menu, MF_STRING, 2, L"Settings");
         AppendMenuW(menu, MF_STRING, 4, L"Reload Programs");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -3085,7 +3083,7 @@ private:
             resultFormat_.Get(), Foreground(), DWRITE_TEXT_ALIGNMENT_LEADING);
 
         // Description text
-        Text(L"Your launcher hotkey is taken by another application. Takeoff cannot listen for this shortcut until changed.",
+        Text(L"Your launcher hotkey is taken by another application. Lean Launcher cannot listen for this shortcut until changed.",
             D2D1::RectF(card.left + 24.0f, card.top + 54.0f, card.right - 24.0f, card.top + 98.0f),
             hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_LEADING);
 
@@ -3291,7 +3289,7 @@ private:
             const float cY = 36.0f;
             drawCard(L"KEYBOARD SHORTCUTS", hY, cY, 4);
 
-            DrawSettingsRow(0, cY + offsetY, L"Open Takeoff",
+            DrawSettingsRow(0, cY + offsetY, L"Open Lean Launcher",
                 L"Global shortcut that opens or closes the launcher",
                 quicklaunch::FormatBinding(settings_.launcherHotkey));
             DrawSettingsRow(1, cY + kSettingsRowHeight + offsetY, L"Actions menu",
@@ -3311,11 +3309,11 @@ private:
             drawCard(L"SYSTEM", hY, cY, 3);
 
             DrawSettingsRow(4, cY + offsetY, L"Run at startup",
-                L"Start Takeoff when you sign in to Windows", {}, true, settings_.runAtStartup);
+                L"Start Lean Launcher when you sign in to Windows", {}, true, settings_.runAtStartup);
             DrawSettingsRow(5, cY + kSettingsRowHeight + offsetY, L"Notification area icon",
-                L"Show Takeoff in the hidden icons area", {}, true, settings_.showTrayIcon);
+                L"Show Lean Launcher in the hidden icons area", {}, true, settings_.showTrayIcon);
             DrawSettingsRow(6, cY + 2 * kSettingsRowHeight + offsetY, L"Check for updates",
-                L"Check for updates when Takeoff starts", {}, true, settings_.checkForUpdates);
+                L"Check for updates when Lean Launcher starts", {}, true, settings_.checkForUpdates);
         }
 
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Search) {

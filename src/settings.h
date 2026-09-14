@@ -37,7 +37,7 @@ struct Settings {
     HotkeyBinding quickLaunchHotkey{kModAlt, 0};
     bool runAtStartup = true;
     bool showTrayIcon = true;
-    bool checkForUpdates = true;
+    bool checkForUpdates = false;  // No release pipeline yet; user can opt in via Settings.
     bool enableFileSearch = true;
     bool enableWebSearch = true;
 };
@@ -146,7 +146,7 @@ inline const wchar_t* HasInternalConflict(int targetRow, const HotkeyBinding& pr
             return L"Conflicts with Quick launch shortcut.";
     } else if (targetRow == 1) {
         if (!settings.launcherHotkey.disabled && proposed == settings.launcherHotkey)
-            return L"Conflicts with Open Takeoff shortcut.";
+            return L"Conflicts with Open Lean Launcher shortcut.";
         if (!settings.administratorHotkey.disabled && proposed.key == kVkReturn &&
             proposed.modifiers == settings.administratorHotkey.modifiers)
             return L"Conflicts with Open as administrator shortcut.";
@@ -156,14 +156,14 @@ inline const wchar_t* HasInternalConflict(int targetRow, const HotkeyBinding& pr
     } else if (targetRow == 2) {
         if (!settings.launcherHotkey.disabled && settings.launcherHotkey.key == kVkReturn &&
             proposed.modifiers == settings.launcherHotkey.modifiers)
-            return L"Conflicts with Open Takeoff shortcut.";
+            return L"Conflicts with Open Lean Launcher shortcut.";
         if (!settings.actionsHotkey.disabled && settings.actionsHotkey.key == kVkReturn &&
             proposed.modifiers == settings.actionsHotkey.modifiers)
             return L"Conflicts with Actions menu shortcut.";
     } else if (targetRow == 3) {
         if (!settings.launcherHotkey.disabled && settings.launcherHotkey.key >= '1' &&
             settings.launcherHotkey.key <= '8' && proposed.modifiers == settings.launcherHotkey.modifiers)
-            return L"Conflicts with Open Takeoff shortcut.";
+            return L"Conflicts with Open Lean Launcher shortcut.";
         if (!settings.actionsHotkey.disabled && settings.actionsHotkey.key >= '1' &&
             settings.actionsHotkey.key <= '8' && proposed.modifiers == settings.actionsHotkey.modifiers)
             return L"Conflicts with Actions menu shortcut.";

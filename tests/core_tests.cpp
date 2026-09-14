@@ -155,8 +155,8 @@ int main() {
         "default quick launch hotkey");
     Check(settings.showTrayIcon,
         "notification area icon enabled by default");
-    Check(settings.checkForUpdates,
-        "automatic update checking enabled by default");
+    Check(!settings.checkForUpdates,
+        "automatic update checking disabled by default (no release pipeline yet)");
 
     // Custom bindings formatting
     Check(FormatBinding({kModControl | kModShift, 'P'}) == L"Ctrl + Shift + P",
@@ -293,14 +293,14 @@ int main() {
           "extract asset url secondary exe match");
 
     Check(ExtractAssetDownloadUrl("{}", L"v2.0.0") ==
-          L"https://github.com/akiraeng/takeoff-launcher/releases/download/v2.0.0/Takeoff.exe",
+          L"https://github.com/sdkasper/lean-launcher/releases/download/v2.0.0/LeanLauncher.exe",
           "extract asset url fallback URL from tag");
 
     // Staging path and executable validation checks
     const std::wstring stagingPath = GetUpdateStagingPath(L"v1.1.0");
     Check(!stagingPath.empty(), "staging path generated");
-    Check(stagingPath.find(L"Takeoff_v1.1.0.exe") != std::wstring::npos ||
-          stagingPath.find(L"Takeoff_update.exe") != std::wstring::npos,
+    Check(stagingPath.find(L"LeanLauncher_v1.1.0.exe") != std::wstring::npos ||
+          stagingPath.find(L"LeanLauncher_update.exe") != std::wstring::npos,
           "staging path ends with exe name");
 
     Check(!ValidateExecutableFile(L"C:\\non_existent_file_12345.exe"), "validate non-existent file fails");
@@ -682,9 +682,10 @@ int main() {
     auto pathResults = FileIndex::Instance().Search(repoPathStr, 10);
     Check(!pathResults.empty(), "repo path query returns results");
 
-    auto takeoffMainResults = FileIndex::Instance().Search(L"takeoff main", 10);
-    Check(!takeoffMainResults.empty(), "takeoff main multi-token query returns results");
-    Check(takeoffMainResults[0].name == L"main.cpp", "takeoff main finds main.cpp");
+    const std::wstring folderMainQuery = repoFolderName + L" main";
+    auto takeoffMainResults = FileIndex::Instance().Search(folderMainQuery, 10);
+    Check(!takeoffMainResults.empty(), "repo folder + main multi-token query returns results");
+    Check(takeoffMainResults[0].name == L"main.cpp", "repo folder + main finds main.cpp");
 
     std::vector<std::wstring> testQueries = {L"takeoff", repoFolderName, repoPathStr, L"takeoff main", L"launcher", L"main.cpp"};
     for (const auto& q : testQueries) {

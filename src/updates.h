@@ -19,10 +19,10 @@
 
 namespace takeoff {
 
-inline constexpr wchar_t kAppVersion[] = L"1.0.3";
-inline constexpr wchar_t kDefaultReleasesUrl[] = L"https://github.com/akiraeng/takeoff-launcher/releases";
+inline constexpr wchar_t kAppVersion[] = L"0.1.0";
+inline constexpr wchar_t kDefaultReleasesUrl[] = L"https://github.com/sdkasper/lean-launcher/releases";
 inline constexpr wchar_t kDefaultApiHost[] = L"api.github.com";
-inline constexpr wchar_t kDefaultApiPath[] = L"/repos/akiraeng/takeoff-launcher/releases/latest";
+inline constexpr wchar_t kDefaultApiPath[] = L"/repos/sdkasper/lean-launcher/releases/latest";
 
 inline std::wstring ExtractTagName(std::string_view json) {
     const std::string_view key = "\"tag_name\"";
@@ -88,7 +88,7 @@ inline bool ShouldCheckForUpdates(uint64_t lastCheckSeconds, uint64_t currentSec
 }
 
 inline std::wstring ExtractAssetDownloadUrl(std::string_view json, std::wstring_view tag,
-                                           std::wstring_view preferredName = L"Takeoff.exe") {
+                                           std::wstring_view preferredName = L"LeanLauncher.exe") {
     const std::string_view urlKey = "\"browser_download_url\"";
     size_t pos = 0;
     std::wstring fallbackExeUrl;
@@ -133,7 +133,7 @@ inline std::wstring ExtractAssetDownloadUrl(std::string_view json, std::wstring_
     }
 
     if (!tag.empty()) {
-        std::wstring fallback = L"https://github.com/akiraeng/takeoff-launcher/releases/download/";
+        std::wstring fallback = L"https://github.com/sdkasper/lean-launcher/releases/download/";
         fallback += tag;
         fallback += L"/";
         fallback += preferredName;
@@ -193,10 +193,10 @@ inline bool ValidateExecutableFile(const std::wstring& filePath) {
 inline std::wstring GetUpdateStagingPath(std::wstring_view tag) {
     wchar_t localAppData[MAX_PATH]{};
     if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH) > 0 && localAppData[0]) {
-        std::filesystem::path dir = std::filesystem::path(localAppData) / L"Takeoff" / L"updates";
+        std::filesystem::path dir = std::filesystem::path(localAppData) / L"LeanLauncher" / L"updates";
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
-        std::wstring filename = L"Takeoff_";
+        std::wstring filename = L"LeanLauncher_";
         for (wchar_t ch : tag) {
             if (iswalnum(ch) || ch == L'.' || ch == L'-') filename.push_back(ch);
             else filename.push_back(L'_');
@@ -206,10 +206,10 @@ inline std::wstring GetUpdateStagingPath(std::wstring_view tag) {
     }
     wchar_t tempPath[MAX_PATH]{};
     if (GetTempPathW(MAX_PATH, tempPath) > 0) {
-        std::filesystem::path dir = std::filesystem::path(tempPath) / L"Takeoff";
+        std::filesystem::path dir = std::filesystem::path(tempPath) / L"LeanLauncher";
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
-        std::wstring filename = L"Takeoff_update.exe";
+        std::wstring filename = L"LeanLauncher_update.exe";
         return (dir / filename).wstring();
     }
     return {};
@@ -230,7 +230,7 @@ inline bool DownloadUpdateFile(std::wstring_view initialUrl, const std::wstring&
         return false;
     }
 
-    HINTERNET session = WinHttpOpen(L"Takeoff-Launcher/1.0",
+    HINTERNET session = WinHttpOpen(L"LeanLauncher/0.1",
                                     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                     WINHTTP_NO_PROXY_NAME,
                                     WINHTTP_NO_PROXY_BYPASS, 0);
@@ -366,7 +366,7 @@ inline bool DownloadUpdateFile(std::wstring_view initialUrl, const std::wstring&
 inline bool QueryLatestReleaseInfo(std::wstring_view host, std::wstring_view path,
                                   std::wstring& outTag, std::wstring& outHtmlUrl,
                                   std::wstring& outAssetUrl) {
-    HINTERNET session = WinHttpOpen(L"Takeoff-Launcher/1.0",
+    HINTERNET session = WinHttpOpen(L"LeanLauncher/0.1",
                                     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                     WINHTTP_NO_PROXY_NAME,
                                     WINHTTP_NO_PROXY_BYPASS, 0);
@@ -487,7 +487,7 @@ inline bool ApplyUpdateAndRestart(const std::wstring& updateExePath) {
     // Waits for the current PID to exit, retries the move, launches the new executable, and cleans up.
     wchar_t tempDir[MAX_PATH]{};
     if (GetTempPathW(MAX_PATH, tempDir) > 0) {
-        const std::wstring batPath = std::wstring(tempDir) + L"takeoff_updater.bat";
+        const std::wstring batPath = std::wstring(tempDir) + L"leanlauncher_updater.bat";
         const DWORD pid = GetCurrentProcessId();
 
         HANDLE batFile = CreateFileW(batPath.c_str(), GENERIC_WRITE, 0, nullptr,
