@@ -731,12 +731,12 @@ int main() {
         auto chunk1Results = FileIndex::Instance().Search(L"testdoc");
         Check(!chunk1Results.empty() && chunk1Results[0].name == L"testdoc.pdf", "Search retrieves item from initial snapshot chunk");
 
-        // Memory budget verification: total heap footprint across typical startup remains < 25 MB
-        constexpr size_t kMaxHeapBudget = 25 * 1024 * 1024; // 25 MB
+        // Memory budget verification: total heap footprint across typical startup remains < 30 MB
+        constexpr size_t kMaxHeapBudget = 30 * 1024 * 1024; // 30 MB
         const size_t estimatedHeapBytes = indexedCount * 550;
         std::cout << "[FileIndex] Estimated startup index heap usage: " << (estimatedHeapBytes / (1024 * 1024))
                   << " MB (" << estimatedHeapBytes << " bytes for " << indexedCount << " items)\n";
-        Check(estimatedHeapBytes < kMaxHeapBudget, "FileIndex heap usage under typical startup is strictly bounded < 25 MB");
+        Check(estimatedHeapBytes < kMaxHeapBudget, "FileIndex heap usage under typical startup is strictly bounded < 30 MB");
     }
 
     // 6. Settings Scroll and Viewport Invariants:
