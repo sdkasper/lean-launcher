@@ -1017,6 +1017,36 @@ int main() {
     }
 
     {
+        Check(QuoteCommandLineArgument(L"simple") == L"simple",
+            "QuoteCommandLineArgument passes an argument with no special characters through unquoted");
+        Check(QuoteCommandLineArgument(L"Lean Notes") == L"\"Lean Notes\"",
+            "QuoteCommandLineArgument wraps an argument containing a space in quotes");
+        Check(QuoteCommandLineArgument(L"a\"b") == L"\"a\\\"b\"",
+            "QuoteCommandLineArgument escapes an embedded quote");
+        Check(QuoteCommandLineArgument(L"Program Files\\") == L"\"Program Files\\\\\"",
+            "QuoteCommandLineArgument doubles a trailing backslash run before the closing quote");
+        Check(QuoteCommandLineArgument(L"") == L"\"\"",
+            "QuoteCommandLineArgument quotes empty input (an empty unquoted argument would vanish)");
+    }
+
+    {
+        Check(BuildObsidianCliCommandLine(L"C:\\CLI\\Obsidian.com", L"Vault", L"Note.md") ==
+              L"C:\\CLI\\Obsidian.com open vault=Vault path=Note.md",
+            "BuildObsidianCliCommandLine leaves simple arguments unquoted");
+        Check(BuildObsidianCliCommandLine(
+                  L"C:\\Program Files\\Obsidian\\Obsidian.com", L"Lean Notes", L"06 BJ/10 Daily/2026-09-14.md") ==
+              L"\"C:\\Program Files\\Obsidian\\Obsidian.com\" open vault=\"Lean Notes\" "
+              L"path=\"06 BJ/10 Daily/2026-09-14.md\"",
+            "BuildObsidianCliCommandLine quotes each argument that needs it");
+    }
+
+    {
+        const std::wstring path = ResolveNoteAbsolutePath(L"D:\\Lean Notes", L"06 BJ/10 Daily/2026-09-14");
+        Check(path == L"D:\\Lean Notes\\06 BJ\\10 Daily\\2026-09-14.md",
+            "ResolveNoteAbsolutePath converts a vault-relative ref back to an absolute .md path");
+    }
+
+    {
         const std::string dailyNotesJson = "{\"folder\":\"06 BJ/10 Daily\",\"format\":\"YYYY/MM/YYYY-MM-DD\"}";
         DailyNoteConfig config = ParseDailyNoteConfigJson(dailyNotesJson);
         Check(config.found, "ParseDailyNoteConfigJson marks config as found");

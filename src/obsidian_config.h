@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <shlobj.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -165,6 +166,107 @@ inline DailyNoteConfig ReadDailyNoteConfig(const std::wstring& vaultPath) {
     }
 
     return DailyNoteConfig{};  // found = false
+}
+
+// Quotes a single argument per the Windows command-line escaping rules
+// CommandLineToArgvW (and CreateProcessW's argument parser) expect - not a
+// raw string join, since a note title containing a literal '"' could
+// otherwise inject an unintended argument boundary (e.g. splitting a
+// vault=/path= pair). Arguments with no space/tab/quote pass through
+// unquoted; everything else is wrapped in quotes with backslash-runs
+// doubled before a literal quote or before the closing quote.
+inline std::wstring QuoteCommandLineArgument(std::wstring_view arg) {
+    if (!arg.empty() && arg.find_first_of(L" \t\n\v\"") == std::wstring_view::npos) {
+        return std::wstring(arg);
+    }
+    std::wstring out(1, L'"');
+    for (auto it = arg.begin();; ++it) {
+        size_t backslashes = 0;
+        while (it != arg.end() && *it == L'\\') {
+            ++it;
+            ++backslashes;
+        }
+        if (it == arg.end()) {
+            out.append(backslashes * 2, L'\\');
+            break;
+        } else if (*it == L'"') {
+            out.append(backslashes * 2 + 1, L'\\');
+            out.push_back(*it);
+        } else {
+            out.append(backslashes, L'\\');
+            out.push_back(*it);
+        }
+    }
+    out.push_back(L'"');
+    return out;
+}
+
+// Locates Obsidian's official CLI: %LOCALAPPDATA%\Obsidian\Obsidian.com
+// first (Obsidian's standard non-portable Windows install location - the
+// same "known fixed location, no user config" convention this file already
+// trusts for %APPDATA%\obsidian\obsidian.json), falling back to a PATH
+// search for portable/custom installs. Empty string if not found.
+inline std::wstring FindObsidianCliPath() {
+    PWSTR localAppData = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &localAppData)) &&
+        localAppData) {
+        const fs::path candidate = fs::path(localAppData) / L"Obsidian" / L"Obsidian.com";
+        CoTaskMemFree(localAppData);
+        std::error_code ec;
+        if (fs::exists(candidate, ec)) return candidate.wstring();
+    }
+    wchar_t buf[MAX_PATH]{};
+    if (SearchPathW(nullptr, L"Obsidian.com", nullptr, MAX_PATH, buf, nullptr) > 0) {
+        return buf;
+    }
+    return L"";
+}
+
+// Assembles the full CreateProcessW command line for
+// "obsidian open vault=<name> path=<relative-file-path>", quoting each
+// argument as needed. Kept separate from OpenNoteInObsidian so the
+// assembly logic is unit-testable without spawning a process.
+inline std::wstring BuildObsidianCliCommandLine(
+    const std::wstring& cliPath, const std::wstring& vaultName, const std::wstring& relativeFilePath) {
+    return QuoteCommandLineArgument(cliPath) + L" open vault=" + QuoteCommandLineArgument(vaultName) +
+           L" path=" + QuoteCommandLineArgument(relativeFilePath);
+}
+
+// Opens a note in Obsidian via its official CLI - no community plugin
+// dependency, no hand-rolled URI scheme. Returns false if the CLI couldn't
+// be located or CreateProcessW couldn't spawn it; this is a launch-dispatch
+// failure, not a guarantee Obsidian found the note.
+inline bool OpenNoteInObsidian(const std::wstring& vaultPath, const std::wstring& relativeNoteRef) {
+    const std::wstring cliPath = FindObsidianCliPath();
+    if (cliPath.empty()) return false;
+
+    const std::wstring vaultName = fs::path(vaultPath).filename().wstring();
+    const std::wstring relativeFilePath = relativeNoteRef + L".md";
+    const std::wstring commandLine = BuildObsidianCliCommandLine(cliPath, vaultName, relativeFilePath);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    // CreateProcessW may modify its command-line buffer in place - it must
+    // be a mutable buffer, not a string literal or a temporary's c_str().
+    std::vector<wchar_t> mutableCmd(commandLine.begin(), commandLine.end());
+    mutableCmd.push_back(L'\0');
+
+    const BOOL ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
+        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    if (!ok) return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
+// Converts a vault-relative note ref (forward slashes, no extension, as
+// produced by NoteIndex) back into an absolute filesystem path, for
+// operations that need one directly (e.g. revealing the file in Explorer).
+inline std::wstring ResolveNoteAbsolutePath(const std::wstring& vaultPath, const std::wstring& relativeNoteRef) {
+    std::wstring relBackslash(relativeNoteRef);
+    std::replace(relBackslash.begin(), relBackslash.end(), L'/', L'\\');
+    return (fs::path(vaultPath) / (relBackslash + L".md")).wstring();
 }
 
 }  // namespace obsidian
