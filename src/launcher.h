@@ -1377,7 +1377,7 @@ private:
                 leanlauncher::obsidian::GetTodayYmd(year, month, day);
                 entry.path = leanlauncher::obsidian::ResolveTodayPath(
                     dailyNoteConfig_, obsidianVaultPath_, year, month, day);
-                entry.name = L"Add to today's note: " + taskText;
+                entry.name = L"Add task: " + taskText;
                 entry.iconPath = L"notepad.exe";
             }
             entry.normalizedName = Normalize(entry.name);
@@ -1389,6 +1389,30 @@ private:
             constexpr int kStrongMatchThreshold = 9000;
             const size_t insertPos = (topAppScore >= kStrongMatchThreshold) ? 1 : 0;
             results_.insert(results_.begin() + std::min(insertPos, results_.size()), taskIdx);
+        }
+        std::wstring noteText;
+        if (leanlauncher::obsidian::TryParseNoteTextPrefix(input_.text, noteText)) {
+            AppEntry entry;
+            entry.category = AppCategory::NoteAdd;
+            entry.parameters = noteText;
+            if (obsidianVaultPath_.empty()) {
+                entry.name = L"Set up your vault in Settings";
+                entry.iconPath = L"notepad.exe";
+            } else {
+                int year = 0, month = 0, day = 0;
+                leanlauncher::obsidian::GetTodayYmd(year, month, day);
+                entry.path = leanlauncher::obsidian::ResolveTodayPath(
+                    dailyNoteConfig_, obsidianVaultPath_, year, month, day);
+                entry.name = L"Add to today's note: " + noteText;
+                entry.iconPath = L"notepad.exe";
+            }
+            entry.normalizedName = Normalize(entry.name);
+            const size_t noteAddIdx = apps_.size();
+            apps_.push_back(std::move(entry));
+            // Same strong-app-match guard as TaskAdd above.
+            constexpr int kStrongMatchThreshold = 9000;
+            const size_t insertPos = (topAppScore >= kStrongMatchThreshold) ? 1 : 0;
+            results_.insert(results_.begin() + std::min(insertPos, results_.size()), noteAddIdx);
         }
         std::wstring noteQuery;
         if (leanlauncher::obsidian::TryParseNoteJumpPrefix(input_.text, noteQuery)) {
@@ -1951,6 +1975,23 @@ private:
             }
             return;
         }
+        if (app.category == takeoff::AppCategory::NoteAdd) {
+            if (app.path.empty()) {
+                OpenSettings(SettingsCategory::Vault);
+                return;
+            }
+            Hide();
+            const bool ok = leanlauncher::obsidian::AppendNoteText(app.path, app.parameters);
+            if (!ok) {
+                ShowWindow(hwnd_, SW_SHOWNORMAL);
+                SetForegroundWindow(hwnd_);
+                SetFocus(hwnd_);
+                status_ = L"Could not write to your vault. Check Settings.";
+                ResetCaret();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return;
+        }
         if (app.category == takeoff::AppCategory::NoteJump) {
             if (app.path.empty()) {
                 OpenSettings(SettingsCategory::Vault);
@@ -2121,6 +2162,24 @@ private:
             } else if (action == 1) {
                 const bool copied = CopyText(app.parameters);
                 status_ = copied ? L"Task text copied" : L"Clipboard is busy. Try again.";
+                ResetCaret();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return;
+            } else if (action == 2) {
+                if (!app.path.empty()) {
+                    ShellExecuteW(nullptr, L"open", app.path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
+                Hide();
+                return;
+            }
+        }
+        if (app.category == takeoff::AppCategory::NoteAdd) {
+            if (action == 0) {
+                LaunchSelected(false);
+                return;
+            } else if (action == 1) {
+                const bool copied = CopyText(app.parameters);
+                status_ = copied ? L"Text copied" : L"Clipboard is busy. Try again.";
                 ResetCaret();
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return;
@@ -2350,7 +2409,8 @@ private:
                 if (app.category == takeoff::AppCategory::Calculator) {
                     CopyText(app.path);
                     Hide();
-                } else if (app.category == takeoff::AppCategory::TaskAdd) {
+                } else if (app.category == takeoff::AppCategory::TaskAdd ||
+                           app.category == takeoff::AppCategory::NoteAdd) {
                     LaunchSelected(false);
                 } else if (!settings_.administratorHotkey.disabled) {
                     LaunchSelected(true);
@@ -3121,8 +3181,9 @@ private:
                     : (app.category == takeoff::AppCategory::System ? L"System"
                     : (app.category == takeoff::AppCategory::Folder ? L"Folder"
                     : (app.category == takeoff::AppCategory::File ? L"File"
-                    : (app.category == takeoff::AppCategory::TaskAdd ? L"Note"
-                    : (app.category == takeoff::AppCategory::NoteJump ? L"Jump" : L"Application")))));
+                    : (app.category == takeoff::AppCategory::TaskAdd ? L"Task"
+                    : (app.category == takeoff::AppCategory::NoteAdd ? L"Note"
+                    : (app.category == takeoff::AppCategory::NoteJump ? L"Jump" : L"Application"))))));
                 Text(categoryLabel,
                     D2D1::RectF(width_ - 154, top, width_ - 28, top + 40), hintFormat_.Get(),
                     highContrast_ && selected ? textColor : Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -3172,6 +3233,7 @@ private:
         const AppEntry& app = apps_[results_[selected_]];
         if (app.category == takeoff::AppCategory::Calculator ||
             app.category == takeoff::AppCategory::TaskAdd ||
+            app.category == takeoff::AppCategory::NoteAdd ||
             app.category == takeoff::AppCategory::NoteJump) return false;
         if (settings_.administratorHotkey.disabled) return false;
         const float top = FooterTop();
@@ -3374,6 +3436,10 @@ private:
                     hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
                 Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
             } else if (app.category == takeoff::AppCategory::TaskAdd) {
+                Text(L"Add task", D2D1::RectF(24, top, 156, height_),
+                    hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
+                Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
+            } else if (app.category == takeoff::AppCategory::NoteAdd) {
                 Text(L"Add to note", D2D1::RectF(24, top, 156, height_),
                     hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
                 Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
@@ -3431,18 +3497,21 @@ private:
             hintFormat_.Get(), Muted());
         const bool isCalc = (app.category == takeoff::AppCategory::Calculator);
         const bool isTaskAdd = (app.category == takeoff::AppCategory::TaskAdd);
+        const bool isNoteAdd = (app.category == takeoff::AppCategory::NoteAdd);
         const bool isNoteJump = (app.category == takeoff::AppCategory::NoteJump);
         const bool isFileOrFolder = (app.category == takeoff::AppCategory::File ||
                                      app.category == takeoff::AppCategory::Folder);
         const wchar_t* appLabels[] = {L"Open as Administrator", L"Copy app name", L"Copy launch path"};
         const wchar_t* fileLabels[] = {L"Open", L"Open containing folder", L"Copy file path"};
         const wchar_t* calcLabels[] = {L"Copy result", L"Copy calculation", L"Open Windows Calculator"};
-        const wchar_t* taskLabels[] = {L"Add to note", L"Copy task text", L"Open today's note"};
+        const wchar_t* taskLabels[] = {L"Add task", L"Copy task text", L"Open today's note"};
+        const wchar_t* noteAddLabels[] = {L"Add to note", L"Copy text", L"Open today's note"};
         const wchar_t* noteLabels[] = {L"Open in Obsidian", L"Copy note title", L"Reveal in Explorer"};
         const wchar_t** labels = isCalc ? calcLabels
             : (isTaskAdd ? taskLabels
+            : (isNoteAdd ? noteAddLabels
             : (isNoteJump ? noteLabels
-            : (isFileOrFolder ? fileLabels : appLabels)));
+            : (isFileOrFolder ? fileLabels : appLabels))));
         for (int i = 0; i < 3; ++i) {
             const float top = rect.top + 32 + i * 36;
             const auto row = D2D1::RectF(rect.left + 6, top, rect.right - 6, top + 34);

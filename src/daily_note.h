@@ -100,13 +100,13 @@ inline void GetTodayYmd(int& year, int& month, int& day) {
     day = st.wDay;
 }
 
-// Recognizes "task <text>" (case-insensitive prefix, at least one
-// non-whitespace character required after it). Leading spaces immediately
-// after "task" are trimmed; the rest of the input is used verbatim as the
-// task text (not further parsed).
+// Recognizes "T <text>" (case-insensitive prefix, at least one non-whitespace
+// character required after it). Leading spaces immediately after "T" are
+// trimmed; the rest of the input is used verbatim as the task text (not
+// further parsed).
 inline bool TryParseTaskPrefix(const std::wstring& input, std::wstring& outText) {
-    constexpr wchar_t kPrefix[] = L"task ";
-    constexpr size_t kPrefixLen = 5;
+    constexpr wchar_t kPrefix[] = L"T ";
+    constexpr size_t kPrefixLen = 2;
     if (input.size() <= kPrefixLen) return false;
     if (_wcsnicmp(input.c_str(), kPrefix, kPrefixLen) != 0) return false;
 
@@ -118,16 +118,43 @@ inline bool TryParseTaskPrefix(const std::wstring& input, std::wstring& outText)
     return !outText.empty();
 }
 
-// Builds a Markdown checklist line for one task. Strips embedded CR/LF so a
-// pasted multi-line "task" can never split into more than one list item.
-inline std::wstring BuildTaskLine(std::wstring_view text) {
+// Recognizes "a <text>" (case-insensitive prefix, at least one non-whitespace
+// character required after it) - same trimming rules as TryParseTaskPrefix.
+// Appends plain text (not a checklist item) to today's daily note.
+inline bool TryParseNoteTextPrefix(const std::wstring& input, std::wstring& outText) {
+    constexpr wchar_t kPrefix[] = L"a ";
+    constexpr size_t kPrefixLen = 2;
+    if (input.size() <= kPrefixLen) return false;
+    if (_wcsnicmp(input.c_str(), kPrefix, kPrefixLen) != 0) return false;
+
+    std::wstring rest = input.substr(kPrefixLen);
+    const size_t start = rest.find_first_not_of(L' ');
+    if (start == std::wstring::npos) return false;
+
+    outText = rest.substr(start);
+    return !outText.empty();
+}
+
+// Strips embedded CR/LF from `text` so a pasted multi-line entry can never
+// split into more than one line/list item.
+inline std::wstring StripLineBreaks(std::wstring_view text) {
     std::wstring clean;
     clean.reserve(text.size());
     for (wchar_t ch : text) {
         if (ch == L'\r' || ch == L'\n') continue;
         clean.push_back(ch);
     }
-    return L"- [ ] " + clean + L"\n";
+    return clean;
+}
+
+// Builds a Markdown checklist line for one task.
+inline std::wstring BuildTaskLine(std::wstring_view text) {
+    return L"- [ ] " + StripLineBreaks(text) + L"\n";
+}
+
+// Builds a plain text line (no bullet, no checklist) for the "a " prefix.
+inline std::wstring BuildPlainLine(std::wstring_view text) {
+    return StripLineBreaks(text) + L"\n";
 }
 
 inline std::wstring FormatIsoTimestamp() {
@@ -138,12 +165,12 @@ inline std::wstring FormatIsoTimestamp() {
     return buf;
 }
 
-// Appends one task line to the note at notePath, creating the file (with
-// parent directories and minimal frontmatter) if it doesn't exist yet.
-// Returns false on any I/O failure - the caller must surface this to the
-// user rather than silently dropping the task (spec: "task never silently
-// dropped").
-inline bool AppendTask(const std::wstring& notePath, std::wstring_view taskText) {
+// Appends one already-formatted line to the note at notePath, creating the
+// file (with parent directories and minimal frontmatter) if it doesn't exist
+// yet. Returns false on any I/O failure - callers must surface this to the
+// user rather than silently dropping the entry (spec: "task never silently
+// dropped", and the same guarantee extends to plain daily-note text).
+inline bool AppendLine(const std::wstring& notePath, const std::wstring& line) {
     std::error_code ec;
     const fs::path path(notePath);
     fs::create_directories(path.parent_path(), ec);
@@ -152,7 +179,7 @@ inline bool AppendTask(const std::wstring& notePath, std::wstring_view taskText)
 
     // Obsidian doesn't guarantee a trailing newline on saved notes. Appending
     // straight onto a file whose last byte isn't '\n' would merge the new
-    // task into the previous line, corrupting both. Detect that case with a
+    // line into the previous one, corrupting both. Detect that case with a
     // separate read handle (FILE_APPEND_DATA doesn't reliably support reads)
     // and prepend a newline to compensate.
     bool needsLeadingNewline = false;
@@ -179,7 +206,7 @@ inline bool AppendTask(const std::wstring& notePath, std::wstring_view taskText)
     } else if (needsLeadingNewline) {
         content = L"\n";
     }
-    content += BuildTaskLine(taskText);
+    content += line;
 
     bool ok = false;
     const int utf8Len = WideCharToMultiByte(CP_UTF8, 0, content.data(), static_cast<int>(content.size()),
@@ -194,6 +221,16 @@ inline bool AppendTask(const std::wstring& notePath, std::wstring_view taskText)
     }
     CloseHandle(file);
     return ok;
+}
+
+// Appends one task checklist line to the note at notePath.
+inline bool AppendTask(const std::wstring& notePath, std::wstring_view taskText) {
+    return AppendLine(notePath, BuildTaskLine(taskText));
+}
+
+// Appends one plain text line (the "a " prefix) to the note at notePath.
+inline bool AppendNoteText(const std::wstring& notePath, std::wstring_view text) {
+    return AppendLine(notePath, BuildPlainLine(text));
 }
 
 }  // namespace obsidian

@@ -1111,15 +1111,15 @@ int main() {
 
     {
         std::wstring text;
-        Check(TryParseTaskPrefix(L"task buy milk", text) && text == L"buy milk",
-            "TryParseTaskPrefix parses basic 'task <text>'");
-        Check(TryParseTaskPrefix(L"Task buy milk", text) && text == L"buy milk",
+        Check(TryParseTaskPrefix(L"T buy milk", text) && text == L"buy milk",
+            "TryParseTaskPrefix parses basic 'T <text>'");
+        Check(TryParseTaskPrefix(L"t buy milk", text) && text == L"buy milk",
             "TryParseTaskPrefix is case-insensitive on the prefix");
-        Check(TryParseTaskPrefix(L"task   buy milk", text) && text == L"buy milk",
+        Check(TryParseTaskPrefix(L"T   buy milk", text) && text == L"buy milk",
             "TryParseTaskPrefix trims extra spaces after the prefix");
-        Check(!TryParseTaskPrefix(L"task", text), "TryParseTaskPrefix rejects bare 'task' with no text");
-        Check(!TryParseTaskPrefix(L"task ", text), "TryParseTaskPrefix rejects 'task ' with only trailing space");
-        Check(!TryParseTaskPrefix(L"tasker 5", text), "TryParseTaskPrefix requires a space after 'task'");
+        Check(!TryParseTaskPrefix(L"T", text), "TryParseTaskPrefix rejects bare 'T' with no text");
+        Check(!TryParseTaskPrefix(L"T ", text), "TryParseTaskPrefix rejects 'T ' with only trailing space");
+        Check(!TryParseTaskPrefix(L"Trying 5", text), "TryParseTaskPrefix requires a space after 'T'");
         Check(!TryParseTaskPrefix(L"notepad", text), "TryParseTaskPrefix rejects unrelated queries");
         Check(!TryParseTaskPrefix(L"", text), "TryParseTaskPrefix rejects empty input");
     }
@@ -1201,7 +1201,7 @@ int main() {
     // 13. Task-add integration: prefix detection -> synthetic result -> append
     {
         std::wstring taskText;
-        Check(TryParseTaskPrefix(L"task write plan", taskText) && taskText == L"write plan",
+        Check(TryParseTaskPrefix(L"T write plan", taskText) && taskText == L"write plan",
             "task-add pipeline: prefix parses correctly before result construction");
 
         wchar_t tempDir[MAX_PATH]{};
@@ -1226,19 +1226,72 @@ int main() {
         RemoveDirectoryW(vaultRoot.c_str());
     }
 
+    {
+        std::wstring text;
+        Check(TryParseNoteTextPrefix(L"a buy milk", text) && text == L"buy milk",
+            "TryParseNoteTextPrefix parses basic 'a <text>'");
+        Check(TryParseNoteTextPrefix(L"A buy milk", text) && text == L"buy milk",
+            "TryParseNoteTextPrefix is case-insensitive on the prefix");
+        Check(TryParseNoteTextPrefix(L"a   buy milk", text) && text == L"buy milk",
+            "TryParseNoteTextPrefix trims extra spaces after the prefix");
+        Check(!TryParseNoteTextPrefix(L"a", text), "TryParseNoteTextPrefix rejects bare 'a' with no text");
+        Check(!TryParseNoteTextPrefix(L"a ", text), "TryParseNoteTextPrefix rejects 'a ' with only trailing space");
+        Check(!TryParseNoteTextPrefix(L"about 5", text), "TryParseNoteTextPrefix requires a space after 'a'");
+        Check(!TryParseNoteTextPrefix(L"notepad", text), "TryParseNoteTextPrefix rejects unrelated queries");
+        Check(!TryParseNoteTextPrefix(L"", text), "TryParseNoteTextPrefix rejects empty input");
+    }
+
+    {
+        Check(BuildPlainLine(L"buy milk") == L"buy milk\n", "BuildPlainLine basic construction");
+        Check(BuildPlainLine(L"line1\r\nline2") == L"line1line2\n",
+            "BuildPlainLine strips embedded CR/LF so one entry never becomes two lines");
+        Check(BuildPlainLine(L"") == L"\n", "BuildPlainLine tolerates empty text");
+        Check(BuildPlainLine(L"[[Some Note]] and #tag") == L"[[Some Note]] and #tag\n",
+            "BuildPlainLine passes through wikilinks and tags unescaped (valid Markdown as-is)");
+    }
+
+    // 14. Note-add integration: prefix detection -> synthetic result -> append
+    {
+        std::wstring noteText;
+        Check(TryParseNoteTextPrefix(L"a write plan", noteText) && noteText == L"write plan",
+            "note-add pipeline: prefix parses correctly before result construction");
+
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring vaultRoot = std::wstring(tempDir) + L"LeanLauncherTestNoteAddVault";
+        CreateDirectoryW(vaultRoot.c_str(), nullptr);
+
+        DailyNoteConfig config;  // empty folder + default format = vault root note
+        int year = 0, month = 0, day = 0;
+        GetTodayYmd(year, month, day);
+        const std::wstring notePath = ResolveTodayPath(config, vaultRoot, year, month, day);
+        DeleteFileW(notePath.c_str());
+
+        Check(AppendNoteText(notePath, noteText), "note-add pipeline: AppendNoteText writes the resolved path");
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        Check(ss.str().find("write plan\n") != std::string::npos &&
+              ss.str().find("- [ ] write plan\n") == std::string::npos,
+            "note-add pipeline: end-to-end content matches what was typed, as plain text (no checklist marker)");
+        check.close();
+        DeleteFileW(notePath.c_str());
+        RemoveDirectoryW(vaultRoot.c_str());
+    }
+
     // --- NoteIndex Tests (Task 3) ---
     {
         using namespace leanlauncher::obsidian;
         std::wstring q;
-        Check(TryParseNoteJumpPrefix(L"note standup", q) && q == L"standup",
-            "TryParseNoteJumpPrefix parses basic 'note <text>'");
-        Check(TryParseNoteJumpPrefix(L"Note standup", q) && q == L"standup",
+        Check(TryParseNoteJumpPrefix(L"O standup", q) && q == L"standup",
+            "TryParseNoteJumpPrefix parses basic 'O <text>'");
+        Check(TryParseNoteJumpPrefix(L"o standup", q) && q == L"standup",
             "TryParseNoteJumpPrefix is case-insensitive on the prefix");
-        Check(TryParseNoteJumpPrefix(L"note   standup", q) && q == L"standup",
+        Check(TryParseNoteJumpPrefix(L"O   standup", q) && q == L"standup",
             "TryParseNoteJumpPrefix trims extra spaces after the prefix");
-        Check(!TryParseNoteJumpPrefix(L"note", q), "TryParseNoteJumpPrefix rejects bare 'note' with no text");
-        Check(!TryParseNoteJumpPrefix(L"note ", q), "TryParseNoteJumpPrefix rejects 'note ' with only trailing space");
-        Check(!TryParseNoteJumpPrefix(L"notepad", q), "TryParseNoteJumpPrefix requires a space after 'note'");
+        Check(!TryParseNoteJumpPrefix(L"O", q), "TryParseNoteJumpPrefix rejects bare 'O' with no text");
+        Check(!TryParseNoteJumpPrefix(L"O ", q), "TryParseNoteJumpPrefix rejects 'O ' with only trailing space");
+        Check(!TryParseNoteJumpPrefix(L"Open", q), "TryParseNoteJumpPrefix requires a space after 'O'");
         Check(!TryParseNoteJumpPrefix(L"", q), "TryParseNoteJumpPrefix rejects empty input");
     }
 
@@ -1312,7 +1365,7 @@ int main() {
         }
 
         std::wstring query;
-        Check(TryParseNoteJumpPrefix(L"note weekly", query) && query == L"weekly",
+        Check(TryParseNoteJumpPrefix(L"O weekly", query) && query == L"weekly",
             "note-jump prefix parsing feeds a clean query into NoteIndex::Search");
         auto results = NoteIndex::Instance().Search(query, 10);
         Check(!results.empty() && results[0].title == L"Weekly Review",

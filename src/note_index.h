@@ -50,12 +50,12 @@ struct NoteIndexSnapshot {
     size_t totalCount = 0;
 };
 
-// Recognizes "note <text>" (case-insensitive prefix, at least one
+// Recognizes "O <text>" (case-insensitive prefix, at least one
 // non-whitespace character required after it) - same trimming rules as
 // daily_note.h's TryParseTaskPrefix.
 inline bool TryParseNoteJumpPrefix(const std::wstring& input, std::wstring& outQuery) {
-    constexpr wchar_t kPrefix[] = L"note ";
-    constexpr size_t kPrefixLen = 5;
+    constexpr wchar_t kPrefix[] = L"O ";
+    constexpr size_t kPrefixLen = 2;
     if (input.size() <= kPrefixLen) return false;
     if (_wcsnicmp(input.c_str(), kPrefix, kPrefixLen) != 0) return false;
 
