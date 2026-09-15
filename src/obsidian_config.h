@@ -10,6 +10,7 @@
 #include <shlobj.h>
 
 #include <algorithm>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -28,6 +29,50 @@ struct DailyNoteConfig {
     std::wstring format = L"YYYY-MM-DD";
     bool found = false;
 };
+
+// Recognizes "<prefix> <text>" (case-insensitive on the prefix, at least one
+// non-whitespace character required after it). Leading spaces immediately
+// after the prefix are trimmed; the rest of the input is used verbatim as
+// the result text (not further parsed). Generic replacement for what used
+// to be three hand-written, per-action copies of this same function - the
+// prefix is now a runtime Settings value, not a compile-time constant.
+inline bool TryParsePrefix(const std::wstring& input, const std::wstring& prefix, std::wstring& outText) {
+    if (prefix.empty()) return false;
+    const std::wstring fullPrefix = prefix + L" ";
+    if (input.size() <= fullPrefix.size()) return false;
+    if (_wcsnicmp(input.c_str(), fullPrefix.c_str(), fullPrefix.size()) != 0) return false;
+
+    std::wstring rest = input.substr(fullPrefix.size());
+    const size_t start = rest.find_first_not_of(L' ');
+    if (start == std::wstring::npos) return false;
+
+    outText = rest.substr(start);
+    return !outText.empty();
+}
+
+// Returns a user-facing error message if the three configured action
+// prefixes aren't all non-empty and mutually distinct (case-insensitive),
+// or nullptr if they're valid. Used to reject an in-progress Settings edit
+// before it's saved - two prefixes colliding would make one action
+// permanently unreachable, and an empty prefix would match every input.
+inline const wchar_t* FindPrefixConflict(
+    const std::wstring& vaultSearchPrefix, const std::wstring& taskPrefix, const std::wstring& noteAddPrefix) {
+    if (vaultSearchPrefix.empty() || taskPrefix.empty() || noteAddPrefix.empty()) {
+        return L"Prefix cannot be empty.";
+    }
+    auto ciEqual = [](const std::wstring& a, const std::wstring& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (towlower(a[i]) != towlower(b[i])) return false;
+        }
+        return true;
+    };
+    if (ciEqual(vaultSearchPrefix, taskPrefix) || ciEqual(vaultSearchPrefix, noteAddPrefix) ||
+        ciEqual(taskPrefix, noteAddPrefix)) {
+        return L"Prefixes must be unique.";
+    }
+    return nullptr;
+}
 
 // Reads a whole file as raw UTF-8 bytes. Returns an empty string if the file
 // does not exist or cannot be read (never throws).

@@ -50,23 +50,6 @@ struct NoteIndexSnapshot {
     size_t totalCount = 0;
 };
 
-// Recognizes "O <text>" (case-insensitive prefix, at least one
-// non-whitespace character required after it) - same trimming rules as
-// daily_note.h's TryParseTaskPrefix.
-inline bool TryParseNoteJumpPrefix(const std::wstring& input, std::wstring& outQuery) {
-    constexpr wchar_t kPrefix[] = L"O ";
-    constexpr size_t kPrefixLen = 2;
-    if (input.size() <= kPrefixLen) return false;
-    if (_wcsnicmp(input.c_str(), kPrefix, kPrefixLen) != 0) return false;
-
-    std::wstring rest = input.substr(kPrefixLen);
-    const size_t start = rest.find_first_not_of(L' ');
-    if (start == std::wstring::npos) return false;
-
-    outQuery = rest.substr(start);
-    return !outQuery.empty();
-}
-
 // Builds a NoteItem from a vault root and an absolute note path. Purely
 // lexical (fs::relative/parent_path/stem don't touch disk), so this is
 // unit-testable without a real filesystem.

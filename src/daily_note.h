@@ -100,41 +100,6 @@ inline void GetTodayYmd(int& year, int& month, int& day) {
     day = st.wDay;
 }
 
-// Recognizes "T <text>" (case-insensitive prefix, at least one non-whitespace
-// character required after it). Leading spaces immediately after "T" are
-// trimmed; the rest of the input is used verbatim as the task text (not
-// further parsed).
-inline bool TryParseTaskPrefix(const std::wstring& input, std::wstring& outText) {
-    constexpr wchar_t kPrefix[] = L"T ";
-    constexpr size_t kPrefixLen = 2;
-    if (input.size() <= kPrefixLen) return false;
-    if (_wcsnicmp(input.c_str(), kPrefix, kPrefixLen) != 0) return false;
-
-    std::wstring rest = input.substr(kPrefixLen);
-    const size_t start = rest.find_first_not_of(L' ');
-    if (start == std::wstring::npos) return false;
-
-    outText = rest.substr(start);
-    return !outText.empty();
-}
-
-// Recognizes "a <text>" (case-insensitive prefix, at least one non-whitespace
-// character required after it) - same trimming rules as TryParseTaskPrefix.
-// Appends plain text (not a checklist item) to today's daily note.
-inline bool TryParseNoteTextPrefix(const std::wstring& input, std::wstring& outText) {
-    constexpr wchar_t kPrefix[] = L"a ";
-    constexpr size_t kPrefixLen = 2;
-    if (input.size() <= kPrefixLen) return false;
-    if (_wcsnicmp(input.c_str(), kPrefix, kPrefixLen) != 0) return false;
-
-    std::wstring rest = input.substr(kPrefixLen);
-    const size_t start = rest.find_first_not_of(L' ');
-    if (start == std::wstring::npos) return false;
-
-    outText = rest.substr(start);
-    return !outText.empty();
-}
-
 // Strips embedded CR/LF from `text` so a pasted multi-line entry can never
 // split into more than one line/list item.
 inline std::wstring StripLineBreaks(std::wstring_view text) {

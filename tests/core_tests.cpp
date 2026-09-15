@@ -1110,18 +1110,31 @@ int main() {
     }
 
     {
+        using namespace leanlauncher::obsidian;
         std::wstring text;
-        Check(TryParseTaskPrefix(L"T buy milk", text) && text == L"buy milk",
-            "TryParseTaskPrefix parses basic 'T <text>'");
-        Check(TryParseTaskPrefix(L"t buy milk", text) && text == L"buy milk",
-            "TryParseTaskPrefix is case-insensitive on the prefix");
-        Check(TryParseTaskPrefix(L"T   buy milk", text) && text == L"buy milk",
-            "TryParseTaskPrefix trims extra spaces after the prefix");
-        Check(!TryParseTaskPrefix(L"T", text), "TryParseTaskPrefix rejects bare 'T' with no text");
-        Check(!TryParseTaskPrefix(L"T ", text), "TryParseTaskPrefix rejects 'T ' with only trailing space");
-        Check(!TryParseTaskPrefix(L"Trying 5", text), "TryParseTaskPrefix requires a space after 'T'");
-        Check(!TryParseTaskPrefix(L"notepad", text), "TryParseTaskPrefix rejects unrelated queries");
-        Check(!TryParseTaskPrefix(L"", text), "TryParseTaskPrefix rejects empty input");
+        Check(TryParsePrefix(L"T buy milk", L"T", text) && text == L"buy milk",
+            "TryParsePrefix parses basic '<prefix> <text>'");
+        Check(TryParsePrefix(L"t buy milk", L"T", text) && text == L"buy milk",
+            "TryParsePrefix is case-insensitive on the prefix");
+        Check(TryParsePrefix(L"T   buy milk", L"T", text) && text == L"buy milk",
+            "TryParsePrefix trims extra spaces after the prefix");
+        Check(!TryParsePrefix(L"T", L"T", text), "TryParsePrefix rejects a bare prefix with no text");
+        Check(!TryParsePrefix(L"T ", L"T", text), "TryParsePrefix rejects a prefix with only trailing space");
+        Check(!TryParsePrefix(L"Trying 5", L"T", text), "TryParsePrefix requires a space right after the prefix");
+        Check(!TryParsePrefix(L"notepad", L"T", text), "TryParsePrefix rejects unrelated queries");
+        Check(!TryParsePrefix(L"", L"T", text), "TryParsePrefix rejects empty input");
+        Check(!TryParsePrefix(L"O standup", L"", text), "TryParsePrefix rejects an empty configured prefix");
+        Check(TryParsePrefix(L"vault standup", L"vault", text) && text == L"standup",
+            "TryParsePrefix works with a multi-character prefix, not just a single letter");
+
+        Check(FindPrefixConflict(L"O", L"T", L"a") == nullptr,
+            "FindPrefixConflict accepts three distinct non-empty prefixes");
+        Check(FindPrefixConflict(L"", L"T", L"a") != nullptr,
+            "FindPrefixConflict rejects an empty prefix");
+        Check(FindPrefixConflict(L"T", L"T", L"a") != nullptr,
+            "FindPrefixConflict rejects an exact duplicate");
+        Check(FindPrefixConflict(L"t", L"T", L"a") != nullptr,
+            "FindPrefixConflict rejects a case-insensitive duplicate");
     }
 
     {
@@ -1201,7 +1214,7 @@ int main() {
     // 13. Task-add integration: prefix detection -> synthetic result -> append
     {
         std::wstring taskText;
-        Check(TryParseTaskPrefix(L"T write plan", taskText) && taskText == L"write plan",
+        Check(TryParsePrefix(L"T write plan", L"T", taskText) && taskText == L"write plan",
             "task-add pipeline: prefix parses correctly before result construction");
 
         wchar_t tempDir[MAX_PATH]{};
@@ -1227,21 +1240,6 @@ int main() {
     }
 
     {
-        std::wstring text;
-        Check(TryParseNoteTextPrefix(L"a buy milk", text) && text == L"buy milk",
-            "TryParseNoteTextPrefix parses basic 'a <text>'");
-        Check(TryParseNoteTextPrefix(L"A buy milk", text) && text == L"buy milk",
-            "TryParseNoteTextPrefix is case-insensitive on the prefix");
-        Check(TryParseNoteTextPrefix(L"a   buy milk", text) && text == L"buy milk",
-            "TryParseNoteTextPrefix trims extra spaces after the prefix");
-        Check(!TryParseNoteTextPrefix(L"a", text), "TryParseNoteTextPrefix rejects bare 'a' with no text");
-        Check(!TryParseNoteTextPrefix(L"a ", text), "TryParseNoteTextPrefix rejects 'a ' with only trailing space");
-        Check(!TryParseNoteTextPrefix(L"about 5", text), "TryParseNoteTextPrefix requires a space after 'a'");
-        Check(!TryParseNoteTextPrefix(L"notepad", text), "TryParseNoteTextPrefix rejects unrelated queries");
-        Check(!TryParseNoteTextPrefix(L"", text), "TryParseNoteTextPrefix rejects empty input");
-    }
-
-    {
         Check(BuildPlainLine(L"buy milk") == L"buy milk\n", "BuildPlainLine basic construction");
         Check(BuildPlainLine(L"line1\r\nline2") == L"line1line2\n",
             "BuildPlainLine strips embedded CR/LF so one entry never becomes two lines");
@@ -1253,7 +1251,7 @@ int main() {
     // 14. Note-add integration: prefix detection -> synthetic result -> append
     {
         std::wstring noteText;
-        Check(TryParseNoteTextPrefix(L"a write plan", noteText) && noteText == L"write plan",
+        Check(TryParsePrefix(L"a write plan", L"a", noteText) && noteText == L"write plan",
             "note-add pipeline: prefix parses correctly before result construction");
 
         wchar_t tempDir[MAX_PATH]{};
@@ -1280,21 +1278,6 @@ int main() {
     }
 
     // --- NoteIndex Tests (Task 3) ---
-    {
-        using namespace leanlauncher::obsidian;
-        std::wstring q;
-        Check(TryParseNoteJumpPrefix(L"O standup", q) && q == L"standup",
-            "TryParseNoteJumpPrefix parses basic 'O <text>'");
-        Check(TryParseNoteJumpPrefix(L"o standup", q) && q == L"standup",
-            "TryParseNoteJumpPrefix is case-insensitive on the prefix");
-        Check(TryParseNoteJumpPrefix(L"O   standup", q) && q == L"standup",
-            "TryParseNoteJumpPrefix trims extra spaces after the prefix");
-        Check(!TryParseNoteJumpPrefix(L"O", q), "TryParseNoteJumpPrefix rejects bare 'O' with no text");
-        Check(!TryParseNoteJumpPrefix(L"O ", q), "TryParseNoteJumpPrefix rejects 'O ' with only trailing space");
-        Check(!TryParseNoteJumpPrefix(L"Open", q), "TryParseNoteJumpPrefix requires a space after 'O'");
-        Check(!TryParseNoteJumpPrefix(L"", q), "TryParseNoteJumpPrefix rejects empty input");
-    }
-
     {
         using namespace leanlauncher::obsidian;
         const fs::path vaultRoot(L"D:\\Vault");
@@ -1365,7 +1348,7 @@ int main() {
         }
 
         std::wstring query;
-        Check(TryParseNoteJumpPrefix(L"O weekly", query) && query == L"weekly",
+        Check(TryParsePrefix(L"O weekly", L"O", query) && query == L"weekly",
             "note-jump prefix parsing feeds a clean query into NoteIndex::Search");
         auto results = NoteIndex::Instance().Search(query, 10);
         Check(!results.empty() && results[0].title == L"Weekly Review",
