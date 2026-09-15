@@ -212,6 +212,19 @@ private:
             }
             return 0;
         }
+        case kNoteOpenResultMessage: {
+            // Success needs no UI: the launcher already hid itself and
+            // Obsidian now has the foreground.
+            if (wParam == 0) {
+                ShowWindow(hwnd_, SW_SHOWNORMAL);
+                SetForegroundWindow(hwnd_);
+                SetFocus(hwnd_);
+                status_ = L"Could not open this note in Obsidian.";
+                ResetCaret();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        }
         case kIconReadyMessage: {
             std::unique_ptr<IconResult> result(reinterpret_cast<IconResult*>(lParam));
             // Drop stale answers (e.g. a pre-DPI-change size) and duplicates.
@@ -450,6 +463,7 @@ private:
             if (updateThread_.joinable()) updateThread_.join();
             if constexpr (!kUiTest) {
                 FileIndex::Instance().Stop();
+                leanlauncher::obsidian::NoteIndex::Instance().Stop();
             }
             KillTimer(hwnd_, kCaretTimer);
             KillTimer(hwnd_, kHotkeyTimer);
@@ -1458,7 +1472,9 @@ private:
         }
         obsidianVaultPath_ = knownVaults_[nextIndex];
         dailyNoteConfig_ = leanlauncher::obsidian::ReadDailyNoteConfig(obsidianVaultPath_);
-        leanlauncher::obsidian::NoteIndex::Instance().Restart(obsidianVaultPath_, hwnd_);
+        if constexpr (!kUiTest) {
+            leanlauncher::obsidian::NoteIndex::Instance().Restart(obsidianVaultPath_, hwnd_);
+        }
         SaveSettings();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -1941,14 +1957,22 @@ private:
                 return;
             }
             Hide();
-            const bool ok = leanlauncher::obsidian::OpenNoteInObsidian(obsidianVaultPath_, app.path);
-            if (!ok) {
-                ShowWindow(hwnd_, SW_SHOWNORMAL);
-                SetForegroundWindow(hwnd_);
-                SetFocus(hwnd_);
-                status_ = L"Could not open this note in Obsidian.";
-                ResetCaret();
-                InvalidateRect(hwnd_, nullptr, FALSE);
+            // The CLI can take seconds to answer on a cold Obsidian start, so
+            // the spawn runs on a detached worker that only calls
+            // OpenNoteInObsidian and posts its verdict back. Blocking here
+            // would stall the message pump, and with it the global hotkey and
+            // the tray icon.
+            const HWND hwnd = hwnd_;
+            const std::wstring vaultPath = obsidianVaultPath_;
+            const std::wstring noteRef = app.path;
+            try {
+                std::thread([hwnd, vaultPath, noteRef] {
+                    const bool opened = leanlauncher::obsidian::OpenNoteInObsidian(vaultPath, noteRef);
+                    PostMessageW(hwnd, leanlauncher::obsidian::kNoteOpenResultMessage,
+                        opened ? 1 : 0, 0);
+                }).detach();
+            } catch (const std::system_error&) {
+                PostMessageW(hwnd, leanlauncher::obsidian::kNoteOpenResultMessage, 0, 0);
             }
             return;
         }

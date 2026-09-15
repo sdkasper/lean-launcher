@@ -232,10 +232,18 @@ inline std::wstring BuildObsidianCliCommandLine(
            L" open path=" + QuoteCommandLineArgument(relativeFilePath);
 }
 
+// Posted back to the launcher window when a background note-open attempt
+// finishes; wParam is 1 on success, 0 on failure. WM_APP + 8 and + 9 are
+// taken by kFilesReadyMessage and kNotesReadyMessage, + 1 through + 7 by
+// main.cpp's own constants.
+constexpr UINT kNoteOpenResultMessage = WM_APP + 10;
+
 // Opens a note in Obsidian via its official CLI - no community plugin
 // dependency, no hand-rolled URI scheme. Returns false if the CLI couldn't
 // be located or CreateProcessW couldn't spawn it; this is a launch-dispatch
-// failure, not a guarantee Obsidian found the note.
+// failure, not a guarantee Obsidian found the note. Blocks for as long as
+// the CLI takes to answer (seconds, on a cold Obsidian start), so callers
+// must run it off the UI thread.
 inline bool OpenNoteInObsidian(const std::wstring& vaultPath, const std::wstring& relativeNoteRef) {
     const std::wstring cliPath = FindObsidianCliPath();
     if (cliPath.empty()) return false;
@@ -263,7 +271,7 @@ inline bool OpenNoteInObsidian(const std::wstring& vaultPath, const std::wstring
     si.dwFlags |= STARTF_USESTDHANDLES;
     si.hStdOutput = hWritePipe;
     si.hStdError = hWritePipe;
-    si.hStdInput = nullptr;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     PROCESS_INFORMATION pi{};
     // CreateProcessW may modify its command-line buffer in place - it must
     // be a mutable buffer, not a string literal or a temporary's c_str().
@@ -282,36 +290,36 @@ inline bool OpenNoteInObsidian(const std::wstring& vaultPath, const std::wstring
         return false;
     }
 
+    // Drain the pipe to EOF before waiting on the process, not after: a child
+    // that wrote more than the pipe buffer holds would block forever on its
+    // own write if this waited for exit first. EOF arrives when the child
+    // closes its end, so this loop ends when the child does.
+    std::string output;
+    char buf[512];
+    DWORD bytesRead = 0;
+    while (ReadFile(hReadPipe, buf, sizeof(buf), &bytesRead, nullptr) && bytesRead > 0) {
+        output.append(buf, bytesRead);
+        if (output.size() > 4096) break;
+    }
+    CloseHandle(hReadPipe);
+
     // Bounded wait, not an indefinite block: per Obsidian's own CLI docs,
     // "If Obsidian is not running, the first command you run launches
-    // Obsidian" - a cold start can take a few seconds, but this call runs
-    // synchronously on the UI thread and must not hang it indefinitely.
+    // Obsidian" - a cold start can take a few seconds.
     constexpr DWORD kTimeoutMs = 10000;
     bool succeeded = false;
     if (WaitForSingleObject(pi.hProcess, kTimeoutMs) == WAIT_OBJECT_0) {
         DWORD exitCode = 1;
         GetExitCodeProcess(pi.hProcess, &exitCode);
-        if (exitCode == 0) {
-            // The CLI's own output is a short one-line status message
-            // ("Opened: <path>" or "Error: ..."), never large for this
-            // command - a bounded single-buffer read is sufficient and
-            // avoids a pipe-deadlock risk from waiting-then-reading a
-            // large child output.
-            std::string output;
-            char buf[512];
-            DWORD bytesRead = 0;
-            while (ReadFile(hReadPipe, buf, sizeof(buf), &bytesRead, nullptr) && bytesRead > 0) {
-                output.append(buf, bytesRead);
-                if (output.size() > 4096) break;
-            }
-            succeeded = output.rfind("Opened:", 0) == 0;
-        }
+        // stderr is merged into the same pipe as stdout, so anything the CLI
+        // warns about first would push "Opened:" off position 0 - match it
+        // anywhere in the output rather than only at the start.
+        succeeded = exitCode == 0 && output.find("Opened:") != std::string::npos;
     } else {
         // Timed out (or wait failed) - don't leave a stuck process running
         // detached with no result.
         TerminateProcess(pi.hProcess, 1);
     }
-    CloseHandle(hReadPipe);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     return succeeded;

@@ -48,6 +48,7 @@ using takeoff::Settings;
 using takeoff::FileIndex;
 using takeoff::kFilesReadyMessage;
 using leanlauncher::obsidian::kNotesReadyMessage;
+using leanlauncher::obsidian::kNoteOpenResultMessage;
 
 namespace {
 
