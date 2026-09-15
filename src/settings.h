@@ -50,10 +50,10 @@ struct Settings {
     bool taskAddEnabled = true;
     bool noteAddEnabled = true;
 
-    std::wstring vaultSearchPrefix = L"O";
+    std::wstring vaultSearchPrefix = L"o";
     std::wstring vaultSearchPillLabel = L"Jump";
 
-    std::wstring taskPrefix = L"T";
+    std::wstring taskPrefix = L"t";
     std::wstring taskPillLabel = L"Task";
     std::wstring taskPreviewPrefix = L"Add task: ";
 
