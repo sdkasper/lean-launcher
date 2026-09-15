@@ -66,7 +66,7 @@ public:
         } catch (const std::system_error&) {}
         if constexpr (!kUiTest) {
             FileIndex::Instance().Start(hwnd_);
-            if (!obsidianVaultPath_.empty()) {
+            if (settings_.obsidianEnabled && !obsidianVaultPath_.empty()) {
                 leanlauncher::obsidian::NoteIndex::Instance().Start(obsidianVaultPath_, hwnd_);
             }
         }
@@ -561,6 +561,9 @@ private:
                 settings_.enableFileSearch = ReadDword(key, L"FileSearchEnabled", 1) != 0;
                 settings_.enableWebSearch = ReadDword(key, L"WebSearchEnabled", 1) != 0;
                 settings_.runAtStartup = ReadDword(key, L"RunAtStartup", 1) != 0;
+                settings_.vaultSearchEnabled = ReadDword(key, L"VaultSearchEnabled", 1) != 0;
+                settings_.taskAddEnabled = ReadDword(key, L"TaskAddEnabled", 1) != 0;
+                settings_.noteAddEnabled = ReadDword(key, L"NoteAddEnabled", 1) != 0;
                 const DWORD low = ReadDword(key, L"LastUpdateCheckLow", 0);
                 const DWORD high = ReadDword(key, L"LastUpdateCheckHigh", 0);
                 lastUpdateCheck_ = (static_cast<uint64_t>(high) << 32) | low;
@@ -582,10 +585,41 @@ private:
                 if (RegGetValueW(key, nullptr, L"VaultPath", RRF_RT_REG_SZ, nullptr, buf, &bufSize) == ERROR_SUCCESS && buf[0]) {
                     obsidianVaultPath_ = buf;
                 }
+                // Migration default: an install that already has a vault
+                // configured keeps working with no action needed; a fresh
+                // install starts opted out until the user turns it on.
+                settings_.obsidianEnabled =
+                    ReadDword(key, L"ObsidianEnabled", obsidianVaultPath_.empty() ? 0 : 1) != 0;
+
+                auto readStringSetting = [&](const wchar_t* valueName, std::wstring& target) {
+                    wchar_t strBuf[512]{};
+                    DWORD strBufSize = sizeof(strBuf);
+                    // No "&& strBuf[0]" guard here, unlike VaultPath above:
+                    // an empty string is itself a meaningful saved value for
+                    // these fields (an empty override means auto-detect; an
+                    // empty label is a valid cosmetic choice), so presence
+                    // is determined solely by the registry read succeeding.
+                    if (RegGetValueW(key, nullptr, valueName, RRF_RT_REG_SZ, nullptr, strBuf, &strBufSize) ==
+                        ERROR_SUCCESS) {
+                        target = strBuf;
+                    }
+                };
+                readStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
+                readStringSetting(L"VaultSearchPillLabel", settings_.vaultSearchPillLabel);
+                readStringSetting(L"TaskPrefix", settings_.taskPrefix);
+                readStringSetting(L"TaskPillLabel", settings_.taskPillLabel);
+                readStringSetting(L"TaskPreviewPrefix", settings_.taskPreviewPrefix);
+                readStringSetting(L"NoteAddPrefix", settings_.noteAddPrefix);
+                readStringSetting(L"NoteAddPillLabel", settings_.noteAddPillLabel);
+                readStringSetting(L"NoteAddPreviewPrefix", settings_.noteAddPreviewPrefix);
+                readStringSetting(L"DailyNoteFolderOverride", settings_.dailyNoteFolderOverride);
+                readStringSetting(L"DailyNoteFormatOverride", settings_.dailyNoteFormatOverride);
+
                 RegCloseKey(key);
             }
             if (!obsidianVaultPath_.empty()) {
-                dailyNoteConfig_ = leanlauncher::obsidian::ReadDailyNoteConfig(obsidianVaultPath_);
+                dailyNoteConfig_ = leanlauncher::obsidian::ResolveDailyNoteConfig(
+                    obsidianVaultPath_, settings_.dailyNoteFolderOverride, settings_.dailyNoteFormatOverride);
             }
             HKEY startup = nullptr;
             bool startupRegistered = false;
@@ -679,6 +713,10 @@ private:
                 {L"FileSearchEnabled", settings_.enableFileSearch ? 1u : 0u},
                 {L"WebSearchEnabled", settings_.enableWebSearch ? 1u : 0u},
                 {L"RunAtStartup", settings_.runAtStartup ? 1u : 0u},
+                {L"ObsidianEnabled", settings_.obsidianEnabled ? 1u : 0u},
+                {L"VaultSearchEnabled", settings_.vaultSearchEnabled ? 1u : 0u},
+                {L"TaskAddEnabled", settings_.taskAddEnabled ? 1u : 0u},
+                {L"NoteAddEnabled", settings_.noteAddEnabled ? 1u : 0u},
             };
             bool saved = true;
             for (const auto& entry : entries) {
@@ -686,11 +724,22 @@ private:
                     reinterpret_cast<const BYTE*>(&entry.value), sizeof(entry.value)) ==
                     ERROR_SUCCESS && saved;
             }
-            if (RegSetValueExW(key, L"VaultPath", 0, REG_SZ,
-                    reinterpret_cast<const BYTE*>(obsidianVaultPath_.c_str()),
-                    static_cast<DWORD>((obsidianVaultPath_.size() + 1) * sizeof(wchar_t))) != ERROR_SUCCESS) {
-                saved = false;
-            }
+            auto writeStringSetting = [&](const wchar_t* valueName, const std::wstring& value) {
+                saved = RegSetValueExW(key, valueName, 0, REG_SZ,
+                    reinterpret_cast<const BYTE*>(value.c_str()),
+                    static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS && saved;
+            };
+            writeStringSetting(L"VaultPath", obsidianVaultPath_);
+            writeStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
+            writeStringSetting(L"VaultSearchPillLabel", settings_.vaultSearchPillLabel);
+            writeStringSetting(L"TaskPrefix", settings_.taskPrefix);
+            writeStringSetting(L"TaskPillLabel", settings_.taskPillLabel);
+            writeStringSetting(L"TaskPreviewPrefix", settings_.taskPreviewPrefix);
+            writeStringSetting(L"NoteAddPrefix", settings_.noteAddPrefix);
+            writeStringSetting(L"NoteAddPillLabel", settings_.noteAddPillLabel);
+            writeStringSetting(L"NoteAddPreviewPrefix", settings_.noteAddPreviewPrefix);
+            writeStringSetting(L"DailyNoteFolderOverride", settings_.dailyNoteFolderOverride);
+            writeStringSetting(L"DailyNoteFormatOverride", settings_.dailyNoteFormatOverride);
             RegCloseKey(key);
             if (!saved) settingsStatus_ = L"Could not save this setting.";
         }
@@ -1499,7 +1548,8 @@ private:
             nextIndex = (static_cast<size_t>(std::distance(knownVaults_.begin(), it)) + 1) % knownVaults_.size();
         }
         obsidianVaultPath_ = knownVaults_[nextIndex];
-        dailyNoteConfig_ = leanlauncher::obsidian::ReadDailyNoteConfig(obsidianVaultPath_);
+        dailyNoteConfig_ = leanlauncher::obsidian::ResolveDailyNoteConfig(
+            obsidianVaultPath_, settings_.dailyNoteFolderOverride, settings_.dailyNoteFormatOverride);
         if constexpr (!kUiTest) {
             leanlauncher::obsidian::NoteIndex::Instance().Restart(obsidianVaultPath_, hwnd_);
         }
