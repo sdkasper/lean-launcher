@@ -207,7 +207,8 @@ private:
         case kNotesReadyMessage: {
             std::wstring noteQuery;
             if (page_ == Page::Launcher && !input_.text.empty() &&
-                leanlauncher::obsidian::TryParseNoteJumpPrefix(input_.text, noteQuery)) {
+                settings_.obsidianEnabled && settings_.vaultSearchEnabled &&
+                leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.vaultSearchPrefix, noteQuery)) {
                 UpdateResults();
             }
             return 0;
@@ -1365,7 +1366,8 @@ private:
             }
         }
         std::wstring taskText;
-        if (leanlauncher::obsidian::TryParseTaskPrefix(input_.text, taskText)) {
+        if (settings_.obsidianEnabled && settings_.taskAddEnabled &&
+            leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.taskPrefix, taskText)) {
             AppEntry entry;
             entry.category = AppCategory::TaskAdd;
             entry.parameters = taskText;
@@ -1377,7 +1379,7 @@ private:
                 leanlauncher::obsidian::GetTodayYmd(year, month, day);
                 entry.path = leanlauncher::obsidian::ResolveTodayPath(
                     dailyNoteConfig_, obsidianVaultPath_, year, month, day);
-                entry.name = L"Add task: " + taskText;
+                entry.name = settings_.taskPreviewPrefix + taskText;
                 entry.iconPath = L"notepad.exe";
             }
             entry.normalizedName = Normalize(entry.name);
@@ -1391,7 +1393,8 @@ private:
             results_.insert(results_.begin() + std::min(insertPos, results_.size()), taskIdx);
         }
         std::wstring noteText;
-        if (leanlauncher::obsidian::TryParseNoteTextPrefix(input_.text, noteText)) {
+        if (settings_.obsidianEnabled && settings_.noteAddEnabled &&
+            leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.noteAddPrefix, noteText)) {
             AppEntry entry;
             entry.category = AppCategory::NoteAdd;
             entry.parameters = noteText;
@@ -1403,7 +1406,7 @@ private:
                 leanlauncher::obsidian::GetTodayYmd(year, month, day);
                 entry.path = leanlauncher::obsidian::ResolveTodayPath(
                     dailyNoteConfig_, obsidianVaultPath_, year, month, day);
-                entry.name = L"Add to today's note: " + noteText;
+                entry.name = settings_.noteAddPreviewPrefix + noteText;
                 entry.iconPath = L"notepad.exe";
             }
             entry.normalizedName = Normalize(entry.name);
@@ -1415,7 +1418,8 @@ private:
             results_.insert(results_.begin() + std::min(insertPos, results_.size()), noteAddIdx);
         }
         std::wstring noteQuery;
-        if (leanlauncher::obsidian::TryParseNoteJumpPrefix(input_.text, noteQuery)) {
+        if (settings_.obsidianEnabled && settings_.vaultSearchEnabled &&
+            leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.vaultSearchPrefix, noteQuery)) {
             if (obsidianVaultPath_.empty()) {
                 AppEntry entry;
                 entry.category = AppCategory::NoteJump;
@@ -3181,9 +3185,9 @@ private:
                     : (app.category == takeoff::AppCategory::System ? L"System"
                     : (app.category == takeoff::AppCategory::Folder ? L"Folder"
                     : (app.category == takeoff::AppCategory::File ? L"File"
-                    : (app.category == takeoff::AppCategory::TaskAdd ? L"Task"
-                    : (app.category == takeoff::AppCategory::NoteAdd ? L"Note"
-                    : (app.category == takeoff::AppCategory::NoteJump ? L"Jump" : L"Application"))))));
+                    : (app.category == takeoff::AppCategory::TaskAdd ? settings_.taskPillLabel.c_str()
+                    : (app.category == takeoff::AppCategory::NoteAdd ? settings_.noteAddPillLabel.c_str()
+                    : (app.category == takeoff::AppCategory::NoteJump ? settings_.vaultSearchPillLabel.c_str() : L"Application"))))));
                 Text(categoryLabel,
                     D2D1::RectF(width_ - 154, top, width_ - 28, top + 40), hintFormat_.Get(),
                     highContrast_ && selected ? textColor : Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
