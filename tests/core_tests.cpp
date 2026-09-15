@@ -1180,6 +1180,14 @@ int main() {
     }
 
     {
+        using namespace leanlauncher::obsidian;
+        Check(DefaultObsidianEnabled(L"") == false,
+            "DefaultObsidianEnabled defaults to off for a fresh install with no vault configured");
+        Check(DefaultObsidianEnabled(L"D:\\SomeVault") == true,
+            "DefaultObsidianEnabled defaults to on for an install that already has a vault configured (migration safety)");
+    }
+
+    {
         Check(BuildTaskLine(L"buy milk") == L"- [ ] buy milk\n", "BuildTaskLine basic construction");
         Check(BuildTaskLine(L"line1\r\nline2") == L"- [ ] line1line2\n",
             "BuildTaskLine strips embedded CR/LF so one task never becomes two lines");

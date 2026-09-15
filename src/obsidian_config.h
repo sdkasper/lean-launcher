@@ -50,6 +50,13 @@ inline bool TryParsePrefix(const std::wstring& input, const std::wstring& prefix
     return !outText.empty();
 }
 
+// Migration-safe default for the master Obsidian toggle: an install that
+// already has a vault configured keeps working with no action needed; a
+// fresh install starts opted out until the user turns it on.
+inline bool DefaultObsidianEnabled(const std::wstring& vaultPath) {
+    return !vaultPath.empty();
+}
+
 // Returns a user-facing error message if the three configured action
 // prefixes aren't all non-empty and mutually distinct (case-insensitive),
 // or nullptr if they're valid. Used to reject an in-progress Settings edit

@@ -602,11 +602,9 @@ private:
                 if (RegGetValueW(key, nullptr, L"VaultPath", RRF_RT_REG_SZ, nullptr, buf, &bufSize) == ERROR_SUCCESS && buf[0]) {
                     obsidianVaultPath_ = buf;
                 }
-                // Migration default: an install that already has a vault
-                // configured keeps working with no action needed; a fresh
-                // install starts opted out until the user turns it on.
                 settings_.obsidianEnabled =
-                    ReadDword(key, L"ObsidianEnabled", obsidianVaultPath_.empty() ? 0 : 1) != 0;
+                    ReadDword(key, L"ObsidianEnabled",
+                        leanlauncher::obsidian::DefaultObsidianEnabled(obsidianVaultPath_) ? 1 : 0) != 0;
 
                 auto readStringSetting = [&](const wchar_t* valueName, std::wstring& target) {
                     wchar_t strBuf[512]{};
@@ -1586,6 +1584,9 @@ private:
         editingRow_ = -1;
         settingsStatus_.clear();
         settings_ = quicklaunch::Settings{};
+        if constexpr (!kUiTest) {
+            leanlauncher::obsidian::NoteIndex::Instance().Stop();
+        }
         SetRunAtStartup(settings_.runAtStartup);
         RegisterShortcut();
         SaveSettings();
@@ -4070,7 +4071,7 @@ private:
 
         // Reset to default button
         const auto resetRect = ResetButtonRect();
-        const bool resetSelected = (settingsSelected_ == 10);
+        const bool resetSelected = (settingsSelected_ == kRowResetToDefaults);
         const bool resetHover = mouseKnown_ && mouseX_ >= resetRect.left && mouseX_ <= resetRect.right && mouseY_ >= resetRect.top && mouseY_ <= resetRect.bottom;
         const bool resetHighlight = resetSelected || resetHover;
         Fill(resetRect, highContrast_
