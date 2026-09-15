@@ -1656,6 +1656,11 @@ private:
         obsidianExpandedSection_ = -1;
         settingsStatus_.clear();
         settings_ = quicklaunch::Settings{};
+        // Same staleness gap as CommitEditingRow: settings_.dailyNote*Override
+        // just got reset to empty, but dailyNoteConfig_ is a cache that
+        // won't reflect that until something recomputes it.
+        dailyNoteConfig_ = leanlauncher::obsidian::ResolveDailyNoteConfig(
+            obsidianVaultPath_, settings_.dailyNoteFolderOverride, settings_.dailyNoteFormatOverride);
         if constexpr (!kUiTest) {
             leanlauncher::obsidian::NoteIndex::Instance().Stop();
         }
@@ -1802,6 +1807,12 @@ private:
         *field = settingsEdit_.text;
         editingRow_ = -1;
         settingsStatus_.clear();
+        // dailyNoteConfig_ is a cache derived from the override fields, not
+        // read from them directly (see ResolveTodayPath's call sites) - it
+        // must be refreshed here or a folder/format override just edited
+        // has no effect until the app restarts or the vault is reselected.
+        dailyNoteConfig_ = leanlauncher::obsidian::ResolveDailyNoteConfig(
+            obsidianVaultPath_, settings_.dailyNoteFolderOverride, settings_.dailyNoteFormatOverride);
         SaveSettings();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
