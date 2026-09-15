@@ -1127,52 +1127,84 @@ private:
     enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, Obsidian };
 
     // Settings rows 0-3: keyboard shortcuts. 4-6: system. 7-8: search.
-    // 9-23: Obsidian (only row 9 is active when settings_.obsidianEnabled is
-    // false - see IsRowInCategory/ObsidianRowCount). 24 is the Reset button,
-    // handled as a sentinel row rather than a real settings row.
+    // 9-27: Obsidian (only row 9 is active when settings_.obsidianEnabled is
+    // false - see IsRowInCategory/ObsidianRowCount). Each of the four
+    // *Summary rows is always shown when Obsidian is enabled; its detail
+    // rows only appear while obsidianExpandedSection_ names that section -
+    // see ObsidianVisibleRows(). 28 is the Reset button, handled as a
+    // sentinel row rather than a real settings row.
     static constexpr int kRowObsidianEnabled = 9;
     static constexpr int kRowVaultPicker = 10;
-    static constexpr int kRowVaultSearchEnabled = 11;
-    static constexpr int kRowVaultSearchPrefix = 12;
-    static constexpr int kRowVaultSearchPillLabel = 13;
-    static constexpr int kRowTaskAddEnabled = 14;
-    static constexpr int kRowTaskPrefix = 15;
-    static constexpr int kRowTaskPillLabel = 16;
-    static constexpr int kRowTaskPreviewPrefix = 17;
-    static constexpr int kRowNoteAddEnabled = 18;
-    static constexpr int kRowNoteAddPrefix = 19;
-    static constexpr int kRowNoteAddPillLabel = 20;
-    static constexpr int kRowNoteAddPreviewPrefix = 21;
-    static constexpr int kRowDailyNoteFolderOverride = 22;
-    static constexpr int kRowDailyNoteFormatOverride = 23;
-    static constexpr int kSettingsMaxRow = 23;
-    static constexpr int kRowResetToDefaults = 24;
+    static constexpr int kRowVaultSearchSummary = 11;
+    static constexpr int kRowVaultSearchEnabled = 12;
+    static constexpr int kRowVaultSearchPrefix = 13;
+    static constexpr int kRowVaultSearchPillLabel = 14;
+    static constexpr int kRowTaskSummary = 15;
+    static constexpr int kRowTaskAddEnabled = 16;
+    static constexpr int kRowTaskPrefix = 17;
+    static constexpr int kRowTaskPillLabel = 18;
+    static constexpr int kRowTaskPreviewPrefix = 19;
+    static constexpr int kRowNoteAddSummary = 20;
+    static constexpr int kRowNoteAddEnabled = 21;
+    static constexpr int kRowNoteAddPrefix = 22;
+    static constexpr int kRowNoteAddPillLabel = 23;
+    static constexpr int kRowNoteAddPreviewPrefix = 24;
+    static constexpr int kRowOverridesSummary = 25;
+    static constexpr int kRowDailyNoteFolderOverride = 26;
+    static constexpr int kRowDailyNoteFormatOverride = 27;
+    static constexpr int kSettingsMaxRow = 27;
+    static constexpr int kRowResetToDefaults = 28;
+
+    // Which of the four Obsidian action blocks is currently expanded, or
+    // -1 if all are collapsed. A single int gives accordion behavior for
+    // free: setting it to a new section implicitly collapses whichever one
+    // was open before.
+    static constexpr int kSectionVaultSearch = 0;
+    static constexpr int kSectionTask = 1;
+    static constexpr int kSectionNoteAdd = 2;
+    static constexpr int kSectionOverrides = 3;
 
     // The ordered list of Obsidian row IDs currently on screen. Every other
     // Obsidian-category geometry/hit-testing function derives its answer
     // from this single source of truth instead of doing arithmetic on the
     // row number directly - a row's screen position is its rank in this
-    // list, not a fixed formula. For now this always returns the full flat
-    // set (identical to the pre-refactor behavior); a later change makes
-    // sub-rows conditionally present based on which section is expanded.
+    // list, not a fixed formula. Each action's summary row is always
+    // present when Obsidian is enabled; its detail rows only appear while
+    // that action is the expanded section.
     std::vector<int> ObsidianVisibleRows() const {
         std::vector<int> rows;
         rows.push_back(kRowObsidianEnabled);
         if (!settings_.obsidianEnabled) return rows;
         rows.push_back(kRowVaultPicker);
-        rows.push_back(kRowVaultSearchEnabled);
-        rows.push_back(kRowVaultSearchPrefix);
-        rows.push_back(kRowVaultSearchPillLabel);
-        rows.push_back(kRowTaskAddEnabled);
-        rows.push_back(kRowTaskPrefix);
-        rows.push_back(kRowTaskPillLabel);
-        rows.push_back(kRowTaskPreviewPrefix);
-        rows.push_back(kRowNoteAddEnabled);
-        rows.push_back(kRowNoteAddPrefix);
-        rows.push_back(kRowNoteAddPillLabel);
-        rows.push_back(kRowNoteAddPreviewPrefix);
-        rows.push_back(kRowDailyNoteFolderOverride);
-        rows.push_back(kRowDailyNoteFormatOverride);
+
+        rows.push_back(kRowVaultSearchSummary);
+        if (obsidianExpandedSection_ == kSectionVaultSearch) {
+            rows.push_back(kRowVaultSearchEnabled);
+            rows.push_back(kRowVaultSearchPrefix);
+            rows.push_back(kRowVaultSearchPillLabel);
+        }
+
+        rows.push_back(kRowTaskSummary);
+        if (obsidianExpandedSection_ == kSectionTask) {
+            rows.push_back(kRowTaskAddEnabled);
+            rows.push_back(kRowTaskPrefix);
+            rows.push_back(kRowTaskPillLabel);
+            rows.push_back(kRowTaskPreviewPrefix);
+        }
+
+        rows.push_back(kRowNoteAddSummary);
+        if (obsidianExpandedSection_ == kSectionNoteAdd) {
+            rows.push_back(kRowNoteAddEnabled);
+            rows.push_back(kRowNoteAddPrefix);
+            rows.push_back(kRowNoteAddPillLabel);
+            rows.push_back(kRowNoteAddPreviewPrefix);
+        }
+
+        rows.push_back(kRowOverridesSummary);
+        if (obsidianExpandedSection_ == kSectionOverrides) {
+            rows.push_back(kRowDailyNoteFolderOverride);
+            rows.push_back(kRowDailyNoteFormatOverride);
+        }
         return rows;
     }
 
@@ -1372,6 +1404,7 @@ private:
         editingRow_ = -1;
         vaultDropdownOpen_ = false;
         vaultDropdownHighlight_ = -1;
+        obsidianExpandedSection_ = -1;
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
         knownVaults_ = leanlauncher::obsidian::FindKnownVaults();
@@ -1384,6 +1417,7 @@ private:
         editingRow_ = -1;
         vaultDropdownOpen_ = false;
         vaultDropdownHighlight_ = -1;
+        obsidianExpandedSection_ = -1;
         settingsScroll_ = 0.0f;
         settingsDraggingScroll_ = false;
         ResetCaret();
@@ -1619,6 +1653,7 @@ private:
         editingRow_ = -1;
         vaultDropdownOpen_ = false;
         vaultDropdownHighlight_ = -1;
+        obsidianExpandedSection_ = -1;
         settingsStatus_.clear();
         settings_ = quicklaunch::Settings{};
         if constexpr (!kUiTest) {
@@ -1692,6 +1727,13 @@ private:
             }
         }
         return -1;
+    }
+
+    // Expands the given section, collapsing whichever other one was open;
+    // expanding the already-expanded section collapses it instead.
+    void ToggleObsidianSection(int section) {
+        obsidianExpandedSection_ = (obsidianExpandedSection_ == section) ? -1 : section;
+        InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
     // Maps an editable Settings row to the Settings field it edits, or
@@ -1779,7 +1821,10 @@ private:
                     leanlauncher::obsidian::NoteIndex::Instance().Stop();
                 }
             }
-            if (!settings_.obsidianEnabled) editingRow_ = -1;
+            if (!settings_.obsidianEnabled) {
+                editingRow_ = -1;
+                obsidianExpandedSection_ = -1;
+            }
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
@@ -1787,6 +1832,10 @@ private:
             OpenVaultDropdown();
             return;
         }
+        if (row == kRowVaultSearchSummary) { ToggleObsidianSection(kSectionVaultSearch); return; }
+        if (row == kRowTaskSummary) { ToggleObsidianSection(kSectionTask); return; }
+        if (row == kRowNoteAddSummary) { ToggleObsidianSection(kSectionNoteAdd); return; }
+        if (row == kRowOverridesSummary) { ToggleObsidianSection(kSectionOverrides); return; }
         if (row == kRowVaultSearchEnabled) {
             settings_.vaultSearchEnabled = !settings_.vaultSearchEnabled;
             SaveSettings();
@@ -2694,6 +2743,7 @@ private:
                     const auto r = CategoryTabRect(cat);
                     if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
                         if (editingRow_ >= 0) CancelEditingRow();
+                        obsidianExpandedSection_ = -1;
                         settingsCategory_ = cat;
                         settingsScroll_ = 0.0f;
                         if (!IsRowInCategory(settingsSelected_, settingsCategory_)) {
@@ -3971,6 +4021,128 @@ private:
         }
     }
 
+    // One collapsed summary row for an Obsidian action block: title, a
+    // compact "current prefix / label" descriptor (or "off" if the action
+    // itself is disabled), and a chevron showing expanded/collapsed state.
+    void DrawObsidianSectionSummary(int row, float top, int section, std::wstring_view title,
+        bool enabled, const std::wstring& prefix, const std::wstring& label) {
+        const bool expanded = (obsidianExpandedSection_ == section);
+        std::wstring value;
+        if (!enabled) value += L"off · ";
+        value += prefix + L" / " + label + (expanded ? L"  ▾" : L"  ›");
+        DrawSettingsRow(row, top, title, expanded ? L"Tap to collapse" : L"Tap to edit",
+            value, false, false, true);
+    }
+
+    // Dispatches a single Obsidian-section row ID to its title/description/
+    // value. Called once per entry in ObsidianVisibleRows() - this is the
+    // only place that maps a row ID to what it displays, so DrawSettings()
+    // itself just loops without needing to know what any given row is.
+    void DrawObsidianRow(int row, float top) {
+        switch (row) {
+        case kRowObsidianEnabled:
+            DrawSettingsRow(row, top, L"Enable Obsidian integration",
+                L"Turn on vault search, task capture, and note capture from the launcher",
+                {}, true, settings_.obsidianEnabled);
+            return;
+        case kRowVaultPicker: {
+            std::wstring vaultValue = L"None found";
+            std::wstring vaultDescription = L"No Obsidian vaults found. Install Obsidian and open a vault, then reopen Settings.";
+            if (!knownVaults_.empty()) {
+                if (obsidianVaultPath_.empty()) {
+                    vaultValue = L"Not set";
+                    vaultDescription = L"Press Enter to select a detected vault";
+                } else {
+                    vaultValue = fs::path(obsidianVaultPath_).filename().wstring();
+                    vaultDescription = dailyNoteConfig_.found
+                        ? L"Tasks are added to today's daily note in this vault"
+                        : L"Could not read this vault's daily notes config - using vault root + YYYY-MM-DD.md";
+                }
+            }
+            DrawSettingsRow(row, top, L"Obsidian Vault", vaultDescription, vaultValue, false, false, true);
+            return;
+        }
+        case kRowVaultSearchSummary:
+            DrawObsidianSectionSummary(row, top, kSectionVaultSearch, L"Vault search",
+                settings_.vaultSearchEnabled, settings_.vaultSearchPrefix, settings_.vaultSearchPillLabel);
+            return;
+        case kRowVaultSearchEnabled:
+            DrawSettingsRow(row, top, L"Vault search enabled",
+                L"Fuzzy-search note titles and open the match in Obsidian",
+                {}, true, settings_.vaultSearchEnabled);
+            return;
+        case kRowVaultSearchPrefix:
+            DrawSettingsRow(row, top, L"Vault search prefix", L"Type this followed by a space, then a note title",
+                settings_.vaultSearchPrefix, false, false, false, true);
+            return;
+        case kRowVaultSearchPillLabel:
+            DrawSettingsRow(row, top, L"Vault search label", L"Result-row tag shown next to a matched note",
+                settings_.vaultSearchPillLabel, false, false, false, true);
+            return;
+        case kRowTaskSummary:
+            DrawObsidianSectionSummary(row, top, kSectionTask, L"Add task",
+                settings_.taskAddEnabled, settings_.taskPrefix, settings_.taskPillLabel);
+            return;
+        case kRowTaskAddEnabled:
+            DrawSettingsRow(row, top, L"Add task enabled", L"Append a checklist item to today's daily note",
+                {}, true, settings_.taskAddEnabled);
+            return;
+        case kRowTaskPrefix:
+            DrawSettingsRow(row, top, L"Add task prefix", L"Type this followed by a space, then the task text",
+                settings_.taskPrefix, false, false, false, true);
+            return;
+        case kRowTaskPillLabel:
+            DrawSettingsRow(row, top, L"Add task label", L"Result-row tag shown next to a pending task",
+                settings_.taskPillLabel, false, false, false, true);
+            return;
+        case kRowTaskPreviewPrefix:
+            DrawSettingsRow(row, top, L"Add task preview", L"Text shown before what you typed, e.g. \"Add task: buy milk\"",
+                settings_.taskPreviewPrefix, false, false, false, true);
+            return;
+        case kRowNoteAddSummary:
+            DrawObsidianSectionSummary(row, top, kSectionNoteAdd, L"Add to note",
+                settings_.noteAddEnabled, settings_.noteAddPrefix, settings_.noteAddPillLabel);
+            return;
+        case kRowNoteAddEnabled:
+            DrawSettingsRow(row, top, L"Add to note enabled",
+                L"Append a plain line (not a checklist item) to today's daily note",
+                {}, true, settings_.noteAddEnabled);
+            return;
+        case kRowNoteAddPrefix:
+            DrawSettingsRow(row, top, L"Add to note prefix", L"Type this followed by a space, then the line text",
+                settings_.noteAddPrefix, false, false, false, true);
+            return;
+        case kRowNoteAddPillLabel:
+            DrawSettingsRow(row, top, L"Add to note label", L"Result-row tag shown next to a pending line",
+                settings_.noteAddPillLabel, false, false, false, true);
+            return;
+        case kRowNoteAddPreviewPrefix:
+            DrawSettingsRow(row, top, L"Add to note preview",
+                L"Text shown before what you typed, e.g. \"Add to today's note: back from the gym\"",
+                settings_.noteAddPreviewPrefix, false, false, false, true);
+            return;
+        case kRowOverridesSummary: {
+            const bool hasOverride = !settings_.dailyNoteFolderOverride.empty() ||
+                !settings_.dailyNoteFormatOverride.empty();
+            const bool expanded = (obsidianExpandedSection_ == kSectionOverrides);
+            DrawSettingsRow(row, top, L"Daily note overrides",
+                hasOverride ? L"Custom folder and/or format set" : L"Auto-detected from the vault",
+                expanded ? L"▾" : L"›", false, false, true);
+            return;
+        }
+        case kRowDailyNoteFolderOverride:
+            DrawSettingsRow(row, top, L"Daily note folder override", L"Leave empty to auto-detect from the vault's daily-notes config",
+                settings_.dailyNoteFolderOverride, false, false, false, true);
+            return;
+        case kRowDailyNoteFormatOverride:
+            DrawSettingsRow(row, top, L"Daily note format override", L"Leave empty to auto-detect; supports YYYY/MM/DD tokens",
+                settings_.dailyNoteFormatOverride, false, false, false, true);
+            return;
+        default:
+            return;
+        }
+    }
+
     // Overlay popup for the vault picker - drawn on top of whatever rows
     // are beneath it rather than pushing them down, so the fixed row-index
     // geometry (SettingsRowTop et al.) never needs to account for it.
@@ -4086,89 +4258,10 @@ private:
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Obsidian) {
             const float hY = (settingsCategory_ == SettingsCategory::All) ? 553.0f : 16.0f;
             const float cY = (settingsCategory_ == SettingsCategory::All) ? 573.0f : 36.0f;
-            const int rowCount = ObsidianRowCount();
-            drawCard(L"OBSIDIAN", hY, cY, rowCount);
-
-            int slot = 0;
-            DrawSettingsRow(kRowObsidianEnabled, cY + slot * kSettingsRowHeight + offsetY,
-                L"Enable Obsidian integration",
-                L"Turn on vault search, task capture, and note capture from the launcher",
-                {}, true, settings_.obsidianEnabled);
-            ++slot;
-
-            if (settings_.obsidianEnabled) {
-                std::wstring vaultValue = L"None found";
-                std::wstring vaultDescription = L"No Obsidian vaults found. Install Obsidian and open a vault, then reopen Settings.";
-                if (!knownVaults_.empty()) {
-                    if (obsidianVaultPath_.empty()) {
-                        vaultValue = L"Not set";
-                        vaultDescription = L"Press Enter to select a detected vault";
-                    } else {
-                        vaultValue = fs::path(obsidianVaultPath_).filename().wstring();
-                        vaultDescription = dailyNoteConfig_.found
-                            ? L"Tasks are added to today's daily note in this vault"
-                            : L"Could not read this vault's daily notes config — using vault root + YYYY-MM-DD.md";
-                    }
-                }
-                DrawSettingsRow(kRowVaultPicker, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Obsidian Vault", vaultDescription, vaultValue, false, false, true);
-                ++slot;
-
-                DrawSettingsRow(kRowVaultSearchEnabled, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Vault search", L"Fuzzy-search note titles and open the match in Obsidian",
-                    {}, true, settings_.vaultSearchEnabled);
-                ++slot;
-                DrawSettingsRow(kRowVaultSearchPrefix, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Vault search prefix", L"Type this followed by a space, then a note title",
-                    settings_.vaultSearchPrefix, false, false, false, true);
-                ++slot;
-                DrawSettingsRow(kRowVaultSearchPillLabel, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Vault search label", L"Result-row tag shown next to a matched note",
-                    settings_.vaultSearchPillLabel, false, false, false, true);
-                ++slot;
-
-                DrawSettingsRow(kRowTaskAddEnabled, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Add task", L"Append a checklist item to today's daily note",
-                    {}, true, settings_.taskAddEnabled);
-                ++slot;
-                DrawSettingsRow(kRowTaskPrefix, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Add task prefix", L"Type this followed by a space, then the task text",
-                    settings_.taskPrefix, false, false, false, true);
-                ++slot;
-                DrawSettingsRow(kRowTaskPillLabel, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Add task label", L"Result-row tag shown next to a pending task",
-                    settings_.taskPillLabel, false, false, false, true);
-                ++slot;
-                DrawSettingsRow(kRowTaskPreviewPrefix, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Add task preview", L"Text shown before what you typed, e.g. \"Add task: buy milk\"",
-                    settings_.taskPreviewPrefix, false, false, false, true);
-                ++slot;
-
-                DrawSettingsRow(kRowNoteAddEnabled, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Add to note", L"Append a plain line (not a checklist item) to today's daily note",
-                    {}, true, settings_.noteAddEnabled);
-                ++slot;
-                DrawSettingsRow(kRowNoteAddPrefix, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Add to note prefix", L"Type this followed by a space, then the line text",
-                    settings_.noteAddPrefix, false, false, false, true);
-                ++slot;
-                DrawSettingsRow(kRowNoteAddPillLabel, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Add to note label", L"Result-row tag shown next to a pending line",
-                    settings_.noteAddPillLabel, false, false, false, true);
-                ++slot;
-                DrawSettingsRow(kRowNoteAddPreviewPrefix, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Add to note preview", L"Text shown before what you typed, e.g. \"Add to today's note: back from the gym\"",
-                    settings_.noteAddPreviewPrefix, false, false, false, true);
-                ++slot;
-
-                DrawSettingsRow(kRowDailyNoteFolderOverride, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Daily note folder override", L"Leave empty to auto-detect from the vault's daily-notes config",
-                    settings_.dailyNoteFolderOverride, false, false, false, true);
-                ++slot;
-                DrawSettingsRow(kRowDailyNoteFormatOverride, cY + slot * kSettingsRowHeight + offsetY,
-                    L"Daily note format override", L"Leave empty to auto-detect; supports YYYY/MM/DD tokens",
-                    settings_.dailyNoteFormatOverride, false, false, false, true);
-                ++slot;
+            const auto visibleRows = ObsidianVisibleRows();
+            drawCard(L"OBSIDIAN", hY, cY, static_cast<int>(visibleRows.size()));
+            for (size_t i = 0; i < visibleRows.size(); ++i) {
+                DrawObsidianRow(visibleRows[i], cY + static_cast<float>(i) * kSettingsRowHeight + offsetY);
             }
         }
 
@@ -4341,6 +4434,7 @@ private:
     int editingRow_ = -1;
     bool vaultDropdownOpen_ = false;
     int vaultDropdownHighlight_ = -1;  // index into knownVaults_ while the dropdown is open
+    int obsidianExpandedSection_ = -1;  // kSection* of the expanded action block, or -1
     float textScroll_ = 0, caretX_ = kTextLeft, mouseX_ = 0, mouseY_ = 0;
     float settingsScroll_ = 0.0f;
     bool settingsDraggingScroll_ = false;
