@@ -1148,23 +1148,52 @@ private:
     static constexpr int kSettingsMaxRow = 23;
     static constexpr int kRowResetToDefaults = 24;
 
-    // 1 row when the integration is off (just the master toggle), 15 when
-    // it's on (toggle + vault picker + 3 action blocks + 2 overrides).
-    int ObsidianRowCount() const { return settings_.obsidianEnabled ? 15 : 1; }
+    // The ordered list of Obsidian row IDs currently on screen. Every other
+    // Obsidian-category geometry/hit-testing function derives its answer
+    // from this single source of truth instead of doing arithmetic on the
+    // row number directly - a row's screen position is its rank in this
+    // list, not a fixed formula. For now this always returns the full flat
+    // set (identical to the pre-refactor behavior); a later change makes
+    // sub-rows conditionally present based on which section is expanded.
+    std::vector<int> ObsidianVisibleRows() const {
+        std::vector<int> rows;
+        rows.push_back(kRowObsidianEnabled);
+        if (!settings_.obsidianEnabled) return rows;
+        rows.push_back(kRowVaultPicker);
+        rows.push_back(kRowVaultSearchEnabled);
+        rows.push_back(kRowVaultSearchPrefix);
+        rows.push_back(kRowVaultSearchPillLabel);
+        rows.push_back(kRowTaskAddEnabled);
+        rows.push_back(kRowTaskPrefix);
+        rows.push_back(kRowTaskPillLabel);
+        rows.push_back(kRowTaskPreviewPrefix);
+        rows.push_back(kRowNoteAddEnabled);
+        rows.push_back(kRowNoteAddPrefix);
+        rows.push_back(kRowNoteAddPillLabel);
+        rows.push_back(kRowNoteAddPreviewPrefix);
+        rows.push_back(kRowDailyNoteFolderOverride);
+        rows.push_back(kRowDailyNoteFormatOverride);
+        return rows;
+    }
+
+    int ObsidianRowCount() const { return static_cast<int>(ObsidianVisibleRows().size()); }
+
+    // -1 if row isn't currently visible in the Obsidian section.
+    int ObsidianRowRank(int row) const {
+        const auto rows = ObsidianVisibleRows();
+        const auto it = std::find(rows.begin(), rows.end(), row);
+        return it == rows.end() ? -1 : static_cast<int>(std::distance(rows.begin(), it));
+    }
 
     bool IsRowInCategory(int row, SettingsCategory cat) const {
         if (cat == SettingsCategory::All) {
-            const int maxRow = settings_.obsidianEnabled ? kSettingsMaxRow : kRowObsidianEnabled;
-            return row >= 0 && row <= maxRow;
+            if (row < kRowObsidianEnabled) return row >= 0;
+            return ObsidianRowRank(row) >= 0;
         }
         if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
         if (cat == SettingsCategory::Search) return row >= 7 && row <= 8;
-        if (cat == SettingsCategory::Obsidian) {
-            if (row == kRowObsidianEnabled) return true;
-            if (!settings_.obsidianEnabled) return false;
-            return row > kRowObsidianEnabled && row <= kSettingsMaxRow;
-        }
+        if (cat == SettingsCategory::Obsidian) return ObsidianRowRank(row) >= 0;
         return false;
     }
 
@@ -1180,10 +1209,10 @@ private:
         if (cat == SettingsCategory::Shortcuts) return 3;
         if (cat == SettingsCategory::System) return 6;
         if (cat == SettingsCategory::Search) return 8;
-        if (cat == SettingsCategory::Obsidian) {
-            return settings_.obsidianEnabled ? kSettingsMaxRow : kRowObsidianEnabled;
-        }
-        return settings_.obsidianEnabled ? kSettingsMaxRow : kRowObsidianEnabled;
+        // Obsidian, and the fallback used for "All" (whose last row is
+        // whatever the Obsidian section's current last row is).
+        const auto rows = ObsidianVisibleRows();
+        return rows.empty() ? kRowObsidianEnabled : rows.back();
     }
 
     int NextSettingsRow(int current, int delta) const {
@@ -1265,7 +1294,7 @@ private:
             if (row < 7) return 262.0f + (row - 4) * kSettingsRowHeight;
             if (row < 9) return 441.0f + (row - 7) * kSettingsRowHeight;
             // Obsidian section, All-view only: header@553, card@573.
-            return 573.0f + (row - kRowObsidianEnabled) * kSettingsRowHeight;
+            return 573.0f + ObsidianRowRank(row) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 36.0f + row * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::System) {
@@ -1273,7 +1302,7 @@ private:
         } else if (settingsCategory_ == SettingsCategory::Search) {
             return 36.0f + (row - 7) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Obsidian) {
-            return 36.0f + (row - kRowObsidianEnabled) * kSettingsRowHeight;
+            return 36.0f + ObsidianRowRank(row) * kSettingsRowHeight;
         }
         return 0.0f;
     }
