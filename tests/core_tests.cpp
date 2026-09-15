@@ -5,6 +5,7 @@
 #include "../src/calculator.h"
 #include "../src/obsidian_config.h"
 #include "../src/daily_note.h"
+#include "../src/note_index.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -1223,6 +1224,77 @@ int main() {
         check.close();
         DeleteFileW(notePath.c_str());
         RemoveDirectoryW(vaultRoot.c_str());
+    }
+
+    // --- NoteIndex Tests (Task 3) ---
+    {
+        using namespace leanlauncher::obsidian;
+        std::wstring q;
+        Check(TryParseNoteJumpPrefix(L"note standup", q) && q == L"standup",
+            "TryParseNoteJumpPrefix parses basic 'note <text>'");
+        Check(TryParseNoteJumpPrefix(L"Note standup", q) && q == L"standup",
+            "TryParseNoteJumpPrefix is case-insensitive on the prefix");
+        Check(TryParseNoteJumpPrefix(L"note   standup", q) && q == L"standup",
+            "TryParseNoteJumpPrefix trims extra spaces after the prefix");
+        Check(!TryParseNoteJumpPrefix(L"note", q), "TryParseNoteJumpPrefix rejects bare 'note' with no text");
+        Check(!TryParseNoteJumpPrefix(L"note ", q), "TryParseNoteJumpPrefix rejects 'note ' with only trailing space");
+        Check(!TryParseNoteJumpPrefix(L"notepad", q), "TryParseNoteJumpPrefix requires a space after 'note'");
+        Check(!TryParseNoteJumpPrefix(L"", q), "TryParseNoteJumpPrefix rejects empty input");
+    }
+
+    {
+        using namespace leanlauncher::obsidian;
+        const fs::path vaultRoot(L"D:\\Vault");
+        const NoteItem nested = BuildNoteItem(vaultRoot, vaultRoot / L"06 BJ" / L"10 Daily" / L"2026-09-14.md");
+        Check(nested.title == L"2026-09-14", "BuildNoteItem extracts title (filename minus extension) for a nested note");
+        Check(nested.relativeRef == L"06 BJ/10 Daily/2026-09-14",
+            "BuildNoteItem builds a forward-slash relative ref with no extension");
+        Check(nested.folderDisplay == L"06 BJ/10 Daily",
+            "BuildNoteItem builds a forward-slash folder display path");
+        Check(nested.normTitle == takeoff::Normalize(L"2026-09-14"), "BuildNoteItem normalizes the title for matching");
+
+        const NoteItem root = BuildNoteItem(vaultRoot, vaultRoot / L"Standup.md");
+        Check(root.title == L"Standup", "BuildNoteItem extracts title for a vault-root note");
+        Check(root.relativeRef == L"Standup", "BuildNoteItem relative ref for a vault-root note has no folder prefix");
+        Check(root.folderDisplay.empty(), "BuildNoteItem folder display is empty for a vault-root note");
+    }
+
+    {
+        using namespace leanlauncher::obsidian;
+        wchar_t tempDirBuf[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf);
+        const fs::path tempVault = fs::path(tempDirBuf) / L"LeanLauncherNoteIndexTest";
+        std::error_code noteIndexEc;
+        fs::remove_all(tempVault, noteIndexEc);  // clean starting state
+        fs::create_directories(tempVault / L"06 BJ" / L"10 Daily", noteIndexEc);
+        fs::create_directories(tempVault / L".obsidian" / L"plugins", noteIndexEc);
+
+        {
+            std::ofstream(tempVault / L"Standup.md") << "# Standup\n";
+            std::ofstream(tempVault / L"06 BJ" / L"10 Daily" / L"2026-09-14.md") << "# Daily\n";
+            std::ofstream(tempVault / L"06 BJ" / L"Standup.md") << "# Standup (duplicate title)\n";
+            std::ofstream(tempVault / L".obsidian" / L"plugins" / L"ignored.md") << "should not be indexed\n";
+        }
+
+        NoteIndex::Instance().Start(tempVault.wstring());
+        for (int w = 0; w < 40 && !NoteIndex::Instance().IsReady(); ++w) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        Check(NoteIndex::Instance().IsReady(), "NoteIndex becomes ready against a temp vault");
+        Check(NoteIndex::Instance().Count() == 3,
+            "NoteIndex indexes exactly the 3 .md notes outside .obsidian/");
+
+        auto results = NoteIndex::Instance().Search(L"standup", 10);
+        Check(results.size() == 2, "NoteIndex.Search finds both duplicate-titled notes");
+
+        auto dailyResults = NoteIndex::Instance().Search(L"2026-09-14", 10);
+        Check(dailyResults.size() == 1 && dailyResults[0].relativeRef == L"06 BJ/10 Daily/2026-09-14",
+            "NoteIndex.Search finds the nested daily note with the correct relative ref");
+
+        Check(NoteIndex::Instance().Search(L"").empty(), "NoteIndex.Search with empty query returns 0 results");
+
+        NoteIndex::Instance().Stop();
+        fs::remove_all(tempVault, noteIndexEc);
     }
 
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";
