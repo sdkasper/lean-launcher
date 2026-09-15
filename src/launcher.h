@@ -1653,7 +1653,7 @@ private:
     // -1 if the point misses the list (including when it's closed).
     int VaultDropdownItemAtPoint(float x, float y) const {
         if (!vaultDropdownOpen_) return -1;
-        if (x < 18.0f || x > width_ - 18.0f) return -1;
+        if (x < 16.0f || x > width_ - 16.0f) return -1;
         if (y < kSettingsHeaderHeight || y >= FooterTop()) return -1;
         const float listTop = VaultDropdownTop();
         for (size_t i = 0; i < knownVaults_.size(); ++i) {
@@ -2623,6 +2623,32 @@ private:
             return;
         }
         if (page_ == Page::Settings) {
+            // Close-on-click-away for the vault dropdown, checked before any
+            // other Settings click handling so every zone (header gaps,
+            // footer, scrollbar strip, rows) is covered by one path instead
+            // of needing its own close call.
+            if (vaultDropdownOpen_) {
+                const int clickedItem = VaultDropdownItemAtPoint(x, y);
+                if (clickedItem >= 0) {
+                    SelectVaultDropdownItem(clickedItem);
+                    return;
+                }
+                const bool clickedTrigger = (SettingsRowAtPoint(x, y) == kRowVaultPicker);
+                CloseVaultDropdown();
+                if (clickedTrigger) {
+                    // Clicking the row that opened the dropdown just closes
+                    // it - falling through would immediately reopen it via
+                    // ChangeSetting(kRowVaultPicker) further down.
+                    settingsSelected_ = kRowVaultPicker;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return;
+                }
+                // Click landed elsewhere (header, footer, scrollbar, another
+                // row, or empty space) - fall through so that click still
+                // does its normal thing, same as how an in-progress text
+                // edit is cancelled but the click that cancelled it still
+                // proceeds.
+            }
             if (y < kSettingsHeaderHeight) {
                 if (x < 46.0f) {
                     CloseSettings();
@@ -2639,7 +2665,6 @@ private:
                     const auto r = CategoryTabRect(cat);
                     if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
                         if (editingRow_ >= 0) CancelEditingRow();
-                        if (vaultDropdownOpen_) CloseVaultDropdown();
                         settingsCategory_ = cat;
                         settingsScroll_ = 0.0f;
                         if (!IsRowInCategory(settingsSelected_, settingsCategory_)) {
@@ -2670,7 +2695,6 @@ private:
                         const float progress = (y - trackTop) / (trackBottom - trackTop);
                         settingsScroll_ = std::clamp(progress * maxScroll, 0.0f, maxScroll);
                         settingsDraggingScroll_ = true;
-                        if (vaultDropdownOpen_) CloseVaultDropdown();
                         SetCapture(hwnd_);
                         InvalidateRect(hwnd_, nullptr, FALSE);
                     }
@@ -2678,27 +2702,6 @@ private:
                 return;
             }
 
-            if (vaultDropdownOpen_) {
-                const int clickedItem = VaultDropdownItemAtPoint(x, y);
-                if (clickedItem >= 0) {
-                    SelectVaultDropdownItem(clickedItem);
-                    return;
-                }
-                const bool clickedTrigger = (SettingsRowAtPoint(x, y) == kRowVaultPicker);
-                CloseVaultDropdown();
-                if (clickedTrigger) {
-                    // Clicking the row that opened the dropdown just closes
-                    // it - falling through would immediately reopen it via
-                    // ChangeSetting(kRowVaultPicker) below.
-                    settingsSelected_ = kRowVaultPicker;
-                    InvalidateRect(hwnd_, nullptr, FALSE);
-                    return;
-                }
-                // Click landed elsewhere (another row, or empty space) -
-                // fall through so that click still does its normal thing,
-                // same as how an in-progress text edit is cancelled but the
-                // click that cancelled it still proceeds.
-            }
             const int row = SettingsRowAtPoint(x, y);
             if (row >= 0) {
                 if (recordingRow_ >= 0 && row != recordingRow_) {
