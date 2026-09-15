@@ -1111,6 +1111,48 @@ int main() {
 
     {
         using namespace leanlauncher::obsidian;
+        wchar_t tempDirBuf[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf);
+        const fs::path tempVault = fs::path(tempDirBuf) / L"LeanLauncherResolveDailyNoteConfigTest";
+        std::error_code resolveEc;
+        fs::remove_all(tempVault, resolveEc);
+        fs::create_directories(tempVault / L".obsidian", resolveEc);
+        {
+            std::ofstream(tempVault / L".obsidian" / L"daily-notes.json")
+                << "{\"folder\":\"06 BJ/10 Daily\",\"format\":\"YYYY-MM-DD\"}";
+        }
+
+        const DailyNoteConfig noOverride = ResolveDailyNoteConfig(tempVault.wstring(), L"", L"");
+        Check(noOverride.found && noOverride.folder == L"06 BJ/10 Daily" && noOverride.format == L"YYYY-MM-DD",
+            "ResolveDailyNoteConfig passes through the auto-detected config when both overrides are empty");
+
+        const DailyNoteConfig folderOnly = ResolveDailyNoteConfig(tempVault.wstring(), L"Custom Folder", L"");
+        Check(folderOnly.found && folderOnly.folder == L"Custom Folder" && folderOnly.format == L"YYYY-MM-DD",
+            "ResolveDailyNoteConfig overrides only the folder when only the folder override is set");
+
+        const DailyNoteConfig formatOnly = ResolveDailyNoteConfig(tempVault.wstring(), L"", L"YYYY/MM/DD");
+        Check(formatOnly.found && formatOnly.folder == L"06 BJ/10 Daily" && formatOnly.format == L"YYYY/MM/DD",
+            "ResolveDailyNoteConfig overrides only the format when only the format override is set");
+
+        const DailyNoteConfig both = ResolveDailyNoteConfig(tempVault.wstring(), L"Custom Folder", L"YYYY/MM/DD");
+        Check(both.found && both.folder == L"Custom Folder" && both.format == L"YYYY/MM/DD",
+            "ResolveDailyNoteConfig applies both overrides independently");
+
+        fs::remove_all(tempVault, resolveEc);
+
+        wchar_t tempDirBuf2[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf2);
+        const fs::path emptyVault = fs::path(tempDirBuf2) / L"LeanLauncherResolveDailyNoteConfigNoAutoDetectTest";
+        fs::remove_all(emptyVault, resolveEc);
+        fs::create_directories(emptyVault, resolveEc);
+        const DailyNoteConfig overrideWithNoAutoDetect = ResolveDailyNoteConfig(emptyVault.wstring(), L"Fallback", L"");
+        Check(overrideWithNoAutoDetect.found && overrideWithNoAutoDetect.folder == L"Fallback",
+            "ResolveDailyNoteConfig reports found=true when an override is set, even if vault auto-detection found nothing");
+        fs::remove_all(emptyVault, resolveEc);
+    }
+
+    {
+        using namespace leanlauncher::obsidian;
         std::wstring text;
         Check(TryParsePrefix(L"T buy milk", L"T", text) && text == L"buy milk",
             "TryParsePrefix parses basic '<prefix> <text>'");

@@ -213,6 +213,25 @@ inline DailyNoteConfig ReadDailyNoteConfig(const std::wstring& vaultPath) {
     return DailyNoteConfig{};  // found = false
 }
 
+// Wraps ReadDailyNoteConfig with an optional manual override for the
+// folder and/or format, applied independently. found becomes true whenever
+// either override is set, even if the vault's own plugin config couldn't
+// be read - a user-supplied override is a complete answer on its own, not
+// a fallback that still needs the "could not read config" warning.
+inline DailyNoteConfig ResolveDailyNoteConfig(
+    const std::wstring& vaultPath, const std::wstring& folderOverride, const std::wstring& formatOverride) {
+    DailyNoteConfig config = ReadDailyNoteConfig(vaultPath);
+    if (!folderOverride.empty()) {
+        config.folder = folderOverride;
+        config.found = true;
+    }
+    if (!formatOverride.empty()) {
+        config.format = formatOverride;
+        config.found = true;
+    }
+    return config;
+}
+
 // Quotes a single argument per the Windows command-line escaping rules
 // CommandLineToArgvW (and CreateProcessW's argument parser) expect - not a
 // raw string join, since a note title containing a literal '"' could
