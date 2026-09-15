@@ -5,31 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/takeoff-launcher)
+(MIT licensed, by akiraeng). Versioning restarts at 1.0.0 for the fork's own
+release history below; the inherited pre-fork Takeoff version history is kept
+further down for reference.
+
+## [1.0.0] - 2026-09-15
 
 ### Added
+- **Obsidian Integration** (optional, off by default until a vault is configured): quick task capture (`t <text>` appends a checklist item to today's daily note), quick note capture (`a <text>` appends a plain line), and instant note jump (`o <text>` fuzzy-matches note titles and opens the match via Obsidian's own CLI) - vault and daily-note location are auto-detected by reading Obsidian's own config files, no plugin dependency
+- **Configurable Obsidian Settings**: master enable/disable toggle, a per-action enable toggle for vault search/add task/add-to-note, inline-editable prefix/result-label/preview text per action with prefix-uniqueness validation, and an optional manual daily-note folder/format override for vaults where auto-detection doesn't fit
+- **Vault picker dropdown**: click or press Enter on the Obsidian Vault row to open an overlay list of every detected vault (mouse or Up/Down/Enter/Esc)
+- **Collapsible Settings sections**: each Obsidian action block (and the daily-note-overrides block) collapses to a one-line summary by default, expanding one collapses whichever other was open
+- New application icon
+
+### Changed
+- Rebranded as an independent fork of Takeoff: distinct window class (`LeanLauncherWindow`), single-instance mutex, registry root (`HKCU\Software\LeanLauncher`), and Start Menu shortcut, so it can run alongside a real Takeoff install without colliding
+- Auto-updater repointed at this project's own GitHub releases; disabled by default until this release (see `NFR-003`)
+
+## Pre-fork history (inherited from Takeoff)
+
+The entries below predate the fork and describe functionality already present when Lean Launcher branched off - kept for reference, not part of this project's own version numbering.
+
+### Calculator
+
 - **Built-in Calculator**: Real-time evaluation of mathematical expressions directly within the launcher search bar (e.g. `125 * 8`, `(10 + 20) * 3`, `sqrt(144)`, `2^10`, `10 % 3`, `200 * 15%`).
 - **Instant Result Display & Copy**: Top-ranked calculation result displayed with dedicated calculator badge, immediate `Enter` shortcut to copy the result and close, and `Ctrl+C` to copy without closing.
 - **Calculator Actions**: Context actions (`Ctrl+K`) for copying the numeric result, copying the full calculation (`expression = result`), or opening Windows Calculator.
 
-## [1.0.3] - 2026-09-12
+### [1.0.3] - 2026-09-12
 
-### Added
+#### Added
 - **Automatic Silent Update Downloading**: Releases are downloaded in the background from GitHub Releases using WinHTTP streaming with HTTP 302 cross-domain redirect following (GitHub to AWS S3).
 - **Restart to Update**: Interactive "Restart to Update" button in the footer and tray menu once an update has been silently downloaded and validated.
 - **Robust In-Place Executable Swap**: Atomic executable replacement with rollback protection, retry loops for transient antivirus scanner locks, and UAC elevation fallback for protected install locations.
 - **PE Executable Verification**: Integrity check verifying DOS magic, `IMAGE_NT_SIGNATURE`, and x64 architecture before any update can be staged or installed.
 
-## [1.0.2] - 2026-09-09
+### [1.0.2] - 2026-09-09
 
-### Added
+#### Added
 - **Broad File & Folder Search**: Comprehensive in-memory file search indexing primary user folders and all fixed/removable drives with deep directory traversal (up to depth 8) and up to 150,000 files.
 - **Folder & Path-Aware Search**: Direct matching of directory names as first-class items, multi-token path queries (e.g. `takeoff main` or `X:/takeoff-launcher`), and path substring matching.
 - **Scrollable Settings**: Direct2D primitive-clipped settings viewport preventing footer overlap, with smooth mouse wheel scrolling, keyboard navigation, and custom scrollbar indicator.
 
-## [1.0.0] - 2026-09-09
+### [1.0.0] - 2026-09-09
 
-### Added
+#### Added
 - **Native Windows Acrylic Interface**: High-performance Win32 UI powered by Direct2D and DirectWrite with real DWM acrylic blur on Windows 11 and compositor acrylic accent policy on Windows 10.
 - **Fast Fuzzy Search**: In-memory app indexing and weighted fuzzy matching supporting exact matches, acronyms (e.g. `vsc` for Visual Studio Code, `tm` for Task Manager), multi-token prefixes, and custom aliases.
 - **System & Settings Applet Indexing**: Search for Control Panel tools and Windows settings (e.g., Device Manager, Services, Windows Update).
