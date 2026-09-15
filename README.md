@@ -37,6 +37,7 @@
 - **Built-in Calculator** - Instantly evaluate mathematical expressions (e.g. `125 * 8`, `sqrt(144)`, `2^10`, `(10 + 20) * 3`). Press `Enter` to copy the result to the clipboard and close, or `Ctrl+C` to copy directly.
 - **Keyboard-First** - Launch, elevate to admin (`Ctrl+Enter`), and trigger quick-launch slots (`Alt+1`-`8`) without touching your mouse.
 - **Privacy First** - Zero telemetry, zero analytics, and zero background services. Search history is never written to disk.
+- **About tab** - version, author, and a link to the GitHub repo, right from Settings.
 
 ### Obsidian Integration
 

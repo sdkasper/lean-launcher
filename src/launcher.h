@@ -929,7 +929,10 @@ private:
             NOTIFYICONDATAW data{sizeof(data)};
             data.hWnd = hwnd_;
             data.uID = 1;
-            data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+            // NIF_SHOWTIP is required for the hover tooltip to actually render
+            // once NIM_SETVERSION below opts into NOTIFYICON_VERSION_4 - NIF_TIP
+            // alone stores szTip but the shell won't display it under v4 behavior.
+            data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
             data.uCallbackMessage = kTrayMessage;
             // Load the crisp small variant from the .ico; the shell copies it.
             HICON icon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr),
@@ -1124,14 +1127,15 @@ private:
         }
     }
 
-    enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, Obsidian };
+    enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, Obsidian, About };
 
     // Settings rows 0-3: keyboard shortcuts. 4-6: system. 7-8: search.
     // 9-27: Obsidian (only row 9 is active when settings_.obsidianEnabled is
     // false - see IsRowInCategory/ObsidianRowCount). Each of the four
     // *Summary rows is always shown when Obsidian is enabled; its detail
     // rows only appear while obsidianExpandedSection_ names that section -
-    // see ObsidianVisibleRows(). 28 is the Reset button, handled as a
+    // see ObsidianVisibleRows(). 29 is the About tab's one row (not part of
+    // "All" - see IsRowInCategory). 30 is the Reset button, handled as a
     // sentinel row rather than a real settings row.
     static constexpr int kRowObsidianEnabled = 9;
     static constexpr int kRowVaultPicker = 10;
@@ -1152,8 +1156,9 @@ private:
     static constexpr int kRowOverridesSummary = 25;
     static constexpr int kRowDailyNoteFolderOverride = 26;
     static constexpr int kRowDailyNoteFormatOverride = 27;
-    static constexpr int kSettingsMaxRow = 27;
-    static constexpr int kRowResetToDefaults = 28;
+    static constexpr int kRowAboutGithubLink = 29;
+    static constexpr int kSettingsMaxRow = 29;
+    static constexpr int kRowResetToDefaults = 30;
 
     // Which of the four Obsidian action blocks is currently expanded, or
     // -1 if all are collapsed. A single int gives accordion behavior for
@@ -1226,6 +1231,7 @@ private:
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
         if (cat == SettingsCategory::Search) return row >= 7 && row <= 8;
         if (cat == SettingsCategory::Obsidian) return ObsidianRowRank(row) >= 0;
+        if (cat == SettingsCategory::About) return row == kRowAboutGithubLink;
         return false;
     }
 
@@ -1234,6 +1240,7 @@ private:
         if (cat == SettingsCategory::System) return 4;
         if (cat == SettingsCategory::Search) return 7;
         if (cat == SettingsCategory::Obsidian) return kRowObsidianEnabled;
+        if (cat == SettingsCategory::About) return kRowAboutGithubLink;
         return 0;
     }
 
@@ -1241,6 +1248,7 @@ private:
         if (cat == SettingsCategory::Shortcuts) return 3;
         if (cat == SettingsCategory::System) return 6;
         if (cat == SettingsCategory::Search) return 8;
+        if (cat == SettingsCategory::About) return kRowAboutGithubLink;
         // Obsidian, and the fallback used for "All" (whose last row is
         // whatever the Obsidian section's current last row is).
         const auto rows = ObsidianVisibleRows();
@@ -1282,6 +1290,9 @@ private:
         } else if (cat == SettingsCategory::Obsidian) {
             x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f + 68.0f + 6.0f;
             w = 84.0f;  // wider than the old 68px "Vault" tab to fit "Obsidian"
+        } else if (cat == SettingsCategory::About) {
+            x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f + 68.0f + 6.0f + 84.0f + 6.0f;
+            w = 58.0f;
         }
         return D2D1::RectF(x, y, x + w, y + h);
     }
@@ -1304,6 +1315,9 @@ private:
         } else if (settingsCategory_ == SettingsCategory::Obsidian) {
             // 36 header offset + N rows + 16 bottom padding.
             return 36.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
+        } else if (settingsCategory_ == SettingsCategory::About) {
+            // 86 = version/author info lines + "LINKS" header offset; 1 row + 16 bottom padding.
+            return 86.0f + kSettingsRowHeight + 16.0f;
         }
         return 200.0f;
     }
@@ -1335,6 +1349,8 @@ private:
             return 36.0f + (row - 7) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Obsidian) {
             return 36.0f + ObsidianRowRank(row) * kSettingsRowHeight;
+        } else if (settingsCategory_ == SettingsCategory::About) {
+            return 86.0f;
         }
         return 0.0f;
     }
@@ -1379,7 +1395,7 @@ private:
             else if (row == 7) sectionHeaderTop = 421.0f;
             else if (row == kRowObsidianEnabled) sectionHeaderTop = 553.0f;
         } else {
-            if (row == 0 || row == 4 || row == 7 || row == kRowObsidianEnabled) sectionHeaderTop = 16.0f;
+            if (row == 0 || row == 4 || row == 7 || row == kRowObsidianEnabled || row == kRowAboutGithubLink) sectionHeaderTop = 16.0f;
         }
         const float visibleTop = sectionHeaderTop;
         const float visibleBottom = rBottom + 8.0f;
@@ -1850,6 +1866,10 @@ private:
         }
         if (row == kRowVaultPicker) {
             OpenVaultDropdown();
+            return;
+        }
+        if (row == kRowAboutGithubLink) {
+            ShellExecuteW(nullptr, L"open", takeoff::kRepoUrl, nullptr, nullptr, SW_SHOWNORMAL);
             return;
         }
         if (row == kRowVaultSearchSummary) { ToggleObsidianSection(kSectionVaultSearch); return; }
@@ -2757,7 +2777,8 @@ private:
                     SettingsCategory::Shortcuts,
                     SettingsCategory::System,
                     SettingsCategory::Search,
-                    SettingsCategory::Obsidian
+                    SettingsCategory::Obsidian,
+                    SettingsCategory::About
                 };
                 for (auto cat : categories) {
                     const auto r = CategoryTabRect(cat);
@@ -4285,6 +4306,20 @@ private:
             }
         }
 
+        if (settingsCategory_ == SettingsCategory::About) {
+            Text(std::wstring(L"Lean Launcher v") + takeoff::kAppVersion,
+                D2D1::RectF(24, 16.0f + offsetY, width_ - 24, 34.0f + offsetY),
+                resultFormat_.Get(), Foreground());
+            Text(L"Made by LeanProductivity - Sascha D. Kasper",
+                D2D1::RectF(24, 38.0f + offsetY, width_ - 24, 56.0f + offsetY),
+                hintFormat_.Get(), Muted());
+
+            drawCard(L"LINKS", 66.0f, 86.0f, 1);
+            DrawSettingsRow(kRowAboutGithubLink, 86.0f + offsetY, L"View on GitHub",
+                L"Open the Lean Launcher repository in your browser",
+                L"github.com/sdkasper/lean-launcher", false, false, true);
+        }
+
         target_->PopAxisAlignedClip();
 
         // Subtle modern scrollbar thumb if content exceeds viewport
@@ -4331,10 +4366,11 @@ private:
             SettingsCategory::Shortcuts,
             SettingsCategory::System,
             SettingsCategory::Search,
-            SettingsCategory::Obsidian
+            SettingsCategory::Obsidian,
+            SettingsCategory::About
         };
-        const wchar_t* catLabels[] = {L"All", L"Shortcuts", L"System", L"Search", L"Obsidian"};
-        for (int i = 0; i < 5; ++i) {
+        const wchar_t* catLabels[] = {L"All", L"Shortcuts", L"System", L"Search", L"Obsidian", L"About"};
+        for (int i = 0; i < 6; ++i) {
             const auto cat = categories[i];
             const auto tabRect = CategoryTabRect(cat);
             const bool active = (settingsCategory_ == cat);

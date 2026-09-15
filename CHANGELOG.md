@@ -10,6 +10,14 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.0.1] - 2026-09-15
+
+### Added
+- **About tab** in Settings: shows the app name and version, an author/attribution line, and a "View on GitHub" link that opens the repository in your browser
+
+### Fixed
+- **System tray icon tooltip**: hovering the tray icon now shows "Lean Launcher", matching other tray apps. Previously the tooltip text was set but never rendered, because Windows requires the `NIF_SHOWTIP` flag once an icon opts into modern (`NOTIFYICON_VERSION_4`) notification behavior - `NIF_TIP` alone isn't enough
+
 ## [1.0.0] - 2026-09-15
 
 ### Added
