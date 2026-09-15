@@ -1733,6 +1733,15 @@ private:
     // expanding the already-expanded section collapses it instead.
     void ToggleObsidianSection(int section) {
         obsidianExpandedSection_ = (obsidianExpandedSection_ == section) ? -1 : section;
+        // Expanding/collapsing changes SettingsContentBottom() by up to a
+        // section's worth of rows - clamp scroll back into range (collapse
+        // can leave it past the new, shorter bottom) and, when expanding,
+        // scroll the newly-revealed rows into view (they can land below
+        // the fold with no other cue that anything changed).
+        settingsScroll_ = std::clamp(settingsScroll_, 0.0f, SettingsMaxScroll());
+        if (obsidianExpandedSection_ >= 0) {
+            EnsureSettingsVisible(LastRowInCategory(settingsCategory_));
+        }
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
