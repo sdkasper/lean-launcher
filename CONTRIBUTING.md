@@ -1,8 +1,10 @@
-﻿# Contributing to Takeoff
+﻿# Contributing to Lean Launcher
 
-Thank you for your interest in contributing to Takeoff!
+Thank you for your interest in contributing to Lean Launcher!
 
-Takeoff is a lightweight, focused, native Windows application launcher built with Win32, Direct2D, and DirectWrite. Our primary design principles are **speed, responsiveness, minimal resource usage, zero telemetry, and zero heavy dependencies**.
+Lean Launcher is a lightweight, focused, native Windows application launcher built with Win32, Direct2D, and DirectWrite, with an optional Obsidian integration. Its primary design principles are **speed, responsiveness, minimal resource usage, zero telemetry, and zero heavy dependencies**.
+
+This is a solo-maintained project ([@sdkasper](https://github.com/sdkasper)) - there's no team behind it, so please be patient with review turnaround. All contributions, big or small, are genuinely welcome.
 
 ## Design Philosophy
 
@@ -10,6 +12,7 @@ Takeoff is a lightweight, focused, native Windows application launcher built wit
 - **Instant Response**: Keystroke processing and search indexing must feel instantaneous (< 5ms response time).
 - **Privacy First**: Zero telemetry, zero tracking, zero background web services. Network access is strictly restricted to checking GitHub Releases when enabled.
 - **Reliability and Fallback**: Maintain graceful fallbacks for transparency, high contrast, and varying Windows versions (Windows 10 1809+ and Windows 11).
+- **Obsidian Integration is Opt-In**: The Obsidian integration must never be required for the launcher's core app-launching functionality, and must never require Obsidian itself to be running for task/note capture (direct file writes, not a dependency on a live Obsidian process except for note-jump, which hands off to Obsidian's own CLI).
 
 ## Development Setup
 
@@ -25,10 +28,10 @@ Takeoff is a lightweight, focused, native Windows application launcher built wit
 
 #### Option A: Visual Studio 2022 (IDE)
 
-1. Open `Takeoff.sln` in Visual Studio.
+1. Open `LeanLauncher.sln` in Visual Studio.
 2. Set configuration to `Release` and platform to `x64`.
 3. Choose **Build > Build Solution** (or press `Ctrl+Shift+B`).
-4. The executable will be produced at `x64\Release\Takeoff.exe`.
+4. The executable will be produced at `build\Release\LeanLauncher.exe`.
 
 #### Option B: CMake (Command Line)
 
@@ -40,7 +43,7 @@ cmake -S . -B build -A x64
 cmake --build build --config Release
 ```
 
-The output executable will be located at `build\Release\Takeoff.exe`.
+The output executable will be located at `build\Release\LeanLauncher.exe`.
 
 ## Running Tests
 
@@ -55,7 +58,7 @@ ctest --test-dir build -C Release --output-on-failure
 You can also run the test executable directly:
 
 ```powershell
-.\build\Release\TakeoffCoreTests.exe
+.\build\Release\LeanLauncherCoreTests.exe
 ```
 
 ### UI Smoke Test
@@ -63,10 +66,10 @@ You can also run the test executable directly:
 An interactive UI smoke test validates window creation, acrylic composition, caret blinking, text selection, and actions overlay using a standalone fixture window:
 
 ```powershell
-py tests/ui_smoke.py build/Release/TakeoffUiTests.exe
+py tests/ui_smoke.py build/Release/LeanLauncherUiTests.exe
 ```
 
-*Note: The test executable `TakeoffUiTests.exe` runs in an isolated mode with separate window classes and mutexes, so it does not interfere with your running launcher.*
+*Note: The test executable `LeanLauncherUiTests.exe` runs in an isolated mode with separate window classes and mutexes, so it does not interfere with your running launcher.*
 
 ## Code Style & Guidelines
 
@@ -82,7 +85,7 @@ py tests/ui_smoke.py build/Release/TakeoffUiTests.exe
 
 ## Pull Request Process
 
-1. **Check Issues**: For significant changes or new features, please check existing issues or open a discussion issue first.
-2. **Branch**: Create a feature branch off `main` (`git checkout -b feature/your-feature-name`).
+1. **Check Issues**: For significant changes or new features, please check existing issues or [open a discussion](https://github.com/sdkasper/lean-launcher/discussions) first.
+2. **Branch**: Create a feature branch off `master` (`git checkout -b feature/your-feature-name`).
 3. **Verify**: Ensure both Visual Studio and CMake builds compile cleanly without warnings, and all `ctest` tests pass.
 4. **Submit**: Open a Pull Request with a clear title, description of the change, and notes on how you verified it.
