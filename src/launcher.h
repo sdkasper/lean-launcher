@@ -86,6 +86,7 @@ private:
     static constexpr float kFooterHeight = 42.0f;
     static constexpr float kSettingsHeaderHeight = 46.0f;
     static constexpr float kSettingsRowHeight = 47.0f;
+    static constexpr float kVaultDropdownItemHeight = 36.0f;
     static constexpr int kVisibleRows = 8;
     static constexpr float kTextLeft = 48.0f;
     static constexpr wchar_t kSettingsRegistryPath[] = L"Software\\LeanLauncher";
@@ -1296,6 +1297,7 @@ private:
         const float newScroll = std::clamp(settingsScroll_ + delta, 0.0f, maxScroll);
         if (newScroll != settingsScroll_) {
             settingsScroll_ = newScroll;
+            if (vaultDropdownOpen_) CloseVaultDropdown();
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
     }
@@ -1339,6 +1341,8 @@ private:
         settingsStatus_.clear();
         recordingRow_ = -1;
         editingRow_ = -1;
+        vaultDropdownOpen_ = false;
+        vaultDropdownHighlight_ = -1;
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
         knownVaults_ = leanlauncher::obsidian::FindKnownVaults();
@@ -1349,6 +1353,8 @@ private:
         page_ = Page::Launcher;
         recordingRow_ = -1;
         editingRow_ = -1;
+        vaultDropdownOpen_ = false;
+        vaultDropdownHighlight_ = -1;
         settingsScroll_ = 0.0f;
         settingsDraggingScroll_ = false;
         ResetCaret();
@@ -1582,6 +1588,8 @@ private:
     void ResetToDefaults() {
         recordingRow_ = -1;
         editingRow_ = -1;
+        vaultDropdownOpen_ = false;
+        vaultDropdownHighlight_ = -1;
         settingsStatus_.clear();
         settings_ = quicklaunch::Settings{};
         if constexpr (!kUiTest) {
@@ -1596,25 +1604,65 @@ private:
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
-    void CycleVaultSelection() {
+    // Screen-space Y where the vault dropdown list begins - directly below
+    // the "Obsidian Vault" row at its current scroll position.
+    float VaultDropdownTop() const {
+        return SettingsRowTop(kRowVaultPicker) + kSettingsRowHeight + (kSettingsHeaderHeight - settingsScroll_);
+    }
+
+    void OpenVaultDropdown() {
         if (knownVaults_.empty()) {
             settingsStatus_ = L"No Obsidian vaults found. Open a vault in Obsidian, then reopen Settings.";
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
-        size_t nextIndex = 0;
+        if (editingRow_ >= 0) CancelEditingRow();
+        vaultDropdownOpen_ = true;
         const auto it = std::find(knownVaults_.begin(), knownVaults_.end(), obsidianVaultPath_);
-        if (it != knownVaults_.end()) {
-            nextIndex = (static_cast<size_t>(std::distance(knownVaults_.begin(), it)) + 1) % knownVaults_.size();
+        vaultDropdownHighlight_ = (it != knownVaults_.end())
+            ? static_cast<int>(std::distance(knownVaults_.begin(), it))
+            : 0;
+        settingsStatus_.clear();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void CloseVaultDropdown() {
+        vaultDropdownOpen_ = false;
+        vaultDropdownHighlight_ = -1;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    // -1 leaves the current vault unchanged (used when the dropdown is
+    // dismissed without picking anything, e.g. Esc or click-away).
+    void SelectVaultDropdownItem(int index) {
+        if (index < 0 || index >= static_cast<int>(knownVaults_.size())) {
+            CloseVaultDropdown();
+            return;
         }
-        obsidianVaultPath_ = knownVaults_[nextIndex];
+        obsidianVaultPath_ = knownVaults_[index];
         dailyNoteConfig_ = leanlauncher::obsidian::ResolveDailyNoteConfig(
             obsidianVaultPath_, settings_.dailyNoteFolderOverride, settings_.dailyNoteFormatOverride);
         if constexpr (!kUiTest) {
             leanlauncher::obsidian::NoteIndex::Instance().Restart(obsidianVaultPath_, hwnd_);
         }
         SaveSettings();
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        CloseVaultDropdown();
+    }
+
+    // Index into knownVaults_ for a point inside the open dropdown list, or
+    // -1 if the point misses the list (including when it's closed).
+    int VaultDropdownItemAtPoint(float x, float y) const {
+        if (!vaultDropdownOpen_) return -1;
+        if (x < 18.0f || x > width_ - 18.0f) return -1;
+        if (y < kSettingsHeaderHeight || y >= FooterTop()) return -1;
+        const float listTop = VaultDropdownTop();
+        for (size_t i = 0; i < knownVaults_.size(); ++i) {
+            const float itemTop = listTop + static_cast<float>(i) * kVaultDropdownItemHeight;
+            if (y >= itemTop && y < itemTop + kVaultDropdownItemHeight) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
     }
 
     // Maps an editable Settings row to the Settings field it edits, or
@@ -1707,7 +1755,7 @@ private:
             return;
         }
         if (row == kRowVaultPicker) {
-            CycleVaultSelection();
+            OpenVaultDropdown();
             return;
         }
         if (row == kRowVaultSearchEnabled) {
@@ -1967,6 +2015,23 @@ private:
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
         if (page_ == Page::Settings) {
+            if (vaultDropdownOpen_) {
+                if (key == VK_UP) {
+                    const int count = static_cast<int>(knownVaults_.size());
+                    if (count > 0) vaultDropdownHighlight_ = (vaultDropdownHighlight_ - 1 + count) % count;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                if (key == VK_DOWN) {
+                    const int count = static_cast<int>(knownVaults_.size());
+                    if (count > 0) vaultDropdownHighlight_ = (vaultDropdownHighlight_ + 1) % count;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                if (key == VK_RETURN) { SelectVaultDropdownItem(vaultDropdownHighlight_); return 0; }
+                if (key == VK_ESCAPE) { CloseVaultDropdown(); return 0; }
+                return 0;
+            }
             if (editingRow_ >= 0) {
                 if (key == VK_RETURN) { CommitEditingRow(); return 0; }
                 if (key == VK_ESCAPE) { CancelEditingRow(); return 0; }
@@ -2574,6 +2639,7 @@ private:
                     const auto r = CategoryTabRect(cat);
                     if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
                         if (editingRow_ >= 0) CancelEditingRow();
+                        if (vaultDropdownOpen_) CloseVaultDropdown();
                         settingsCategory_ = cat;
                         settingsScroll_ = 0.0f;
                         if (!IsRowInCategory(settingsSelected_, settingsCategory_)) {
@@ -2604,6 +2670,7 @@ private:
                         const float progress = (y - trackTop) / (trackBottom - trackTop);
                         settingsScroll_ = std::clamp(progress * maxScroll, 0.0f, maxScroll);
                         settingsDraggingScroll_ = true;
+                        if (vaultDropdownOpen_) CloseVaultDropdown();
                         SetCapture(hwnd_);
                         InvalidateRect(hwnd_, nullptr, FALSE);
                     }
@@ -2611,6 +2678,27 @@ private:
                 return;
             }
 
+            if (vaultDropdownOpen_) {
+                const int clickedItem = VaultDropdownItemAtPoint(x, y);
+                if (clickedItem >= 0) {
+                    SelectVaultDropdownItem(clickedItem);
+                    return;
+                }
+                const bool clickedTrigger = (SettingsRowAtPoint(x, y) == kRowVaultPicker);
+                CloseVaultDropdown();
+                if (clickedTrigger) {
+                    // Clicking the row that opened the dropdown just closes
+                    // it - falling through would immediately reopen it via
+                    // ChangeSetting(kRowVaultPicker) below.
+                    settingsSelected_ = kRowVaultPicker;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return;
+                }
+                // Click landed elsewhere (another row, or empty space) -
+                // fall through so that click still does its normal thing,
+                // same as how an in-progress text edit is cancelled but the
+                // click that cancelled it still proceeds.
+            }
             const int row = SettingsRowAtPoint(x, y);
             if (row >= 0) {
                 if (recordingRow_ >= 0 && row != recordingRow_) {
@@ -2753,8 +2841,17 @@ private:
                     const float newScroll = progress * maxScroll;
                     if (newScroll != settingsScroll_) {
                         settingsScroll_ = newScroll;
+                        if (vaultDropdownOpen_) CloseVaultDropdown();
                         InvalidateRect(hwnd_, nullptr, FALSE);
                     }
+                }
+                return;
+            }
+            if (vaultDropdownOpen_) {
+                const int hoveredItem = VaultDropdownItemAtPoint(x, y);
+                if (hoveredItem >= 0 && hoveredItem != vaultDropdownHighlight_) {
+                    vaultDropdownHighlight_ = hoveredItem;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
                 }
                 return;
             }
@@ -2762,7 +2859,7 @@ private:
             int row = -1;
             if (y < kSettingsHeaderHeight) {
                 if (x >= resetRect.left && x <= resetRect.right && y >= resetRect.top && y <= resetRect.bottom) {
-                    row = 10;
+                    row = kRowResetToDefaults;
                 }
             } else if (y >= kSettingsHeaderHeight && y < FooterTop() && x < width_ - 14.0f) {
                 row = SettingsRowAtPoint(x, y);
@@ -3842,6 +3939,46 @@ private:
         }
     }
 
+    // Overlay popup for the vault picker - drawn on top of whatever rows
+    // are beneath it rather than pushing them down, so the fixed row-index
+    // geometry (SettingsRowTop et al.) never needs to account for it.
+    void DrawVaultDropdown() {
+        if (!vaultDropdownOpen_ || knownVaults_.empty()) return;
+        const float viewportTop = kSettingsHeaderHeight;
+        const float viewportBottom = FooterTop();
+        target_->PushAxisAlignedClip(
+            D2D1::RectF(0, viewportTop, width_, viewportBottom),
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+        const float listTop = VaultDropdownTop();
+        const float listHeight = static_cast<float>(knownVaults_.size()) * kVaultDropdownItemHeight;
+        const auto listRect = D2D1::RectF(16, listTop, width_ - 16, listTop + listHeight);
+
+        Fill(listRect, highContrast_ ? SystemColor(COLOR_BTNFACE) : D2D1::ColorF(0x1C1C1E, 0.98f), 8.0f);
+        brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.14f));
+        target_->DrawRoundedRectangle(D2D1::RoundedRect(listRect, 8.0f, 8.0f), brush_.Get(), 1.0f);
+
+        for (size_t i = 0; i < knownVaults_.size(); ++i) {
+            const float itemTop = listTop + static_cast<float>(i) * kVaultDropdownItemHeight;
+            const bool highlighted = (static_cast<int>(i) == vaultDropdownHighlight_);
+            const bool current = (knownVaults_[i] == obsidianVaultPath_);
+            if (highlighted) {
+                Fill(D2D1::RectF(18, itemTop + 1, width_ - 18, itemTop + kVaultDropdownItemHeight - 1),
+                    highContrast_ ? SystemColor(COLOR_HIGHLIGHT) : D2D1::ColorF(1, 1, 1, 0.10f), 5.0f);
+            }
+            const auto textColor = highContrast_ && highlighted ? SystemColor(COLOR_HIGHLIGHTTEXT)
+                : current ? Foreground() : Muted();
+            Text(fs::path(knownVaults_[i]).filename().wstring(),
+                D2D1::RectF(32, itemTop, width_ - 44, itemTop + kVaultDropdownItemHeight),
+                hintFormat_.Get(), textColor);
+            if (current) {
+                Text(L"✓", D2D1::RectF(width_ - 44, itemTop, width_ - 24, itemTop + kVaultDropdownItemHeight),
+                    hintFormat_.Get(), textColor, DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+        }
+        target_->PopAxisAlignedClip();
+    }
+
     void DrawSettings() {
         const float viewportTop = kSettingsHeaderHeight;
         const float viewportBottom = FooterTop();
@@ -4103,6 +4240,8 @@ private:
         Text(versionText,
             D2D1::RectF(width_ - 120, top, width_ - 20, height_), hintFormat_.Get(), Muted(),
             DWRITE_TEXT_ALIGNMENT_TRAILING);
+
+        DrawVaultDropdown();
     }
 
     void Paint() {
@@ -4168,6 +4307,8 @@ private:
     SettingsCategory settingsCategory_ = SettingsCategory::All;
     int recordingRow_ = -1;
     int editingRow_ = -1;
+    bool vaultDropdownOpen_ = false;
+    int vaultDropdownHighlight_ = -1;  // index into knownVaults_ while the dropdown is open
     float textScroll_ = 0, caretX_ = kTextLeft, mouseX_ = 0, mouseY_ = 0;
     float settingsScroll_ = 0.0f;
     bool settingsDraggingScroll_ = false;
