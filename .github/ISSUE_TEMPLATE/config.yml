@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: General Questions
+    url: https://github.com/sdkasper/lean-launcher/discussions
+    about: For open questions or ideas not ready to be filed as issues.

@@ -1,6 +1,6 @@
 ﻿---
 name: Bug report
-about: Create a report to help us improve Takeoff
+about: Create a report to help us improve Lean Launcher
 title: '[BUG] '
 labels: bug
 assignees: ''
@@ -24,10 +24,11 @@ A clear and concise description of what you expected to happen.
 If applicable, add screenshots or screen recordings to help explain the problem.
 
 **Environment (please complete the following information):**
-- OS: [e.g. Windows 11 23H2 / Windows 10 22H2]
-- Takeoff Version: [e.g. 1.0.0, or commit hash]
+- OS: [e.g. Windows 11 24H2 / Windows 10 22H2]
+- Lean Launcher Version: [e.g. 1.0.0, or commit hash]
 - Display Scaling / DPI: [e.g. 100%, 125%, 150%, multi-monitor]
 - Transparency enabled in Windows Settings: [Yes / No]
+- Obsidian integration enabled: [Yes / No - if yes, which actions: vault search / add task / add to note]
 
 **Additional context**
 Add any other context about the problem here (e.g. installed applications that aren't appearing in search).

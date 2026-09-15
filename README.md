@@ -93,8 +93,10 @@ See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 Use this repo to report bugs, request features, or ask questions.
 
-- [Report a Bug](https://github.com/sdkasper/lean-launcher/issues/new)
-- [Request a Feature](https://github.com/sdkasper/lean-launcher/issues/new)
+- [Report a Bug](https://github.com/sdkasper/lean-launcher/issues/new?assignees=&labels=bug&template=bug_report.md)
+- [Request a Feature](https://github.com/sdkasper/lean-launcher/issues/new?assignees=&labels=enhancement&template=feature_request.md)
+- [Report a Performance Issue](https://github.com/sdkasper/lean-launcher/issues/new?assignees=&labels=performance&template=performance_issue.md)
+- [Ask a Question / Share Feedback](https://github.com/sdkasper/lean-launcher/discussions)
 
 ## License
 
