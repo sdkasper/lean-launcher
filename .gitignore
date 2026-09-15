@@ -37,3 +37,6 @@ __pycache__/
 # OS files
 Thumbs.db
 .DS_Store
+
+# Subagent-driven-development scratch workspace (ledgers, briefs, reports)
+/.superpowers/
