@@ -293,6 +293,23 @@ private:
             return 0;
         case WM_CHAR:
             if (ShouldShowHotkeyWarning()) return 0;
+            if (page_ == Page::Settings && editingRow_ >= 0 && wParam >= L' ' && wParam != 0x7F) {
+                const wchar_t ch = static_cast<wchar_t>(wParam);
+                if (ch >= 0xD800 && ch <= 0xDBFF) {
+                    pendingSurrogate_ = ch;
+                    return 0;
+                }
+                if (ch >= 0xDC00 && ch <= 0xDFFF) {
+                    if (!pendingSurrogate_) return 0;
+                    const wchar_t pair[]{pendingSurrogate_, ch};
+                    settingsEdit_.Insert(std::wstring_view(pair, 2));
+                } else {
+                    settingsEdit_.Insert(std::wstring_view(&ch, 1));
+                }
+                pendingSurrogate_ = 0;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
             if (page_ == Page::Launcher && !actionsOpen_ && wParam >= L' ' && wParam != 0x7F &&
                 (!(GetKeyState(VK_CONTROL) & 0x8000) || (GetKeyState(VK_MENU) & 0x8000))) {
                 const wchar_t ch = static_cast<wchar_t>(wParam);
@@ -1599,6 +1616,73 @@ private:
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
+    // Maps an editable Settings row to the Settings field it edits, or
+    // nullptr if the row isn't a free-text row. Centralizes the mapping so
+    // ChangeSetting/BeginEditingRow/CommitEditingRow can't drift apart.
+    std::wstring* SettingsTextFieldForRow(int row) {
+        switch (row) {
+        case kRowVaultSearchPrefix: return &settings_.vaultSearchPrefix;
+        case kRowVaultSearchPillLabel: return &settings_.vaultSearchPillLabel;
+        case kRowTaskPrefix: return &settings_.taskPrefix;
+        case kRowTaskPillLabel: return &settings_.taskPillLabel;
+        case kRowTaskPreviewPrefix: return &settings_.taskPreviewPrefix;
+        case kRowNoteAddPrefix: return &settings_.noteAddPrefix;
+        case kRowNoteAddPillLabel: return &settings_.noteAddPillLabel;
+        case kRowNoteAddPreviewPrefix: return &settings_.noteAddPreviewPrefix;
+        case kRowDailyNoteFolderOverride: return &settings_.dailyNoteFolderOverride;
+        case kRowDailyNoteFormatOverride: return &settings_.dailyNoteFormatOverride;
+        default: return nullptr;
+        }
+    }
+
+    bool IsPrefixRow(int row) const {
+        return row == kRowVaultSearchPrefix || row == kRowTaskPrefix || row == kRowNoteAddPrefix;
+    }
+
+    void BeginEditingRow(int row, const std::wstring& currentValue) {
+        if (editingRow_ == row) return;
+        editingRow_ = row;
+        settingsEdit_.text = currentValue;
+        settingsEdit_.anchor = 0;
+        settingsEdit_.caret = currentValue.size();
+        settingsStatus_.clear();
+        ResetCaret();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void CommitEditingRow() {
+        std::wstring* field = SettingsTextFieldForRow(editingRow_);
+        if (!field) {
+            editingRow_ = -1;
+            return;
+        }
+        if (IsPrefixRow(editingRow_)) {
+            std::wstring vaultSearchCandidate = settings_.vaultSearchPrefix;
+            std::wstring taskCandidate = settings_.taskPrefix;
+            std::wstring noteAddCandidate = settings_.noteAddPrefix;
+            if (editingRow_ == kRowVaultSearchPrefix) vaultSearchCandidate = settingsEdit_.text;
+            else if (editingRow_ == kRowTaskPrefix) taskCandidate = settingsEdit_.text;
+            else if (editingRow_ == kRowNoteAddPrefix) noteAddCandidate = settingsEdit_.text;
+            if (const wchar_t* error = leanlauncher::obsidian::FindPrefixConflict(
+                    vaultSearchCandidate, taskCandidate, noteAddCandidate)) {
+                settingsStatus_ = error;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return;  // stay in edit mode so the user can fix it
+            }
+        }
+        *field = settingsEdit_.text;
+        editingRow_ = -1;
+        settingsStatus_.clear();
+        SaveSettings();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void CancelEditingRow() {
+        editingRow_ = -1;
+        settingsStatus_.clear();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
     void ChangeSetting(int row) {
         settingsStatus_.clear();
         if (row == kRowResetToDefaults) {
@@ -1882,6 +1966,45 @@ private:
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
         if (page_ == Page::Settings) {
+            if (editingRow_ >= 0) {
+                if (key == VK_RETURN) { CommitEditingRow(); return 0; }
+                if (key == VK_ESCAPE) { CancelEditingRow(); return 0; }
+                if (key == VK_LEFT) {
+                    settingsEdit_.Move(false, shift, control);
+                    ResetCaret();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                if (key == VK_RIGHT) {
+                    settingsEdit_.Move(true, shift, control);
+                    ResetCaret();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                if (key == VK_HOME) {
+                    settingsEdit_.MoveTo(0, shift);
+                    ResetCaret();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                if (key == VK_END) {
+                    settingsEdit_.MoveTo(settingsEdit_.text.size(), shift);
+                    ResetCaret();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                if (key == VK_BACK) {
+                    settingsEdit_.Erase(true, control);
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                if (key == VK_DELETE) {
+                    settingsEdit_.Erase(false, control);
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                return 0;
+            }
             if (recordingRow_ >= 0) {
                 HandleRecordingKey(key, control, shift, alt);
                 return 0;
@@ -2493,12 +2616,17 @@ private:
                     recordingRow_ = -1;
                     settingsStatus_.clear();
                 }
+                if (editingRow_ >= 0 && row != editingRow_) {
+                    CancelEditingRow();
+                }
                 settingsSelected_ = row;
                 ChangeSetting(row);
             } else if (recordingRow_ >= 0) {
                 recordingRow_ = -1;
                 settingsStatus_.clear();
                 InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (editingRow_ >= 0) {
+                CancelEditingRow();
             }
             return;
         }
@@ -4026,6 +4154,7 @@ private:
     std::vector<std::wstring> recentPaths_;
     size_t baseAppsCount_ = 0;
     SearchInput input_;
+    SearchInput settingsEdit_;  // scratch buffer for the Settings row currently being edited
     Settings settings_;
     std::wstring obsidianVaultPath_;
     leanlauncher::obsidian::DailyNoteConfig dailyNoteConfig_;
@@ -4037,6 +4166,7 @@ private:
     int settingsSelected_ = 0;
     SettingsCategory settingsCategory_ = SettingsCategory::All;
     int recordingRow_ = -1;
+    int editingRow_ = -1;
     float textScroll_ = 0, caretX_ = kTextLeft, mouseX_ = 0, mouseY_ = 0;
     float settingsScroll_ = 0.0f;
     bool settingsDraggingScroll_ = false;
