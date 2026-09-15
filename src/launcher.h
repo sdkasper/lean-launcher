@@ -1108,41 +1108,76 @@ private:
         }
     }
 
-    enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, Vault };
+    enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, Obsidian };
 
-    static bool IsRowInCategory(int row, SettingsCategory cat) {
-        if (cat == SettingsCategory::All) return row >= 0 && row <= 9;
+    // Settings rows 0-3: keyboard shortcuts. 4-6: system. 7-8: search.
+    // 9-23: Obsidian (only row 9 is active when settings_.obsidianEnabled is
+    // false - see IsRowInCategory/ObsidianRowCount). 24 is the Reset button,
+    // handled as a sentinel row rather than a real settings row.
+    static constexpr int kRowObsidianEnabled = 9;
+    static constexpr int kRowVaultPicker = 10;
+    static constexpr int kRowVaultSearchEnabled = 11;
+    static constexpr int kRowVaultSearchPrefix = 12;
+    static constexpr int kRowVaultSearchPillLabel = 13;
+    static constexpr int kRowTaskAddEnabled = 14;
+    static constexpr int kRowTaskPrefix = 15;
+    static constexpr int kRowTaskPillLabel = 16;
+    static constexpr int kRowTaskPreviewPrefix = 17;
+    static constexpr int kRowNoteAddEnabled = 18;
+    static constexpr int kRowNoteAddPrefix = 19;
+    static constexpr int kRowNoteAddPillLabel = 20;
+    static constexpr int kRowNoteAddPreviewPrefix = 21;
+    static constexpr int kRowDailyNoteFolderOverride = 22;
+    static constexpr int kRowDailyNoteFormatOverride = 23;
+    static constexpr int kSettingsMaxRow = 23;
+    static constexpr int kRowResetToDefaults = 24;
+
+    // 1 row when the integration is off (just the master toggle), 15 when
+    // it's on (toggle + vault picker + 3 action blocks + 2 overrides).
+    int ObsidianRowCount() const { return settings_.obsidianEnabled ? 15 : 1; }
+
+    bool IsRowInCategory(int row, SettingsCategory cat) const {
+        if (cat == SettingsCategory::All) {
+            const int maxRow = settings_.obsidianEnabled ? kSettingsMaxRow : kRowObsidianEnabled;
+            return row >= 0 && row <= maxRow;
+        }
         if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
         if (cat == SettingsCategory::Search) return row >= 7 && row <= 8;
-        if (cat == SettingsCategory::Vault) return row == 9;
+        if (cat == SettingsCategory::Obsidian) {
+            if (row == kRowObsidianEnabled) return true;
+            if (!settings_.obsidianEnabled) return false;
+            return row > kRowObsidianEnabled && row <= kSettingsMaxRow;
+        }
         return false;
     }
 
-    static int FirstRowInCategory(SettingsCategory cat) {
+    int FirstRowInCategory(SettingsCategory cat) const {
         if (cat == SettingsCategory::Shortcuts) return 0;
         if (cat == SettingsCategory::System) return 4;
         if (cat == SettingsCategory::Search) return 7;
-        if (cat == SettingsCategory::Vault) return 9;
+        if (cat == SettingsCategory::Obsidian) return kRowObsidianEnabled;
         return 0;
     }
 
-    static int LastRowInCategory(SettingsCategory cat) {
+    int LastRowInCategory(SettingsCategory cat) const {
         if (cat == SettingsCategory::Shortcuts) return 3;
         if (cat == SettingsCategory::System) return 6;
         if (cat == SettingsCategory::Search) return 8;
-        if (cat == SettingsCategory::Vault) return 9;
-        return 9;
+        if (cat == SettingsCategory::Obsidian) {
+            return settings_.obsidianEnabled ? kSettingsMaxRow : kRowObsidianEnabled;
+        }
+        return settings_.obsidianEnabled ? kSettingsMaxRow : kRowObsidianEnabled;
     }
 
     int NextSettingsRow(int current, int delta) const {
         std::vector<int> activeRows;
-        for (int r = 0; r <= 9; ++r) {
+        for (int r = 0; r <= kSettingsMaxRow; ++r) {
             if (IsRowInCategory(r, settingsCategory_)) {
                 activeRows.push_back(r);
             }
         }
-        activeRows.push_back(10);
+        activeRows.push_back(kRowResetToDefaults);
         auto it = std::find(activeRows.begin(), activeRows.end(), current);
         if (it == activeRows.end()) {
             return activeRows.empty() ? 0 : activeRows.front();
@@ -1167,9 +1202,9 @@ private:
         } else if (cat == SettingsCategory::Search) {
             x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f;
             w = 68.0f;
-        } else if (cat == SettingsCategory::Vault) {
+        } else if (cat == SettingsCategory::Obsidian) {
             x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f + 68.0f + 6.0f;
-            w = 68.0f;
+            w = 84.0f;  // wider than the old 68px "Vault" tab to fit "Obsidian"
         }
         return D2D1::RectF(x, y, x + w, y + h);
     }
@@ -1180,15 +1215,18 @@ private:
 
     float SettingsContentBottom() const {
         if (settingsCategory_ == SettingsCategory::All) {
-            return 636.0f;  // was 551; +85 for the new one-row Vault card + its header/gap
+            // 573 = fixed header offset for the OBSIDIAN card in the All view
+            // (unchanged from the original 1-row layout); +16 bottom padding.
+            return 573.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 240.0f;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 193.0f;
         } else if (settingsCategory_ == SettingsCategory::Search) {
             return 146.0f;
-        } else if (settingsCategory_ == SettingsCategory::Vault) {
-            return 99.0f;  // 36 header offset + 1 row (47) + 16 bottom padding
+        } else if (settingsCategory_ == SettingsCategory::Obsidian) {
+            // 36 header offset + N rows + 16 bottom padding.
+            return 36.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
         }
         return 200.0f;
     }
@@ -1210,15 +1248,16 @@ private:
             if (row < 4) return 36.0f + row * kSettingsRowHeight;
             if (row < 7) return 262.0f + (row - 4) * kSettingsRowHeight;
             if (row < 9) return 441.0f + (row - 7) * kSettingsRowHeight;
-            return 573.0f;  // row 9 (Vault), All-view only section: header@553, card@573
+            // Obsidian section, All-view only: header@553, card@573.
+            return 573.0f + (row - kRowObsidianEnabled) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 36.0f + row * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 36.0f + (row - 4) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Search) {
             return 36.0f + (row - 7) * kSettingsRowHeight;
-        } else if (settingsCategory_ == SettingsCategory::Vault) {
-            return 36.0f;
+        } else if (settingsCategory_ == SettingsCategory::Obsidian) {
+            return 36.0f + (row - kRowObsidianEnabled) * kSettingsRowHeight;
         }
         return 0.0f;
     }
@@ -1227,7 +1266,7 @@ private:
         if (x < 16.0f || x > width_ - 16.0f) return -1;
         if (y < kSettingsHeaderHeight || y >= FooterTop()) return -1;
         const float contentY = (y - kSettingsHeaderHeight) + settingsScroll_;
-        for (int r = 0; r <= 9; ++r) {
+        for (int r = 0; r <= kSettingsMaxRow; ++r) {
             if (!IsRowInCategory(r, settingsCategory_)) continue;
             const float rTop = SettingsRowTop(r);
             if (contentY >= rTop && contentY < rTop + kSettingsRowHeight) {
@@ -1247,11 +1286,11 @@ private:
     }
 
     void EnsureSettingsVisible(int row) {
-        if (row == 10) {
+        if (row == kRowResetToDefaults) {
             settingsScroll_ = 0.0f;
             return;
         }
-        if (row < 0 || row > 9 || !IsRowInCategory(row, settingsCategory_)) return;
+        if (row < 0 || row > kSettingsMaxRow || !IsRowInCategory(row, settingsCategory_)) return;
         const float rTop = SettingsRowTop(row);
         const float rBottom = rTop + kSettingsRowHeight;
         const float maxScroll = SettingsMaxScroll();
@@ -1260,9 +1299,9 @@ private:
             if (row == 0) sectionHeaderTop = 16.0f;
             else if (row == 4) sectionHeaderTop = 242.0f;
             else if (row == 7) sectionHeaderTop = 421.0f;
-            else if (row == 9) sectionHeaderTop = 553.0f;
+            else if (row == kRowObsidianEnabled) sectionHeaderTop = 553.0f;
         } else {
-            if (row == 0 || row == 4 || row == 7 || row == 9) sectionHeaderTop = 16.0f;
+            if (row == 0 || row == 4 || row == 7 || row == kRowObsidianEnabled) sectionHeaderTop = 16.0f;
         }
         const float visibleTop = sectionHeaderTop;
         const float visibleBottom = rBottom + 8.0f;
@@ -1284,6 +1323,7 @@ private:
         settingsDraggingScroll_ = false;
         settingsStatus_.clear();
         recordingRow_ = -1;
+        editingRow_ = -1;
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
         knownVaults_ = leanlauncher::obsidian::FindKnownVaults();
@@ -1293,6 +1333,7 @@ private:
     void CloseSettings() {
         page_ = Page::Launcher;
         recordingRow_ = -1;
+        editingRow_ = -1;
         settingsScroll_ = 0.0f;
         settingsDraggingScroll_ = false;
         ResetCaret();
@@ -1525,6 +1566,7 @@ private:
 
     void ResetToDefaults() {
         recordingRow_ = -1;
+        editingRow_ = -1;
         settingsStatus_.clear();
         settings_ = quicklaunch::Settings{};
         SetRunAtStartup(settings_.runAtStartup);
@@ -1559,12 +1601,50 @@ private:
 
     void ChangeSetting(int row) {
         settingsStatus_.clear();
-        if (row == 10) {
+        if (row == kRowResetToDefaults) {
             ResetToDefaults();
             return;
         }
-        if (row == 9) {
+        if (row == kRowObsidianEnabled) {
+            settings_.obsidianEnabled = !settings_.obsidianEnabled;
+            SaveSettings();
+            if constexpr (!kUiTest) {
+                if (settings_.obsidianEnabled) {
+                    if (!obsidianVaultPath_.empty()) {
+                        leanlauncher::obsidian::NoteIndex::Instance().Start(obsidianVaultPath_, hwnd_);
+                    }
+                } else {
+                    leanlauncher::obsidian::NoteIndex::Instance().Stop();
+                }
+            }
+            if (!settings_.obsidianEnabled) editingRow_ = -1;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowVaultPicker) {
             CycleVaultSelection();
+            return;
+        }
+        if (row == kRowVaultSearchEnabled) {
+            settings_.vaultSearchEnabled = !settings_.vaultSearchEnabled;
+            SaveSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowTaskAddEnabled) {
+            settings_.taskAddEnabled = !settings_.taskAddEnabled;
+            SaveSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowNoteAddEnabled) {
+            settings_.noteAddEnabled = !settings_.noteAddEnabled;
+            SaveSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (std::wstring* field = SettingsTextFieldForRow(row)) {
+            BeginEditingRow(row, *field);
             return;
         }
         if (row < 4) {
@@ -2014,7 +2094,7 @@ private:
                 // Settings" and must not add anything when activated). Land
                 // directly on the Vault category/row so onboarding doesn't
                 // strand the user on an unrelated "All" settings view.
-                OpenSettings(SettingsCategory::Vault);
+                OpenSettings(SettingsCategory::Obsidian);
                 return;
             }
             Hide();
@@ -2031,7 +2111,7 @@ private:
         }
         if (app.category == takeoff::AppCategory::NoteAdd) {
             if (app.path.empty()) {
-                OpenSettings(SettingsCategory::Vault);
+                OpenSettings(SettingsCategory::Obsidian);
                 return;
             }
             Hide();
@@ -2048,7 +2128,7 @@ private:
         }
         if (app.category == takeoff::AppCategory::NoteJump) {
             if (app.path.empty()) {
-                OpenSettings(SettingsCategory::Vault);
+                OpenSettings(SettingsCategory::Obsidian);
                 return;
             }
             Hide();
@@ -2364,11 +2444,12 @@ private:
                     SettingsCategory::Shortcuts,
                     SettingsCategory::System,
                     SettingsCategory::Search,
-                    SettingsCategory::Vault
+                    SettingsCategory::Obsidian
                 };
                 for (auto cat : categories) {
                     const auto r = CategoryTabRect(cat);
                     if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+                        if (editingRow_ >= 0) CancelEditingRow();
                         settingsCategory_ = cat;
                         settingsScroll_ = 0.0f;
                         if (!IsRowInCategory(settingsSelected_, settingsCategory_)) {
@@ -2380,7 +2461,7 @@ private:
                 }
                 const auto resetRect = ResetButtonRect();
                 if (x >= resetRect.left && x <= resetRect.right && y >= resetRect.top && y <= resetRect.bottom) {
-                    settingsSelected_ = 10;
+                    settingsSelected_ = kRowResetToDefaults;
                     ResetToDefaults();
                     return;
                 }
