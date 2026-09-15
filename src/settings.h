@@ -40,6 +40,31 @@ struct Settings {
     bool checkForUpdates = false;  // No release pipeline yet; user can opt in via Settings.
     bool enableFileSearch = true;
     bool enableWebSearch = true;
+
+    // Obsidian integration: master toggle plus one sub-toggle per action.
+    // obsidianEnabled's on-disk default is computed at load time (see
+    // LoadSettings) rather than fixed here - migration-safe for an install
+    // that already has a vault configured.
+    bool obsidianEnabled = false;
+    bool vaultSearchEnabled = true;
+    bool taskAddEnabled = true;
+    bool noteAddEnabled = true;
+
+    std::wstring vaultSearchPrefix = L"O";
+    std::wstring vaultSearchPillLabel = L"Jump";
+
+    std::wstring taskPrefix = L"T";
+    std::wstring taskPillLabel = L"Task";
+    std::wstring taskPreviewPrefix = L"Add task: ";
+
+    std::wstring noteAddPrefix = L"a";
+    std::wstring noteAddPillLabel = L"Note";
+    std::wstring noteAddPreviewPrefix = L"Add to today's note: ";
+
+    // Empty = auto-detect from the vault's own daily-notes/periodic-notes
+    // plugin config (existing ReadDailyNoteConfig behavior, unchanged).
+    std::wstring dailyNoteFolderOverride;
+    std::wstring dailyNoteFormatOverride;
 };
 
 inline std::wstring KeyName(uint16_t vk) {
