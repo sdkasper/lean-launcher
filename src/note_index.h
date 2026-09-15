@@ -122,20 +122,22 @@ public:
             CloseHandle(triggerEvent_);
             triggerEvent_ = nullptr;
         }
-    }
-
-    // Stops the current watcher (if any), clears the snapshot, and starts
-    // fresh against newVaultPath. Called from Settings' vault picker when
-    // the configured vault changes. newVaultPath empty just stops - the
-    // caller (launcher.h) already shows "Set up your vault in Settings"
-    // when obsidianVaultPath_ is empty.
-    void Restart(const std::wstring& newVaultPath, HWND notifyHwnd = nullptr) {
-        Stop();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             snapshot_.reset();
             ready_ = false;
         }
+    }
+
+    // Stops the current watcher (if any) - Stop() itself resets
+    // snapshot_/ready_, so a direct Start()-after-Stop() caller never
+    // observes a stale "ready" index from a prior vault - and starts fresh
+    // against newVaultPath. Called from Settings' vault picker when the
+    // configured vault changes. newVaultPath empty just stops - the
+    // caller (launcher.h) already shows "Set up your vault in Settings"
+    // when obsidianVaultPath_ is empty.
+    void Restart(const std::wstring& newVaultPath, HWND notifyHwnd = nullptr) {
+        Stop();
         if (!newVaultPath.empty()) {
             Start(newVaultPath, notifyHwnd);
         }

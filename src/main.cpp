@@ -34,6 +34,7 @@
 #include "calculator.h"
 #include "obsidian_config.h"
 #include "daily_note.h"
+#include "note_index.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -46,6 +47,7 @@ using takeoff::SearchInput;
 using takeoff::Settings;
 using takeoff::FileIndex;
 using takeoff::kFilesReadyMessage;
+using leanlauncher::obsidian::kNotesReadyMessage;
 
 namespace {
 

@@ -1297,5 +1297,36 @@ int main() {
         fs::remove_all(tempVault, noteIndexEc);
     }
 
+    {
+        wchar_t tempDirBuf[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf);
+        const fs::path tempVault = fs::path(tempDirBuf) / L"LeanLauncherNoteJumpIntegrationTest";
+        std::error_code ec;
+        fs::remove_all(tempVault, ec);
+        fs::create_directories(tempVault, ec);
+        { std::ofstream(tempVault / L"Weekly Review.md") << "# Weekly Review\n"; }
+
+        NoteIndex::Instance().Start(tempVault.wstring());
+        for (int w = 0; w < 40 && !NoteIndex::Instance().IsReady(); ++w) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+
+        std::wstring query;
+        Check(TryParseNoteJumpPrefix(L"note weekly", query) && query == L"weekly",
+            "note-jump prefix parsing feeds a clean query into NoteIndex::Search");
+        auto results = NoteIndex::Instance().Search(query, 10);
+        Check(!results.empty() && results[0].title == L"Weekly Review",
+            "note-jump prefix + NoteIndex::Search end-to-end finds the matching note");
+
+        const std::wstring relativeFilePath = results[0].relativeRef + L".md";
+        const std::wstring commandLine =
+            BuildObsidianCliCommandLine(L"C:\\CLI\\Obsidian.com", tempVault.filename().wstring(), relativeFilePath);
+        Check(commandLine.find(relativeFilePath) != std::wstring::npos,
+            "the matched note's relativeRef feeds correctly into the CLI command line");
+
+        NoteIndex::Instance().Stop();
+        fs::remove_all(tempVault, ec);
+    }
+
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";
 }
