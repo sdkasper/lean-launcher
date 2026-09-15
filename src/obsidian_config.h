@@ -228,8 +228,8 @@ inline std::wstring FindObsidianCliPath() {
 // assembly logic is unit-testable without spawning a process.
 inline std::wstring BuildObsidianCliCommandLine(
     const std::wstring& cliPath, const std::wstring& vaultName, const std::wstring& relativeFilePath) {
-    return QuoteCommandLineArgument(cliPath) + L" open vault=" + QuoteCommandLineArgument(vaultName) +
-           L" path=" + QuoteCommandLineArgument(relativeFilePath);
+    return QuoteCommandLineArgument(cliPath) + L" vault=" + QuoteCommandLineArgument(vaultName) +
+           L" open path=" + QuoteCommandLineArgument(relativeFilePath);
 }
 
 // Opens a note in Obsidian via its official CLI - no community plugin
@@ -244,20 +244,77 @@ inline bool OpenNoteInObsidian(const std::wstring& vaultPath, const std::wstring
     const std::wstring relativeFilePath = relativeNoteRef + L".md";
     const std::wstring commandLine = BuildObsidianCliCommandLine(cliPath, vaultName, relativeFilePath);
 
+    SECURITY_ATTRIBUTES saAttr{};
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = nullptr;
+
+    HANDLE hReadPipe = nullptr;
+    HANDLE hWritePipe = nullptr;
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &saAttr, 0)) return false;
+    if (!SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0)) {
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        return false;
+    }
+
     STARTUPINFOW si{};
     si.cb = sizeof(si);
+    si.dwFlags |= STARTF_USESTDHANDLES;
+    si.hStdOutput = hWritePipe;
+    si.hStdError = hWritePipe;
+    si.hStdInput = nullptr;
     PROCESS_INFORMATION pi{};
     // CreateProcessW may modify its command-line buffer in place - it must
     // be a mutable buffer, not a string literal or a temporary's c_str().
     std::vector<wchar_t> mutableCmd(commandLine.begin(), commandLine.end());
     mutableCmd.push_back(L'\0');
 
-    const BOOL ok = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
+    const BOOL spawned = CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
-    if (!ok) return false;
+    // The child inherits its own copy of the write end; the parent's copy
+    // must be closed immediately so ReadFile below sees EOF once the child
+    // exits, rather than blocking forever waiting for a write end that's
+    // still (uselessly) open in this process too.
+    CloseHandle(hWritePipe);
+    if (!spawned) {
+        CloseHandle(hReadPipe);
+        return false;
+    }
+
+    // Bounded wait, not an indefinite block: per Obsidian's own CLI docs,
+    // "If Obsidian is not running, the first command you run launches
+    // Obsidian" - a cold start can take a few seconds, but this call runs
+    // synchronously on the UI thread and must not hang it indefinitely.
+    constexpr DWORD kTimeoutMs = 10000;
+    bool succeeded = false;
+    if (WaitForSingleObject(pi.hProcess, kTimeoutMs) == WAIT_OBJECT_0) {
+        DWORD exitCode = 1;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+        if (exitCode == 0) {
+            // The CLI's own output is a short one-line status message
+            // ("Opened: <path>" or "Error: ..."), never large for this
+            // command - a bounded single-buffer read is sufficient and
+            // avoids a pipe-deadlock risk from waiting-then-reading a
+            // large child output.
+            std::string output;
+            char buf[512];
+            DWORD bytesRead = 0;
+            while (ReadFile(hReadPipe, buf, sizeof(buf), &bytesRead, nullptr) && bytesRead > 0) {
+                output.append(buf, bytesRead);
+                if (output.size() > 4096) break;
+            }
+            succeeded = output.rfind("Opened:", 0) == 0;
+        }
+    } else {
+        // Timed out (or wait failed) - don't leave a stuck process running
+        // detached with no result.
+        TerminateProcess(pi.hProcess, 1);
+    }
+    CloseHandle(hReadPipe);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    return true;
+    return succeeded;
 }
 
 // Converts a vault-relative note ref (forward slashes, no extension, as

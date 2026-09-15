@@ -1032,13 +1032,13 @@ int main() {
 
     {
         Check(BuildObsidianCliCommandLine(L"C:\\CLI\\Obsidian.com", L"Vault", L"Note.md") ==
-              L"C:\\CLI\\Obsidian.com open vault=Vault path=Note.md",
-            "BuildObsidianCliCommandLine leaves simple arguments unquoted");
+              L"C:\\CLI\\Obsidian.com vault=Vault open path=Note.md",
+            "BuildObsidianCliCommandLine places vault= before the command per the CLI's documented contract");
         Check(BuildObsidianCliCommandLine(
                   L"C:\\Program Files\\Obsidian\\Obsidian.com", L"Lean Notes", L"06 BJ/10 Daily/2026-09-14.md") ==
-              L"\"C:\\Program Files\\Obsidian\\Obsidian.com\" open vault=\"Lean Notes\" "
+              L"\"C:\\Program Files\\Obsidian\\Obsidian.com\" vault=\"Lean Notes\" open "
               L"path=\"06 BJ/10 Daily/2026-09-14.md\"",
-            "BuildObsidianCliCommandLine quotes each argument that needs it");
+            "BuildObsidianCliCommandLine quotes each argument that needs it, vault= still before the command");
     }
 
     {
