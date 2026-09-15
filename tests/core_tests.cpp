@@ -1301,9 +1301,9 @@ int main() {
         wchar_t tempDirBuf[MAX_PATH]{};
         GetTempPathW(MAX_PATH, tempDirBuf);
         const fs::path tempVault = fs::path(tempDirBuf) / L"LeanLauncherNoteJumpIntegrationTest";
-        std::error_code ec;
-        fs::remove_all(tempVault, ec);
-        fs::create_directories(tempVault, ec);
+        std::error_code noteJumpEc;
+        fs::remove_all(tempVault, noteJumpEc);
+        fs::create_directories(tempVault, noteJumpEc);
         { std::ofstream(tempVault / L"Weekly Review.md") << "# Weekly Review\n"; }
 
         NoteIndex::Instance().Start(tempVault.wstring());
@@ -1325,7 +1325,7 @@ int main() {
             "the matched note's relativeRef feeds correctly into the CLI command line");
 
         NoteIndex::Instance().Stop();
-        fs::remove_all(tempVault, ec);
+        fs::remove_all(tempVault, noteJumpEc);
     }
 
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";
