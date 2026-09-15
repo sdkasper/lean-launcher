@@ -15,7 +15,7 @@ This is new infrastructure, not an extension of `daily_note.h`: it needs a cache
 In scope:
 - A `note <text>` command prefix that fuzzy-matches against note titles in the single vault configured in Settings (same vault v1's `task` prefix already uses)
 - A live-synced background index of the vault's `.md` files
-- Opening the matched note in Obsidian via its built-in `obsidian://open` URI (no community plugin dependency)
+- Opening the matched note in Obsidian via Obsidian's official CLI (`Obsidian.com`, ships with every install) - no community plugin dependency, no hand-rolled URI scheme
 
 Out of scope (future EPIC-002 items, not this design):
 - Full-text search of note *content* (only titles/filenames)
@@ -38,8 +38,8 @@ note_index.h (new)
   └── Search(query) - reuses search.h's existing MatchScore() against note titles (filename minus .md)
 
 obsidian_config.h (extended)
-  └── OpenNoteInObsidian(vaultPath, relativeNotePath) - builds and ShellExecuteW's an
-        obsidian://open?vault=<name>&file=<relative-path> URI
+  └── OpenNoteInObsidian(vaultPath, relativeNotePath) - locates and spawns Obsidian's
+        official CLI (Obsidian.com) via CreateProcessW: `open vault=<name> path=<relative-path>.md`
 ```
 
 ### Why a new `note_index.h` instead of extending `FileIndex`
@@ -51,8 +51,8 @@ Considered extending the existing whole-machine `FileIndex` (in `file_index.h`) 
 1. User types `note standup`
 2. Prefix detected → `NoteIndex::Search(L"standup")` runs against the cached snapshot
 3. Ranked result rows rendered: title + relative folder path for disambiguation (e.g. "Standup - 06 BJ/10 Daily/2026/09")
-4. Enter → `OpenNoteInObsidian` builds `obsidian://open?vault=Lean%20Notes&file=06%20BJ%2F...` and calls `ShellExecuteW`
-5. Windows hands off to Obsidian (already required to be installed, since vault discovery already depends on `%APPDATA%\obsidian\obsidian.json` existing)
+4. Enter → `OpenNoteInObsidian` locates `Obsidian.com` and spawns `obsidian open vault="Lean Notes" path="06 BJ/10 Daily/2026-09-14.md"` via `CreateProcessW`
+5. The CLI hands off to the running (or newly launched) Obsidian app and opens/focuses the note
 6. Launcher hides, same as any other launch - Obsidian's window opens/focuses, which is expected and correct here (unlike v1's task-add, which deliberately never opens Obsidian)
 
 ## Indexing Engine
@@ -67,9 +67,23 @@ Mirrors `FileIndex` (`file_index.h`) but scoped to a single vault root instead o
 
 ## Open Mechanism
 
-`obsidian://open?vault=<vault-folder-name>&file=<relative-path-without-.md-extension>`, both params percent-encoded by a small hand-rolled encoder - consistent with the existing "no general-purpose library, minimal hand-rolled parsing" philosophy already established in `obsidian_config.h`/`daily_note.h` (`ParseJsonStringAt`, not a general JSON parser). This is Obsidian's own built-in URI scheme - no community plugin dependency required, which resolves EPIC-002's "architecture undecided" note for this specific action. Dispatched via `ShellExecuteW(nullptr, L"open", uri.c_str(), ...)`, the same call shape already used elsewhere in the app.
+Obsidian ships an official CLI (`Obsidian.com`, `FileDescription: "Obsidian CLI"`) with every Windows install, installed to `%LOCALAPPDATA%\Obsidian\Obsidian.com` and also registered on `PATH`. Its `open` command takes a vault-relative path and a vault name and opens/focuses the note directly:
 
-> **Verification flag for implementation:** the exact `obsidian://open` parameter contract (vault-name-based `vault=`+`file=` vs. an absolute-path-based `path=` form, and exact percent-encoding expectations) must be empirically verified against the installed Obsidian version before the encoder is locked in - this design is based on documented/known behavior, not a version-pinned spec test.
+```
+obsidian open vault="Lean Notes" path="06 BJ/10 Daily/2026-09-14.md"
+→ Opened: 06 BJ/10 Daily/2026-09-14.md   (exit 0)
+```
+
+**Verified 2026-09-15** against a real note in `$VAULT_PATH` (`01 Projects/LP Products/Lean Launcher/20 Architecture.md`) - forward-slash relative paths with the `.md` extension, quoted vault name by display name, clean text output, exit code 0. No percent-encoding needed; no undocumented URI parameter contract to reverse-engineer.
+
+`OpenNoteInObsidian(vaultPath, relativeNoteRef)`:
+1. Locates the CLI: try `%LOCALAPPDATA%\Obsidian\Obsidian.com` first (Obsidian's standard non-portable Windows install location - the same "known fixed location, no user config" convention this file already trusts for `%APPDATA%\obsidian\obsidian.json`), falling back to a `PATH` search (`SearchPathW`) for portable/custom installs.
+2. Builds the command line with a hand-rolled Windows command-line argument quoter (`QuoteCommandLineArgument`, implementing the documented `CommandLineToArgvW` escaping algorithm) - not a raw string join, since a note title containing a literal `"` could otherwise inject an unintended `vault=`/`path=` boundary.
+3. Spawns the CLI via `CreateProcessW` with `CREATE_NO_WINDOW` (the CLI is console-subsystem; this avoids flashing a console window).
+
+This resolves EPIC-002's "architecture undecided" note for this action more cleanly than either originally-considered option (`obsidian://open` URI or the Advanced URI plugin) - it's Obsidian's own documented, supported interface, not a URI scheme being driven by guessed parameters.
+
+> Note for future EPIC-002 work: this CLI also exposes `search`, `tasks`, `append`/`prepend`, and `create` (with template support) - directly relevant to EPIC-002's other backlog items (full-text search, template-based note creation). Worth revisiting those items' own designs against this CLI rather than assuming they need their own bespoke mechanism.
 
 ## Error Handling
 
@@ -78,11 +92,12 @@ Mirrors `FileIndex` (`file_index.h`) but scoped to a single vault root instead o
 | No vault configured | `note ` prefix shows "Set up your vault in Settings" (matches v1's `task` behavior) |
 | Duplicate note titles in different folders | Both shown as separate results; folder path disambiguates, no auto-merge/dedup |
 | Vault has zero or a very large number of notes | No artificial cap on indexing; result *list* still capped at 30 like file search |
-| `ShellExecuteW` fails (Obsidian uninstalled, URI handler unregistered) | Inline error shown - never silently no-ops, matching v1's write-failure handling |
+| Obsidian CLI not found, or `CreateProcessW` fails to spawn it | Inline error shown - never silently no-ops, matching v1's write-failure handling |
 
 ## Testing
 
-- Pure-function unit tests in `tests/core_tests.cpp`: title extraction from path, percent-encoding of vault name/file path (spaces, unicode, `#`/`&` in titles), a `MatchScore` reuse sanity-check against note titles.
+- Pure-function unit tests in `tests/core_tests.cpp`: title extraction from path, `QuoteCommandLineArgument`'s Windows command-line escaping (spaces, embedded quotes, trailing backslashes), a `MatchScore` reuse sanity-check against note titles.
+- CLI discovery and process-spawn behavior are exercised manually only (Task 5's smoke test) - not in the automated `ctest` suite, since the CI runner (`windows-latest` GitHub Actions) has no Obsidian install to spawn.
 - `NoteIndex` build/watch logic tested against a temp directory, never the real vault - same convention as `daily_note.h`'s `AppendTask` tests.
 - Manual smoke test against a scratch vault with nested folders and at least one duplicate title before calling this done.
 
@@ -92,3 +107,4 @@ Mirrors `FileIndex` (`file_index.h`) but scoped to a single vault root instead o
 - **Live file watching**, not periodic-only refresh - mirrors `FileIndex`'s proven pattern; a note created seconds ago in Obsidian should be jumpable without waiting on a timer.
 - **New `note_index.h` module**, not an extension of `FileIndex` - isolation over reuse, matching the codebase's existing small-module bias.
 - **Single configured vault only** - same vault v1's `task` prefix uses; multi-vault search is out of scope (also out of scope for v1 per `20 Architecture.md`'s own backlog).
+- **Obsidian's official CLI for the open action**, not a hand-rolled `obsidian://open` URI - discovered mid-design that Obsidian ships `Obsidian.com` with every install; verified live against the real vault before committing to this mechanism. Documented, supported, no percent-encoding to get wrong.
