@@ -3672,13 +3672,13 @@ private:
 
     void DrawSettingsRow(int index, float top, std::wstring_view title,
         std::wstring_view description, std::wstring_view value = {}, bool toggle = false,
-        bool enabled = false, bool plainValue = false) {
+        bool enabled = false, bool plainValue = false, bool editable = false) {
         const bool selected = (index == settingsSelected_);
         const auto row = D2D1::RectF(18, top + 1, width_ - 18, top + kSettingsRowHeight - 1);
         if (selected) {
             Fill(row, highContrast_ ? SystemColor(COLOR_HIGHLIGHT) :
                 D2D1::ColorF(1, 1, 1, 0.08f), 6.0f);
-        } else if (index == recordingRow_) {
+        } else if (index == recordingRow_ || index == editingRow_) {
             Fill(row, D2D1::ColorF(0x3B82F6, 0.12f), 6.0f);
         }
         const auto primary = highContrast_ && selected ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground();
@@ -3695,7 +3695,16 @@ private:
             Text(L"Press keys\u2026", D2D1::RectF(width_ - 240, top, width_ - 36, top + kSettingsRowHeight),
                 hintFormat_.Get(), highContrast_ ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0x6EA8FE),
                 DWRITE_TEXT_ALIGNMENT_TRAILING);
-        } else if (plainValue) {
+        } else if (editable && index == editingRow_) {
+            // Live edit buffer, not the (not-yet-committed) `value` argument.
+            // No true caret hit-testing here, unlike the main search box -
+            // a trailing bar is a deliberately simple stand-in, adequate for
+            // a short Settings field.
+            const std::wstring editText = settingsEdit_.text + L"\u2502";
+            Text(editText, D2D1::RectF(width_ - 260, top, width_ - 36, top + kSettingsRowHeight),
+                hintFormat_.Get(), highContrast_ ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0x6EA8FE),
+                DWRITE_TEXT_ALIGNMENT_TRAILING);
+        } else if (plainValue || editable) {
             Text(value, D2D1::RectF(width_ - 260, top, width_ - 36, top + kSettingsRowHeight),
                 hintFormat_.Get(), secondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
         } else {
@@ -3776,26 +3785,93 @@ private:
                 L"Open Google when no results match your query", {}, true, settings_.enableWebSearch);
         }
 
-        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Vault) {
+        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Obsidian) {
             const float hY = (settingsCategory_ == SettingsCategory::All) ? 553.0f : 16.0f;
             const float cY = (settingsCategory_ == SettingsCategory::All) ? 573.0f : 36.0f;
-            drawCard(L"OBSIDIAN", hY, cY, 1);
+            const int rowCount = ObsidianRowCount();
+            drawCard(L"OBSIDIAN", hY, cY, rowCount);
 
-            std::wstring vaultValue = L"None found";
-            std::wstring vaultDescription = L"No Obsidian vaults found. Install Obsidian and open a vault, then reopen Settings.";
-            if (!knownVaults_.empty()) {
-                if (obsidianVaultPath_.empty()) {
-                    vaultValue = L"Not set";
-                    vaultDescription = L"Press Enter to select a detected vault";
-                } else {
-                    vaultValue = fs::path(obsidianVaultPath_).filename().wstring();
-                    vaultDescription = dailyNoteConfig_.found
-                        ? L"Tasks are added to today's daily note in this vault"
-                        : L"Could not read this vault's daily notes config — using vault root + YYYY-MM-DD.md";
+            int slot = 0;
+            DrawSettingsRow(kRowObsidianEnabled, cY + slot * kSettingsRowHeight + offsetY,
+                L"Enable Obsidian integration",
+                L"Turn on vault search, task capture, and note capture from the launcher",
+                {}, true, settings_.obsidianEnabled);
+            ++slot;
+
+            if (settings_.obsidianEnabled) {
+                std::wstring vaultValue = L"None found";
+                std::wstring vaultDescription = L"No Obsidian vaults found. Install Obsidian and open a vault, then reopen Settings.";
+                if (!knownVaults_.empty()) {
+                    if (obsidianVaultPath_.empty()) {
+                        vaultValue = L"Not set";
+                        vaultDescription = L"Press Enter to select a detected vault";
+                    } else {
+                        vaultValue = fs::path(obsidianVaultPath_).filename().wstring();
+                        vaultDescription = dailyNoteConfig_.found
+                            ? L"Tasks are added to today's daily note in this vault"
+                            : L"Could not read this vault's daily notes config — using vault root + YYYY-MM-DD.md";
+                    }
                 }
+                DrawSettingsRow(kRowVaultPicker, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Obsidian Vault", vaultDescription, vaultValue, false, false, true);
+                ++slot;
+
+                DrawSettingsRow(kRowVaultSearchEnabled, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Vault search", L"Fuzzy-search note titles and open the match in Obsidian",
+                    {}, true, settings_.vaultSearchEnabled);
+                ++slot;
+                DrawSettingsRow(kRowVaultSearchPrefix, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Vault search prefix", L"Type this followed by a space, then a note title",
+                    settings_.vaultSearchPrefix, false, false, false, true);
+                ++slot;
+                DrawSettingsRow(kRowVaultSearchPillLabel, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Vault search label", L"Result-row tag shown next to a matched note",
+                    settings_.vaultSearchPillLabel, false, false, false, true);
+                ++slot;
+
+                DrawSettingsRow(kRowTaskAddEnabled, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Add task", L"Append a checklist item to today's daily note",
+                    {}, true, settings_.taskAddEnabled);
+                ++slot;
+                DrawSettingsRow(kRowTaskPrefix, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Add task prefix", L"Type this followed by a space, then the task text",
+                    settings_.taskPrefix, false, false, false, true);
+                ++slot;
+                DrawSettingsRow(kRowTaskPillLabel, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Add task label", L"Result-row tag shown next to a pending task",
+                    settings_.taskPillLabel, false, false, false, true);
+                ++slot;
+                DrawSettingsRow(kRowTaskPreviewPrefix, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Add task preview", L"Text shown before what you typed, e.g. \"Add task: buy milk\"",
+                    settings_.taskPreviewPrefix, false, false, false, true);
+                ++slot;
+
+                DrawSettingsRow(kRowNoteAddEnabled, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Add to note", L"Append a plain line (not a checklist item) to today's daily note",
+                    {}, true, settings_.noteAddEnabled);
+                ++slot;
+                DrawSettingsRow(kRowNoteAddPrefix, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Add to note prefix", L"Type this followed by a space, then the line text",
+                    settings_.noteAddPrefix, false, false, false, true);
+                ++slot;
+                DrawSettingsRow(kRowNoteAddPillLabel, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Add to note label", L"Result-row tag shown next to a pending line",
+                    settings_.noteAddPillLabel, false, false, false, true);
+                ++slot;
+                DrawSettingsRow(kRowNoteAddPreviewPrefix, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Add to note preview", L"Text shown before what you typed, e.g. \"Add to today's note: back from the gym\"",
+                    settings_.noteAddPreviewPrefix, false, false, false, true);
+                ++slot;
+
+                DrawSettingsRow(kRowDailyNoteFolderOverride, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Daily note folder override", L"Leave empty to auto-detect from the vault's daily-notes config",
+                    settings_.dailyNoteFolderOverride, false, false, false, true);
+                ++slot;
+                DrawSettingsRow(kRowDailyNoteFormatOverride, cY + slot * kSettingsRowHeight + offsetY,
+                    L"Daily note format override", L"Leave empty to auto-detect; supports YYYY/MM/DD tokens",
+                    settings_.dailyNoteFormatOverride, false, false, false, true);
+                ++slot;
             }
-            DrawSettingsRow(9, cY + offsetY, L"Obsidian Vault", vaultDescription, vaultValue,
-                false, false, true);
         }
 
         target_->PopAxisAlignedClip();
@@ -3844,9 +3920,9 @@ private:
             SettingsCategory::Shortcuts,
             SettingsCategory::System,
             SettingsCategory::Search,
-            SettingsCategory::Vault
+            SettingsCategory::Obsidian
         };
-        const wchar_t* catLabels[] = {L"All", L"Shortcuts", L"System", L"Search", L"Vault"};
+        const wchar_t* catLabels[] = {L"All", L"Shortcuts", L"System", L"Search", L"Obsidian"};
         for (int i = 0; i < 5; ++i) {
             const auto cat = categories[i];
             const auto tabRect = CategoryTabRect(cat);
