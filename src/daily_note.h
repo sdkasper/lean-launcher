@@ -265,6 +265,30 @@ inline bool AppendNoteText(const std::wstring& notePath, std::wstring_view text)
     return AppendLine(notePath, BuildPlainLine(text));
 }
 
+// Walks `pos` (which must be the start of a line) backward over any run of
+// blank or whitespace-only lines immediately preceding it, stopping right
+// after the end of the last non-blank line. Used by AppendLogEntry so that
+// a blank separator line between a section's content and the next heading
+// stays between the new entry and that heading, instead of being pushed
+// above the newly inserted line.
+inline size_t SkipBlankLinesBackward(const std::wstring& content, size_t pos) {
+    size_t result = pos;
+    while (result > 0 && content[result - 1] == L'\n') {
+        const size_t newlinePos = result - 1;
+        const size_t prevNewline = (newlinePos == 0) ? std::wstring::npos
+                                                       : content.rfind(L'\n', newlinePos - 1);
+        const size_t lineStart = (prevNewline == std::wstring::npos) ? 0 : prevNewline + 1;
+
+        bool blank = true;
+        for (size_t i = lineStart; i < newlinePos; ++i) {
+            if (!std::iswspace(content[i])) { blank = false; break; }
+        }
+        if (!blank) break;
+        result = lineStart;
+    }
+    return result;
+}
+
 // Inserts one timestamped log line at the end of `heading`'s section in the
 // note at notePath - see FindHeadingSectionEnd for exactly where that is.
 // Creates the file (with the same minimal frontmatter as AppendLine) if it
@@ -283,9 +307,34 @@ inline bool AppendLogEntry(const std::wstring& notePath, std::wstring_view text,
     if (!fs::exists(path, ec)) {
         newContent = L"---\ncreated: " + FormatIsoTimestamp() + L"\n---\n\n" + line;
     } else {
-        const std::wstring content = Utf8ToWide(ReadFileUtf8(path));
+        const std::string raw = ReadFileUtf8(path);
+        // ReadFileUtf8 returns "" both for a legitimately empty file and for
+        // a read that failed outright (a transient sharing violation from a
+        // sync client, an unhydrated cloud-placeholder file, an AV scanner
+        // lock, etc). Treating a failed read as "empty note" would make the
+        // CREATE_ALWAYS write below silently truncate the user's whole note
+        // down to just the new line. Tell the two apart using the file's
+        // actual on-disk size, and bail out - never rewrite - if the read
+        // came back empty for a file that isn't.
+        if (raw.empty() && fs::file_size(path, ec) > 0) return false;
+
+        const std::wstring content = Utf8ToWide(raw);
+        // A non-empty read that fails to decode as UTF-8 is just as
+        // dangerous to proceed on - never rewrite the file in that case
+        // either.
+        if (!raw.empty() && content.empty()) return false;
+
         const size_t boundary = FindHeadingSectionEnd(content, heading);
-        const size_t insertAt = (boundary == std::wstring::npos) ? content.size() : boundary;
+        // A boundary of npos (heading not found) or content.size() (the
+        // heading's section runs off the end of the file, i.e. there is no
+        // next heading) both mean "no heading to preserve spacing before" -
+        // only a boundary that actually lands on a later heading line calls
+        // for the backward walk over any blank separator line.
+        const bool boundaryIsHeadingMatch = boundary != std::wstring::npos && boundary < content.size();
+        size_t insertAt = (boundary == std::wstring::npos) ? content.size() : boundary;
+        if (boundaryIsHeadingMatch) {
+            insertAt = SkipBlankLinesBackward(content, insertAt);
+        }
         const bool needsLeadingNewline = insertAt > 0 && content[insertAt - 1] != L'\n';
 
         newContent = content.substr(0, insertAt);

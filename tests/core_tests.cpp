@@ -1546,6 +1546,17 @@ int main() {
             "AppendLogEntry inserts the new line after the existing log entry but before the next heading");
         Check(content.find("unrelated") != std::string::npos,
             "AppendLogEntry leaves content after the section untouched");
+
+        // Precise blank-line-preserving assertions (not just ordering): the
+        // new entry must land immediately after "- 09:00: woke up" with no
+        // blank line in between, and the blank line that originally sat
+        // between the log section and "## Other section" must still be
+        // there, between the new entry and that heading.
+        Check(content.find("- 09:00: woke up\n- ") != std::string::npos,
+            "AppendLogEntry inserts the new entry directly after the last existing entry, with no blank line "
+            "between them");
+        Check(content.find("\n\n## Other section") != std::string::npos,
+            "AppendLogEntry leaves the blank separator line intact between the new entry and the next heading");
         DeleteFileW(notePath.c_str());
     }
 
@@ -1619,6 +1630,86 @@ int main() {
             "AppendLogEntry preserves existing multi-byte UTF-8 content byte-for-byte");
         Check(content.find(": second entry\n") != std::string::npos,
             "AppendLogEntry appends the new entry after the UTF-8 content");
+        DeleteFileW(notePath.c_str());
+    }
+
+    {
+        // No blank line at all between the last log entry and the next
+        // heading: the new entry must land right before that heading, same
+        // as before this fix - there's no separator to preserve.
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring notePath = std::wstring(tempDir) + L"LeanLauncherTest_LogNoBlankBeforeHeading.md";
+        DeleteFileW(notePath.c_str());
+        {
+            std::ofstream seed(notePath, std::ios::binary);
+            seed << "## Log\n- 09:00: woke up\n## Other section\nunrelated\n";
+        }
+
+        Check(AppendLogEntry(notePath, L"back from a walk", L"## Log"),
+            "AppendLogEntry writes to an existing file with no blank separator and returns true");
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        const std::string content = ss.str();
+        check.close();
+        Check(content.find("- 09:00: woke up\n- ") != std::string::npos &&
+              content.find(": back from a walk\n## Other section") != std::string::npos,
+            "AppendLogEntry inserts directly before the next heading when there was no blank line to preserve");
+        DeleteFileW(notePath.c_str());
+    }
+
+    {
+        // Multiple consecutive blank lines between the last log entry and
+        // the next heading must all survive, still sitting between the new
+        // entry and that heading.
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring notePath = std::wstring(tempDir) + L"LeanLauncherTest_LogMultiBlankBeforeHeading.md";
+        DeleteFileW(notePath.c_str());
+        {
+            std::ofstream seed(notePath, std::ios::binary);
+            seed << "## Log\n- 09:00: woke up\n\n\n## Other section\nunrelated\n";
+        }
+
+        Check(AppendLogEntry(notePath, L"back from a walk", L"## Log"),
+            "AppendLogEntry writes to an existing file with multiple blank separator lines and returns true");
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        const std::string content = ss.str();
+        check.close();
+        Check(content.find("- 09:00: woke up\n- ") != std::string::npos,
+            "AppendLogEntry inserts the new entry directly after the last existing entry even with multiple "
+            "trailing blank lines");
+        Check(content.find(": back from a walk\n\n\n## Other section") != std::string::npos,
+            "AppendLogEntry preserves all of the original blank lines between the new entry and the next heading");
+        DeleteFileW(notePath.c_str());
+    }
+
+    {
+        // Finding 1 guard: a genuinely empty existing file (0 bytes) must
+        // NOT trip the "read failed" guard - ReadFileUtf8 returning "" here
+        // is the correct, successful read of an actually-empty file, and
+        // fs::file_size(path) == 0 is exactly what should let it through.
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring notePath = std::wstring(tempDir) + L"LeanLauncherTest_LogGenuinelyEmptyFile.md";
+        DeleteFileW(notePath.c_str());
+        {
+            std::ofstream seed(notePath, std::ios::binary);  // writes zero bytes
+        }
+
+        Check(AppendLogEntry(notePath, L"first entry", L"## Log"),
+            "AppendLogEntry succeeds on a genuinely empty (0-byte) existing file - the read/decode-failure guard "
+            "must not false-positive on a legitimate empty read");
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        const std::string content = ss.str();
+        check.close();
+        Check(content.find(": first entry\n") != std::string::npos,
+            "AppendLogEntry writes the log line into a previously-empty existing file");
         DeleteFileW(notePath.c_str());
     }
 
