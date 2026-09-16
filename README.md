@@ -47,7 +47,7 @@ Entirely optional and off by default until you point it at a vault - the launche
 - **Quick task capture** (`t <text>`, default prefix) - appends `- [ ] <text>` to today's daily note and hides the launcher immediately. Obsidian is never opened or focused.
 - **Quick note capture** (`a <text>`, default prefix) - appends a plain line (not a checkbox) to today's daily note, for anything that isn't a task
 - **Instant note jump** (`o <text>`, default prefix) - fuzzy-matches note titles against a live-synced background index and opens the match via Obsidian's own CLI (not a hand-rolled URI, not a third-party plugin dependency)
-- **Daily-note auto-detection** - reads the vault's own Daily Notes / Periodic Notes plugin config, so notes land exactly where Obsidian itself would put them; optional manual folder/format override available if auto-detection doesn't fit your setup
+- **Daily-note auto-detection** - reads the vault's own Daily Notes / Periodic Notes / Journals plugin config (whichever is actually enabled), so notes land exactly where Obsidian itself would put them; optional manual folder/format override available if auto-detection doesn't fit your setup
 - **Fully configurable** - master "Enable Obsidian integration" toggle, a per-action enable toggle for each of the three actions above, and inline-editable prefix/result-label/preview text per action, right from Settings. Prefix-uniqueness validation stops you from configuring two actions with colliding prefixes.
 - **Compact by default** - each action's settings collapse into a one-line summary; expanding one collapses whichever other was open
 

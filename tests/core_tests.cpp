@@ -1157,6 +1157,106 @@ int main() {
     }
 
     {
+        // Journals plugin's data.json nests each journal (day/week/month/...)
+        // under a "journals" map, with "type" fields also appearing elsewhere
+        // (decorations) that must not be mistaken for the journal's own
+        // write.type. This fixture mirrors a real vault's shape closely
+        // enough to exercise that disambiguation.
+        const std::string journalsJson = R"({
+            "journals": {
+                "Journal weekly": {
+                    "write": {"type": "week"},
+                    "dateFormat": "YYYY/YYYY-[W]ww",
+                    "folder": "06 BJ/11 Weekly",
+                    "decorations": [{"conditions": [{"type": "has-note"}]}]
+                },
+                "Journal daily": {
+                    "write": {"type": "day"},
+                    "dateFormat": "YYYY/MM/YYYY-MM-DD",
+                    "folder": "06 BJ/10 Daily",
+                    "decorations": [{"styles": [{"type": "shape"}]}]
+                }
+            }
+        })";
+        DailyNoteConfig config = ParseJournalsDailyConfig(journalsJson);
+        Check(config.found, "ParseJournalsDailyConfig marks config as found");
+        Check(config.folder == L"06 BJ/10 Daily", "ParseJournalsDailyConfig reads the day journal's folder");
+        Check(config.format == L"YYYY/MM/YYYY-MM-DD", "ParseJournalsDailyConfig reads the day journal's dateFormat");
+
+        DailyNoteConfig noDayJournal = ParseJournalsDailyConfig(
+            R"({"journals":{"Journal weekly":{"write":{"type":"week"},"folder":"W"}}})");
+        Check(!noDayJournal.found, "ParseJournalsDailyConfig reports not-found when no journal has write.type day");
+
+        DailyNoteConfig unparseable = ParseJournalsDailyConfig("not json at all");
+        Check(!unparseable.found, "ParseJournalsDailyConfig reports not-found for garbage input");
+    }
+
+    {
+        using namespace leanlauncher::obsidian;
+        wchar_t tempDirBuf[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf);
+        const fs::path tempVault = fs::path(tempDirBuf) / L"LeanLauncherJournalsFallbackTest";
+        std::error_code journalsEc;
+        fs::remove_all(tempVault, journalsEc);
+        fs::create_directories(tempVault / L".obsidian" / L"plugins" / L"journals", journalsEc);
+        {
+            std::ofstream(tempVault / L".obsidian" / L"community-plugins.json") << R"(["journals"])";
+            std::ofstream(tempVault / L".obsidian" / L"plugins" / L"journals" / L"data.json")
+                << R"({"journals":{"Journal daily":{"write":{"type":"day"},)"
+                << R"("dateFormat":"YYYY/MM/YYYY-MM-DD","folder":"06 BJ/10 Daily"}}})";
+        }
+
+        const DailyNoteConfig config = ReadDailyNoteConfig(tempVault.wstring());
+        Check(config.found && config.folder == L"06 BJ/10 Daily" && config.format == L"YYYY/MM/YYYY-MM-DD",
+            "ReadDailyNoteConfig falls back to the Journals plugin when daily-notes.json and "
+            "Periodic Notes are both absent");
+
+        fs::remove_all(tempVault, journalsEc);
+    }
+
+    {
+        // Regression: a vault that migrated from core Daily Notes to Journals
+        // keeps its stale daily-notes.json on disk (Obsidian never deletes it
+        // on disable) - core-plugins.json explicitly marking "daily-notes" as
+        // disabled must be enough to skip that stale file and fall through to
+        // the enabled Journals config instead. Mirrors this project's own
+        // D:\Lean Notes vault exactly (folder-only stale config, no format).
+        using namespace leanlauncher::obsidian;
+        wchar_t tempDirBuf[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf);
+        const fs::path tempVault = fs::path(tempDirBuf) / L"LeanLauncherStaleDailyNotesTest";
+        std::error_code staleEc;
+        fs::remove_all(tempVault, staleEc);
+        fs::create_directories(tempVault / L".obsidian" / L"plugins" / L"journals", staleEc);
+        {
+            std::ofstream(tempVault / L".obsidian" / L"daily-notes.json")
+                << R"({"folder":"06 BJ/10 Daily"})";
+            std::ofstream(tempVault / L".obsidian" / L"core-plugins.json")
+                << R"({"daily-notes": false})";
+            std::ofstream(tempVault / L".obsidian" / L"community-plugins.json") << R"(["journals"])";
+            std::ofstream(tempVault / L".obsidian" / L"plugins" / L"journals" / L"data.json")
+                << R"({"journals":{"Journal daily":{"write":{"type":"day"},)"
+                << R"("dateFormat":"YYYY/MM/YYYY-MM-DD","folder":"06 BJ/10 Daily"}}})";
+        }
+
+        Check(!IsCorePluginEnabled(tempVault.wstring(), "daily-notes"),
+            "IsCorePluginEnabled reports false when core-plugins.json explicitly disables the plugin");
+        Check(IsCorePluginEnabled(tempVault.wstring(), "templates"),
+            "IsCorePluginEnabled defaults to true for a key absent from core-plugins.json");
+        Check(IsCommunityPluginEnabled(tempVault.wstring(), "journals"),
+            "IsCommunityPluginEnabled reports true when the id is listed in community-plugins.json");
+        Check(!IsCommunityPluginEnabled(tempVault.wstring(), "periodic-notes"),
+            "IsCommunityPluginEnabled defaults to false for an id absent from community-plugins.json");
+
+        const DailyNoteConfig config = ReadDailyNoteConfig(tempVault.wstring());
+        Check(config.found && config.folder == L"06 BJ/10 Daily" && config.format == L"YYYY/MM/YYYY-MM-DD",
+            "ReadDailyNoteConfig skips a disabled-but-present core daily-notes.json and falls through "
+            "to the enabled Journals config");
+
+        fs::remove_all(tempVault, staleEc);
+    }
+
+    {
         using namespace leanlauncher::obsidian;
         std::wstring text;
         Check(TryParsePrefix(L"T buy milk", L"T", text) && text == L"buy milk",

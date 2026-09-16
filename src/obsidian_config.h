@@ -138,6 +138,31 @@ inline bool ExtractStringField(std::string_view json, std::string_view key, std:
     return ParseJsonStringAt(json, pos, out);
 }
 
+// Finds the balanced-brace object whose opening '{' is the first one at or
+// after `searchFrom`, returning its [start, end) byte range (end points just
+// past the matching '}'). Depth-counts braces without string-literal
+// awareness, so a '{'/'}' inside a quoted value would misparse - an accepted
+// limitation matching this file's existing not-a-real-JSON-parser approach.
+// Returns false if no balanced object is found (malformed/truncated JSON).
+inline bool FindBalancedObject(std::string_view json, size_t searchFrom, size_t& start, size_t& end) {
+    const size_t pos = json.find('{', searchFrom);
+    if (pos == std::string_view::npos) return false;
+    int depth = 0;
+    for (size_t i = pos; i < json.size(); ++i) {
+        if (json[i] == '{') {
+            ++depth;
+        } else if (json[i] == '}') {
+            --depth;
+            if (depth == 0) {
+                start = pos;
+                end = i + 1;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // Finds every `"path":"..."` value in obsidian.json's `vaults` object.
 inline std::vector<std::wstring> FindVaultPathsInJson(std::string_view json) {
     std::vector<std::wstring> paths;
@@ -172,6 +197,55 @@ inline DailyNoteConfig ParseDailyNoteConfigJson(std::string_view json) {
     return config;
 }
 
+// Reads the Journals plugin's config and returns the folder/dateFormat of
+// its "day"-type journal (the one used for daily notes), if one exists.
+// Unlike daily-notes.json/Periodic Notes, the Journals plugin nests each
+// journal (day/week/month/...) as its own object under a top-level
+// "journals" map, so the flat single-pass field extraction used elsewhere
+// in this file doesn't apply - each candidate entry's "write" sub-object is
+// isolated first to disambiguate its "type" from unrelated "type" fields
+// elsewhere in the entry (decorations, colors, etc.).
+inline DailyNoteConfig ParseJournalsDailyConfig(std::string_view json) {
+    const size_t journalsKeyPos = json.find("\"journals\"");
+    if (journalsKeyPos == std::string_view::npos) return DailyNoteConfig{};
+
+    size_t journalsStart = 0;
+    size_t journalsEnd = 0;
+    if (!FindBalancedObject(json, journalsKeyPos, journalsStart, journalsEnd)) return DailyNoteConfig{};
+
+    size_t searchPos = journalsStart + 1;
+    while (searchPos < journalsEnd) {
+        size_t entryStart = 0;
+        size_t entryEnd = 0;
+        if (!FindBalancedObject(json, searchPos, entryStart, entryEnd) || entryEnd > journalsEnd) break;
+        const std::string_view entry = json.substr(entryStart, entryEnd - entryStart);
+
+        const size_t writeKeyPos = entry.find("\"write\"");
+        if (writeKeyPos != std::string_view::npos) {
+            size_t writeStart = 0;
+            size_t writeEnd = 0;
+            if (FindBalancedObject(entry, writeKeyPos, writeStart, writeEnd)) {
+                std::wstring type;
+                const std::string_view writeObj = entry.substr(writeStart, writeEnd - writeStart);
+                if (ExtractStringField(writeObj, "type", type) && type == L"day") {
+                    std::wstring folder;
+                    std::wstring dateFormat;
+                    const bool hasFolder = ExtractStringField(entry, "folder", folder);
+                    const bool hasFormat = ExtractStringField(entry, "dateFormat", dateFormat);
+                    if (!hasFolder && !hasFormat) return DailyNoteConfig{};
+                    DailyNoteConfig config;
+                    config.folder = hasFolder ? folder : L"";
+                    config.format = (hasFormat && !dateFormat.empty()) ? dateFormat : L"YYYY-MM-DD";
+                    config.found = true;
+                    return config;
+                }
+            }
+        }
+        searchPos = entryEnd;
+    }
+    return DailyNoteConfig{};
+}
+
 // Reads %APPDATA%\obsidian\obsidian.json and returns every known vault path
 // that still exists on disk. Empty vector if Obsidian has never run, the
 // config is unreadable, or no known vault paths still exist.
@@ -195,24 +269,74 @@ inline std::vector<std::wstring> FindKnownVaults() {
     return existing;
 }
 
+// Returns false only when `.obsidian/core-plugins.json` exists, can be read,
+// and explicitly lists `pluginId` as `false`. A missing file, a missing key,
+// or an explicit `true` are all treated as enabled - mirrors Obsidian's own
+// default-enabled behavior for core plugins (this file only ever records
+// plugins a user has *touched*, not a complete enabled/disabled census).
+inline bool IsCorePluginEnabled(const std::wstring& vaultPath, std::string_view pluginId) {
+    const fs::path base(vaultPath);
+    const std::string json = ReadFileUtf8(base / L".obsidian" / L"core-plugins.json");
+    if (json.empty()) return true;
+
+    const std::string keyPattern = "\"" + std::string(pluginId) + "\"";
+    size_t pos = json.find(keyPattern);
+    if (pos == std::string::npos) return true;
+    pos += keyPattern.size();
+
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == ':' || json[pos] == '\t' ||
+           json[pos] == '\r' || json[pos] == '\n')) {
+        ++pos;
+    }
+    return json.compare(pos, 5, "false") != 0;
+}
+
+// Returns true only if `.obsidian/community-plugins.json` (a flat JSON array
+// of enabled plugin-folder ids) contains `pluginId`. Unlike core plugins,
+// community plugins are off by default, so a missing file or missing id
+// both mean disabled.
+inline bool IsCommunityPluginEnabled(const std::wstring& vaultPath, std::string_view pluginId) {
+    const fs::path base(vaultPath);
+    const std::string json = ReadFileUtf8(base / L".obsidian" / L"community-plugins.json");
+    if (json.empty()) return false;
+    const std::string idPattern = "\"" + std::string(pluginId) + "\"";
+    return json.find(idPattern) != std::string::npos;
+}
+
 // Reads the daily-notes plugin config for a vault, falling back to the
-// Periodic Notes plugin's "daily" section if the core plugin's config is
-// missing or unparseable. Returns found=false if neither is available -
-// callers should then fall back to vault root + "YYYY-MM-DD.md".
+// Periodic Notes plugin's "daily" section, then the Journals plugin's
+// "day"-type journal, if the core plugin's config is missing or
+// unparseable. Each source is skipped entirely when its plugin isn't
+// enabled, so a stale config file left behind after disabling a plugin (e.g.
+// switching from core Daily Notes to Journals) can't outrank the config that
+// actually governs the vault today. Returns found=false if none are
+// available - callers should then fall back to vault root + "YYYY-MM-DD.md".
 inline DailyNoteConfig ReadDailyNoteConfig(const std::wstring& vaultPath) {
     const fs::path base(vaultPath);
 
-    std::string json = ReadFileUtf8(base / L".obsidian" / L"daily-notes.json");
-    if (!json.empty()) {
-        DailyNoteConfig config = ParseDailyNoteConfigJson(json);
-        if (config.found) return config;
+    if (IsCorePluginEnabled(vaultPath, "daily-notes")) {
+        std::string json = ReadFileUtf8(base / L".obsidian" / L"daily-notes.json");
+        if (!json.empty()) {
+            DailyNoteConfig config = ParseDailyNoteConfigJson(json);
+            if (config.found) return config;
+        }
     }
 
-    json = ReadFileUtf8(base / L".obsidian" / L"plugins" / L"periodic-notes" / L"data.json");
-    if (!json.empty()) {
-        const size_t dailyPos = json.find("\"daily\"");
-        if (dailyPos != std::string::npos) {
-            DailyNoteConfig config = ParseDailyNoteConfigJson(std::string_view(json).substr(dailyPos));
+    if (IsCommunityPluginEnabled(vaultPath, "periodic-notes")) {
+        std::string json = ReadFileUtf8(base / L".obsidian" / L"plugins" / L"periodic-notes" / L"data.json");
+        if (!json.empty()) {
+            const size_t dailyPos = json.find("\"daily\"");
+            if (dailyPos != std::string::npos) {
+                DailyNoteConfig config = ParseDailyNoteConfigJson(std::string_view(json).substr(dailyPos));
+                if (config.found) return config;
+            }
+        }
+    }
+
+    if (IsCommunityPluginEnabled(vaultPath, "journals")) {
+        std::string json = ReadFileUtf8(base / L".obsidian" / L"plugins" / L"journals" / L"data.json");
+        if (!json.empty()) {
+            DailyNoteConfig config = ParseJournalsDailyConfig(json);
             if (config.found) return config;
         }
     }

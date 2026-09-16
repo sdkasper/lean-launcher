@@ -10,6 +10,14 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.1.0] - 2026-09-16
+
+### Added
+- **Journals plugin support for daily-note discovery** - `t <text>`/`a <text>` now correctly detect the daily-note folder and date format from vaults using the [Journals plugin](https://github.com/gerrywastaken/obsidian-journals) instead of core Daily Notes or Periodic Notes
+
+### Fixed
+- **Stale, disabled daily-notes config no longer wins** - if a vault previously used core Daily Notes and later switched to Periodic Notes or Journals, Obsidian leaves the old `daily-notes.json` file behind even after disabling the plugin; daily-note detection now checks `core-plugins.json`/`community-plugins.json` to confirm a source is actually enabled before trusting its config, rather than just checking whether the file exists
+
 ## [1.0.2] - 2026-09-16
 
 ### Fixed
