@@ -18,19 +18,19 @@
 </p>
 
 <p align="center">
-  <b>⚡ &lt; 500 KB binary</b> &nbsp;&bull;&nbsp;
+  <b>⚡ &lt; ~500 KB binary</b> &nbsp;&bull;&nbsp;
   <b>🧠 ~10 MB RAM</b> &nbsp;&bull;&nbsp;
   <b>🚀 &lt; 1 ms search</b> &nbsp;&bull;&nbsp;
   <b>🔒 Zero telemetry</b>
 </p>
 
-**Windows only.** No pre-built releases yet - this is pre-release, in-development software. Build from source (below).
+**Windows only.**
 
 ## Features
 
 ### Launcher Core
 
-- **Ultra-Lightweight** - Built in pure C++, Win32, and Direct2D. No Electron, no Chromium runtime. The entire executable is under 500 KB and uses just ~10 MB RAM.
+- **Ultra-Lightweight** - Built in pure C++, Win32, and Direct2D. No Electron, no Chromium runtime. The entire executable is ~500 KB and uses just ~10 MB RAM.
 - **Instant Search** - In-memory indexing and weighted fuzzy matching return results in under a millisecond.
 - **Smart Matching** - Finds apps by acronyms and prefixes: `vsc` → Visual Studio Code, `tm` → Task Manager, `wu` → Windows Update, `dev man` → Device Manager
 - **System Tools Included** - Instantly launch Control Panel applets, Windows Settings, Device Manager, and Services alongside desktop apps.
@@ -41,7 +41,7 @@
 
 ### Obsidian Integration
 
-Entirely optional and off by default until you point it at a vault - the launcher works exactly like Takeoff with the integration disabled.
+Entirely optional and off by default until you point it at a vault.
 
 - **Auto-detected vault picker** - reads Obsidian's own `obsidian.json` to find every vault on your machine; click (or press Enter on) the Obsidian Vault row in Settings to pick one from a dropdown list (mouse or Up/Down/Enter/Esc)
 - **Quick task capture** (`t <text>`, default prefix) - appends `- [ ] <text>` to today's daily note and hides the launcher immediately. Obsidian is never opened or focused.
