@@ -1472,6 +1472,31 @@ int main() {
             "BuildLogLine strips embedded CR/LF so one entry never becomes two lines");
     }
 
+    // --- Log capture: Utf8ToWide / WideToUtf8 ---
+    {
+        const std::string asciiUtf8 = "hello world";
+        const std::wstring asciiWide = Utf8ToWide(asciiUtf8);
+        Check(asciiWide == L"hello world", "Utf8ToWide decodes plain ASCII correctly");
+        Check(WideToUtf8(asciiWide) == asciiUtf8,
+            "Utf8ToWide -> WideToUtf8 round-trips plain ASCII back to the original bytes");
+
+        // UTF-8 bytes for "café \U0001F331" (accented char + a non-BMP
+        // emoji requiring a UTF-16 surrogate pair), seeded directly so this
+        // test doesn't depend on the compiler's source-file encoding.
+        const std::string multibyteUtf8 = "caf\xC3\xA9 \xF0\x9F\x8C\xB1";
+        const std::wstring multibyteWide = Utf8ToWide(multibyteUtf8);
+        Check(multibyteWide.find(L'\xE9') != std::wstring::npos, "Utf8ToWide decodes the accented character");
+        Check(multibyteWide.size() == 7,
+            "Utf8ToWide decodes the non-BMP emoji as a UTF-16 surrogate pair (2 code units): "
+            "'caf' (3) + accented-e (1) + ' ' (1) + surrogate pair (2) = 7 UTF-16 code units");
+        Check(WideToUtf8(multibyteWide) == multibyteUtf8,
+            "Utf8ToWide -> WideToUtf8 round-trips multi-byte UTF-8 (accented char + non-BMP emoji "
+            "surrogate pair) without corruption");
+
+        Check(Utf8ToWide("").empty(), "Utf8ToWide returns an empty wstring for empty input");
+        Check(WideToUtf8(L"").empty(), "WideToUtf8 returns an empty string for empty input");
+    }
+
     // --- Log capture: AppendLogEntry integration ---
     {
         wchar_t tempDir[MAX_PATH]{};
