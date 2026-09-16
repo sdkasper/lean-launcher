@@ -1274,14 +1274,16 @@ int main() {
         Check(TryParsePrefix(L"vault standup", L"vault", text) && text == L"standup",
             "TryParsePrefix works with a multi-character prefix, not just a single letter");
 
-        Check(FindPrefixConflict(L"O", L"T", L"a") == nullptr,
-            "FindPrefixConflict accepts three distinct non-empty prefixes");
-        Check(FindPrefixConflict(L"", L"T", L"a") != nullptr,
+        Check(FindPrefixConflict(L"O", L"T", L"a", L"l") == nullptr,
+            "FindPrefixConflict accepts four distinct non-empty prefixes");
+        Check(FindPrefixConflict(L"", L"T", L"a", L"l") != nullptr,
             "FindPrefixConflict rejects an empty prefix");
-        Check(FindPrefixConflict(L"T", L"T", L"a") != nullptr,
+        Check(FindPrefixConflict(L"T", L"T", L"a", L"l") != nullptr,
             "FindPrefixConflict rejects an exact duplicate");
-        Check(FindPrefixConflict(L"t", L"T", L"a") != nullptr,
+        Check(FindPrefixConflict(L"t", L"T", L"a", L"l") != nullptr,
             "FindPrefixConflict rejects a case-insensitive duplicate");
+        Check(FindPrefixConflict(L"O", L"T", L"a", L"a") != nullptr,
+            "FindPrefixConflict rejects a duplicate against the fourth (log) prefix");
     }
 
     {

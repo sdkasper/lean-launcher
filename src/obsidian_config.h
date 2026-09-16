@@ -57,14 +57,15 @@ inline bool DefaultObsidianEnabled(const std::wstring& vaultPath) {
     return !vaultPath.empty();
 }
 
-// Returns a user-facing error message if the three configured action
+// Returns a user-facing error message if the four configured action
 // prefixes aren't all non-empty and mutually distinct (case-insensitive),
 // or nullptr if they're valid. Used to reject an in-progress Settings edit
 // before it's saved - two prefixes colliding would make one action
 // permanently unreachable, and an empty prefix would match every input.
 inline const wchar_t* FindPrefixConflict(
-    const std::wstring& vaultSearchPrefix, const std::wstring& taskPrefix, const std::wstring& noteAddPrefix) {
-    if (vaultSearchPrefix.empty() || taskPrefix.empty() || noteAddPrefix.empty()) {
+    const std::wstring& vaultSearchPrefix, const std::wstring& taskPrefix,
+    const std::wstring& noteAddPrefix, const std::wstring& logPrefix) {
+    if (vaultSearchPrefix.empty() || taskPrefix.empty() || noteAddPrefix.empty() || logPrefix.empty()) {
         return L"Prefix cannot be empty.";
     }
     auto ciEqual = [](const std::wstring& a, const std::wstring& b) {
@@ -74,9 +75,11 @@ inline const wchar_t* FindPrefixConflict(
         }
         return true;
     };
-    if (ciEqual(vaultSearchPrefix, taskPrefix) || ciEqual(vaultSearchPrefix, noteAddPrefix) ||
-        ciEqual(taskPrefix, noteAddPrefix)) {
-        return L"Prefixes must be unique.";
+    const std::wstring* prefixes[] = {&vaultSearchPrefix, &taskPrefix, &noteAddPrefix, &logPrefix};
+    for (size_t i = 0; i < 4; ++i) {
+        for (size_t j = i + 1; j < 4; ++j) {
+            if (ciEqual(*prefixes[i], *prefixes[j])) return L"Prefixes must be unique.";
+        }
     }
     return nullptr;
 }
