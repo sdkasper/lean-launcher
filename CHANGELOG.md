@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.2.0] - 2026-09-16
+
+### Added
+- **Quick log capture** (`l <text>`, default prefix) - inserts a timestamped line (`- HH:MM: <text>`) at the end of a configured heading's section (default `## Log`) in today's daily note, replicating a QuickAdd-style running log natively in the launcher. Like task/note capture, it writes directly to the note file on disk - Obsidian never needs to be open. Fully configurable from Settings alongside the other three actions (enable toggle, prefix, result label, preview text, and the target heading).
+
 ## [1.1.0] - 2026-09-16
 
 ### Added

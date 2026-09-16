@@ -46,9 +46,10 @@ Entirely optional and off by default until you point it at a vault.
 - **Auto-detected vault picker** - reads Obsidian's own `obsidian.json` to find every vault on your machine; click (or press Enter on) the Obsidian Vault row in Settings to pick one from a dropdown list (mouse or Up/Down/Enter/Esc)
 - **Quick task capture** (`t <text>`, default prefix) - appends `- [ ] <text>` to today's daily note and hides the launcher immediately. Obsidian is never opened or focused.
 - **Quick note capture** (`a <text>`, default prefix) - appends a plain line (not a checkbox) to today's daily note, for anything that isn't a task
+- **Quick log capture** (`l <text>`, default prefix) - inserts a timestamped line (`- HH:MM: <text>`) at the end of a configured heading's section (default `## Log`) in today's daily note, for a running log without opening Obsidian
 - **Instant note jump** (`o <text>`, default prefix) - fuzzy-matches note titles against a live-synced background index and opens the match via Obsidian's own CLI (not a hand-rolled URI, not a third-party plugin dependency)
 - **Daily-note auto-detection** - reads the vault's own Daily Notes / Periodic Notes / Journals plugin config (whichever is actually enabled), so notes land exactly where Obsidian itself would put them; optional manual folder/format override available if auto-detection doesn't fit your setup
-- **Fully configurable** - master "Enable Obsidian integration" toggle, a per-action enable toggle for each of the three actions above, and inline-editable prefix/result-label/preview text per action, right from Settings. Prefix-uniqueness validation stops you from configuring two actions with colliding prefixes.
+- **Fully configurable** - master "Enable Obsidian integration" toggle, a per-action enable toggle for each of the four actions above, and inline-editable prefix/result-label/preview text per action, right from Settings. Prefix-uniqueness validation stops you from configuring two actions with colliding prefixes.
 - **Compact by default** - each action's settings collapse into a one-line summary; expanding one collapses whichever other was open
 
 ## Shortcuts
@@ -73,6 +74,7 @@ These aren't global hotkeys - they're prefixes you type in the launcher's search
 | --- | --- | --- |
 | `t <text>` | Add a task (`- [ ] <text>`) to today's daily note | No |
 | `a <text>` | Add a plain line to today's daily note | No |
+| `l <text>` | Add a timestamped log line to a configured heading's section in today's daily note | No |
 | `o <text>` | Fuzzy-search note titles and open the match | Yes* |
 
 **\*** Obsidian's CLI requires the app to be running to open the note. If it isn't, `o` launches Obsidian as part of that same command - but per [Obsidian's own docs](https://obsidian.md/help/cli), the app needs to actually be running for the command to complete, so on a cold start Lean Launcher waits up to 10 seconds for Obsidian to finish booting before giving up.
@@ -83,7 +85,7 @@ The launcher itself is unchanged from its Takeoff heritage: a direct Win32 messa
 
 **Pure launcher features (app/file/web search, calculator, system tools) never require Obsidian or the Obsidian CLI at all.** They work identically whether or not Obsidian integration is enabled.
 
-**Obsidian integration** adds no runtime dependency on Obsidian being open for two of its three actions: vault and daily-note location are discovered by reading Obsidian's own config files (`obsidian.json`, `daily-notes.json`) once, then task/note capture (`t`, `a`) write directly to the note file on disk - Obsidian can be closed the whole time. Note jump (`o`) is the one action that does need Obsidian running: it hands off to `Obsidian.com`, the CLI bundled with every standard Obsidian desktop install (`%LOCALAPPDATA%\Obsidian\Obsidian.com`), to open the matched note - executed off the UI thread so a slow or cold Obsidian start never stalls the launcher. Per Obsidian's own CLI, if Obsidian isn't already running, the same `o` command launches it and waits up to 10 seconds for it to come up before giving up - `o` searches always return matches from the local index regardless, but opening one on a cold start can take a few seconds or, on a very slow machine, time out.
+**Obsidian integration** adds no runtime dependency on Obsidian being open for three of its four actions: vault and daily-note location are discovered by reading Obsidian's own config files (`obsidian.json`, `daily-notes.json`) once, then task/note/log capture (`t`, `a`, `l`) write directly to the note file on disk - Obsidian can be closed the whole time. Note jump (`o`) is the one action that does need Obsidian running: it hands off to `Obsidian.com`, the CLI bundled with every standard Obsidian desktop install (`%LOCALAPPDATA%\Obsidian\Obsidian.com`), to open the matched note - executed off the UI thread so a slow or cold Obsidian start never stalls the launcher. Per Obsidian's own CLI, if Obsidian isn't already running, the same `o` command launches it and waits up to 10 seconds for it to come up before giving up - `o` searches always return matches from the local index regardless, but opening one on a cold start can take a few seconds or, on a very slow machine, time out.
 
 ## Build from Source
 
