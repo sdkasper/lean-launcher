@@ -49,6 +49,7 @@ struct Settings {
     bool vaultSearchEnabled = true;
     bool taskAddEnabled = true;
     bool noteAddEnabled = true;
+    bool logEnabled = true;
 
     std::wstring vaultSearchPrefix = L"o";
     std::wstring vaultSearchPillLabel = L"Jump";
@@ -60,6 +61,14 @@ struct Settings {
     std::wstring noteAddPrefix = L"a";
     std::wstring noteAddPillLabel = L"Note";
     std::wstring noteAddPreviewPrefix = L"Add to today's note: ";
+
+    std::wstring logPrefix = L"l";
+    std::wstring logPillLabel = L"Log";
+    std::wstring logPreviewPrefix = L"Log: ";
+    // The exact heading line (including leading '#'s) to insert log entries
+    // after, e.g. "## Log". Not an "empty means auto-detect" field like the
+    // overrides below - it always has a concrete default.
+    std::wstring logHeading = L"## Log";
 
     // Empty = auto-detect from the vault's own daily-notes/periodic-notes
     // plugin config (existing ReadDailyNoteConfig behavior, unchanged).
