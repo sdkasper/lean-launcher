@@ -227,6 +227,13 @@ private:
             }
             return 0;
         }
+        case kKnownVaultsReadyMessage: {
+            std::unique_ptr<std::vector<std::wstring>> result(
+                reinterpret_cast<std::vector<std::wstring>*>(lParam));
+            knownVaults_ = std::move(*result);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
         case kIconReadyMessage: {
             std::unique_ptr<IconResult> result(reinterpret_cast<IconResult*>(lParam));
             // Drop stale answers (e.g. a pre-DPI-change size) and duplicates.
@@ -1423,7 +1430,20 @@ private:
         obsidianExpandedSection_ = -1;
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
-        knownVaults_ = leanlauncher::obsidian::FindKnownVaults();
+        // FindKnownVaults() calls fs::exists() per known vault; run it off
+        // the UI thread so a disconnected network-drive vault can't stall
+        // Settings opening. knownVaults_ keeps its previous value (fine -
+        // it rarely changes) until the scan posts back.
+        const HWND hwnd = hwnd_;
+        try {
+            std::thread([hwnd] {
+                auto* result = new std::vector<std::wstring>(leanlauncher::obsidian::FindKnownVaults());
+                PostMessageW(hwnd, leanlauncher::obsidian::kKnownVaultsReadyMessage,
+                    0, reinterpret_cast<LPARAM>(result));
+            }).detach();
+        } catch (const std::system_error&) {
+            // Thread creation failed - keep whatever knownVaults_ already has.
+        }
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
@@ -1672,6 +1692,7 @@ private:
         obsidianExpandedSection_ = -1;
         settingsStatus_.clear();
         settings_ = quicklaunch::Settings{};
+        obsidianVaultPath_.clear();
         // Same staleness gap as CommitEditingRow: settings_.dailyNote*Override
         // just got reset to empty, but dailyNoteConfig_ is a cache that
         // won't reflect that until something recomputes it.

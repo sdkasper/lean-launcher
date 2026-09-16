@@ -62,6 +62,27 @@ jobs:
           Write-Output "sha256=$archiveName.sha256" >> $env:GITHUB_OUTPUT
           Write-Output "version_exe=build/Release/$versionExeName" >> $env:GITHUB_OUTPUT
 
+      - name: Extract Changelog Section
+        id: notes
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.package.outputs.tag }}"
+          $version = $tag -replace '^v', ''
+          $changelog = Get-Content -Raw CHANGELOG.md
+          $pattern = "(?ms)^## \[$([regex]::Escape($version))\].*?(?=^## |\z)"
+          $match = [regex]::Match($changelog, $pattern)
+          $notesPath = "release_notes.md"
+
+          if ($match.Success) {
+            $lines = ($match.Value.TrimEnd()) -split "`r?`n"
+            $body = (($lines | Select-Object -Skip 1) -join "`n").Trim()
+            Set-Content -Path $notesPath -Value $body -Encoding utf8
+          } else {
+            Set-Content -Path $notesPath -Value "_No CHANGELOG.md entry found for $version._" -Encoding utf8
+          }
+
+          Write-Output "notes_file=$notesPath" >> $env:GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -71,7 +92,9 @@ jobs:
             build/Release/LeanLauncher.exe
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.sha256 }}
+          body_path: ${{ steps.notes.outputs.notes_file }}
           generate_release_notes: true
+          append_body: true
           draft: false
           prerelease: false
 

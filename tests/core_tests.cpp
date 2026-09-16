@@ -279,11 +279,16 @@ int main() {
         "  \"assets\": [\n"
         "    {\"name\": \"Takeoff-v1.1.0-windows-x64.zip\", \"browser_download_url\": \"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.1.0/Takeoff-v1.1.0-windows-x64.zip\"},\n"
         "    {\"name\": \"Takeoff-v1.1.0-windows-x64.zip.sha256\", \"browser_download_url\": \"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.1.0/Takeoff-v1.1.0-windows-x64.zip.sha256\"},\n"
-        "    {\"name\": \"Takeoff.exe\", \"browser_download_url\": \"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.1.0/Takeoff.exe\"}\n"
+        "    {\"name\": \"Takeoff.exe\", \"browser_download_url\": \"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.1.0/Takeoff.exe\"},\n"
+        "    {\"name\": \"LeanLauncher.exe\", \"browser_download_url\": \"https://github.com/sdkasper/lean-launcher/releases/download/v1.1.0/LeanLauncher.exe\"}\n"
         "  ]\n"
         "}";
+    // Both a generic .exe (Takeoff.exe) and the actual preferred-name asset
+    // (LeanLauncher.exe, matching the default preferredName) are present -
+    // this asserts the preferred-name branch wins over the .exe fallback,
+    // not just that some .exe URL comes back.
     Check(ExtractAssetDownloadUrl(mockReleaseJson, L"v1.1.0") ==
-          L"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.1.0/Takeoff.exe",
+          L"https://github.com/sdkasper/lean-launcher/releases/download/v1.1.0/LeanLauncher.exe",
           "extract asset url preferred match");
 
     const std::string mockFallbackJson =

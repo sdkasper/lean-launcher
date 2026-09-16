@@ -19,7 +19,7 @@
 
 namespace takeoff {
 
-inline constexpr wchar_t kAppVersion[] = L"1.0.1";
+inline constexpr wchar_t kAppVersion[] = L"1.0.2";
 inline constexpr wchar_t kRepoUrl[] = L"https://github.com/sdkasper/lean-launcher";
 inline constexpr wchar_t kDefaultReleasesUrl[] = L"https://github.com/sdkasper/lean-launcher/releases";
 inline constexpr wchar_t kDefaultApiHost[] = L"api.github.com";
@@ -118,7 +118,7 @@ inline std::wstring ExtractAssetDownloadUrl(std::string_view json, std::wstring_
         std::wstring url(rawUrl.begin(), rawUrl.end());
         std::wstring urlLower = toLowerW(url);
 
-        // Match exact or contains preferred name (e.g. Takeoff.exe)
+        // Match exact or contains preferred name (e.g. LeanLauncher.exe)
         if (urlLower.find(targetLower) != std::wstring::npos) {
             return url;
         }
@@ -147,7 +147,7 @@ inline std::wstring ExtractAssetDownloadUrl(std::string_view json, std::wstring_
 inline bool ValidateExecutableFile(const std::wstring& filePath) {
     std::error_code ec;
     const auto size = std::filesystem::file_size(filePath, ec);
-    if (ec || size < 65536) { // Real Takeoff executable is ~400KB+
+    if (ec || size < 65536) { // Real Lean Launcher executable is ~400KB+
         return false;
     }
     HANDLE file = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,

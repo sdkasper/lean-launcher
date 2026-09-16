@@ -309,6 +309,14 @@ inline std::wstring BuildObsidianCliCommandLine(
 // main.cpp's own constants.
 constexpr UINT kNoteOpenResultMessage = WM_APP + 10;
 
+// Posted back to the launcher window when a background FindKnownVaults()
+// scan finishes; lParam is a heap-allocated std::vector<std::wstring>* that
+// the handler must take ownership of and delete. Needed because
+// FindKnownVaults() calls fs::exists() on every known vault path - on the
+// UI thread, one unreachable network-drive vault would stall OpenSettings()
+// (and with it the global hotkey and tray icon) for the OS I/O timeout.
+constexpr UINT kKnownVaultsReadyMessage = WM_APP + 11;
+
 // Opens a note in Obsidian via its official CLI - no community plugin
 // dependency, no hand-rolled URI scheme. Returns false if the CLI couldn't
 // be located or CreateProcessW couldn't spawn it; this is a launch-dispatch

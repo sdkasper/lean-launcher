@@ -10,6 +10,13 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.0.2] - 2026-09-16
+
+### Fixed
+- **"Reset to Defaults" now also clears the configured Obsidian vault** - previously it reset every other setting but left the vault path selected
+- **Vault detection no longer blocks the UI thread** - opening Settings used to check whether every known vault still exists synchronously, which could stall the whole launcher popup if a vault lived on a disconnected network drive; this scan now runs on a background thread
+- **Release notes now reflect actual changes** - GitHub's auto-generated release notes were bare (just a compare link) because this repo has no pull-request history for GitHub to summarize from; releases now pull their notes from the matching `CHANGELOG.md` section instead
+
 ## [1.0.1] - 2026-09-15
 
 ### Added

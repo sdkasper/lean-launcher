@@ -49,6 +49,7 @@ using takeoff::FileIndex;
 using takeoff::kFilesReadyMessage;
 using leanlauncher::obsidian::kNotesReadyMessage;
 using leanlauncher::obsidian::kNoteOpenResultMessage;
+using leanlauncher::obsidian::kKnownVaultsReadyMessage;
 
 namespace {
 
