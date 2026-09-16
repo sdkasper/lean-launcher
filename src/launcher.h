@@ -1147,12 +1147,12 @@ private:
     enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, Obsidian, About };
 
     // Settings rows 0-3: keyboard shortcuts. 4-6: system. 7-8: search.
-    // 9-27: Obsidian (only row 9 is active when settings_.obsidianEnabled is
-    // false - see IsRowInCategory/ObsidianRowCount). Each of the four
+    // 9-33: Obsidian (only row 9 is active when settings_.obsidianEnabled is
+    // false - see IsRowInCategory/ObsidianRowCount). Each of the five
     // *Summary rows is always shown when Obsidian is enabled; its detail
     // rows only appear while obsidianExpandedSection_ names that section -
-    // see ObsidianVisibleRows(). 29 is the About tab's one row (not part of
-    // "All" - see IsRowInCategory). 30 is the Reset button, handled as a
+    // see ObsidianVisibleRows(). 34 is the About tab's one row (not part of
+    // "All" - see IsRowInCategory). 35 is the Reset button, handled as a
     // sentinel row rather than a real settings row.
     static constexpr int kRowObsidianEnabled = 9;
     static constexpr int kRowVaultPicker = 10;
@@ -1170,21 +1170,28 @@ private:
     static constexpr int kRowNoteAddPrefix = 22;
     static constexpr int kRowNoteAddPillLabel = 23;
     static constexpr int kRowNoteAddPreviewPrefix = 24;
-    static constexpr int kRowOverridesSummary = 25;
-    static constexpr int kRowDailyNoteFolderOverride = 26;
-    static constexpr int kRowDailyNoteFormatOverride = 27;
-    static constexpr int kRowAboutGithubLink = 29;
-    static constexpr int kSettingsMaxRow = 29;
-    static constexpr int kRowResetToDefaults = 30;
+    static constexpr int kRowLogSummary = 25;
+    static constexpr int kRowLogEnabled = 26;
+    static constexpr int kRowLogPrefix = 27;
+    static constexpr int kRowLogPillLabel = 28;
+    static constexpr int kRowLogPreviewPrefix = 29;
+    static constexpr int kRowLogHeading = 30;
+    static constexpr int kRowOverridesSummary = 31;
+    static constexpr int kRowDailyNoteFolderOverride = 32;
+    static constexpr int kRowDailyNoteFormatOverride = 33;
+    static constexpr int kRowAboutGithubLink = 34;
+    static constexpr int kSettingsMaxRow = 34;
+    static constexpr int kRowResetToDefaults = 35;
 
-    // Which of the four Obsidian action blocks is currently expanded, or
+    // Which of the five Obsidian action blocks is currently expanded, or
     // -1 if all are collapsed. A single int gives accordion behavior for
     // free: setting it to a new section implicitly collapses whichever one
     // was open before.
     static constexpr int kSectionVaultSearch = 0;
     static constexpr int kSectionTask = 1;
     static constexpr int kSectionNoteAdd = 2;
-    static constexpr int kSectionOverrides = 3;
+    static constexpr int kSectionLog = 3;
+    static constexpr int kSectionOverrides = 4;
 
     // The ordered list of Obsidian row IDs currently on screen. Every other
     // Obsidian-category geometry/hit-testing function derives its answer
@@ -1220,6 +1227,15 @@ private:
             rows.push_back(kRowNoteAddPrefix);
             rows.push_back(kRowNoteAddPillLabel);
             rows.push_back(kRowNoteAddPreviewPrefix);
+        }
+
+        rows.push_back(kRowLogSummary);
+        if (obsidianExpandedSection_ == kSectionLog) {
+            rows.push_back(kRowLogEnabled);
+            rows.push_back(kRowLogPrefix);
+            rows.push_back(kRowLogPillLabel);
+            rows.push_back(kRowLogPreviewPrefix);
+            rows.push_back(kRowLogHeading);
         }
 
         rows.push_back(kRowOverridesSummary);
@@ -1810,6 +1826,10 @@ private:
         case kRowNoteAddPrefix: return &settings_.noteAddPrefix;
         case kRowNoteAddPillLabel: return &settings_.noteAddPillLabel;
         case kRowNoteAddPreviewPrefix: return &settings_.noteAddPreviewPrefix;
+        case kRowLogPrefix: return &settings_.logPrefix;
+        case kRowLogPillLabel: return &settings_.logPillLabel;
+        case kRowLogPreviewPrefix: return &settings_.logPreviewPrefix;
+        case kRowLogHeading: return &settings_.logHeading;
         case kRowDailyNoteFolderOverride: return &settings_.dailyNoteFolderOverride;
         case kRowDailyNoteFormatOverride: return &settings_.dailyNoteFormatOverride;
         default: return nullptr;
@@ -1817,7 +1837,8 @@ private:
     }
 
     bool IsPrefixRow(int row) const {
-        return row == kRowVaultSearchPrefix || row == kRowTaskPrefix || row == kRowNoteAddPrefix;
+        return row == kRowVaultSearchPrefix || row == kRowTaskPrefix || row == kRowNoteAddPrefix ||
+            row == kRowLogPrefix;
     }
 
     void BeginEditingRow(int row, const std::wstring& currentValue) {
@@ -1841,11 +1862,13 @@ private:
             std::wstring vaultSearchCandidate = settings_.vaultSearchPrefix;
             std::wstring taskCandidate = settings_.taskPrefix;
             std::wstring noteAddCandidate = settings_.noteAddPrefix;
+            std::wstring logCandidate = settings_.logPrefix;
             if (editingRow_ == kRowVaultSearchPrefix) vaultSearchCandidate = settingsEdit_.text;
             else if (editingRow_ == kRowTaskPrefix) taskCandidate = settingsEdit_.text;
             else if (editingRow_ == kRowNoteAddPrefix) noteAddCandidate = settingsEdit_.text;
+            else if (editingRow_ == kRowLogPrefix) logCandidate = settingsEdit_.text;
             if (const wchar_t* error = leanlauncher::obsidian::FindPrefixConflict(
-                    vaultSearchCandidate, taskCandidate, noteAddCandidate)) {
+                    vaultSearchCandidate, taskCandidate, noteAddCandidate, logCandidate)) {
                 settingsStatus_ = error;
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return;  // stay in edit mode so the user can fix it
@@ -1906,6 +1929,7 @@ private:
         if (row == kRowVaultSearchSummary) { ToggleObsidianSection(kSectionVaultSearch); return; }
         if (row == kRowTaskSummary) { ToggleObsidianSection(kSectionTask); return; }
         if (row == kRowNoteAddSummary) { ToggleObsidianSection(kSectionNoteAdd); return; }
+        if (row == kRowLogSummary) { ToggleObsidianSection(kSectionLog); return; }
         if (row == kRowOverridesSummary) { ToggleObsidianSection(kSectionOverrides); return; }
         if (row == kRowVaultSearchEnabled) {
             settings_.vaultSearchEnabled = !settings_.vaultSearchEnabled;
@@ -1921,6 +1945,12 @@ private:
         }
         if (row == kRowNoteAddEnabled) {
             settings_.noteAddEnabled = !settings_.noteAddEnabled;
+            SaveSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowLogEnabled) {
+            settings_.logEnabled = !settings_.logEnabled;
             SaveSettings();
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
@@ -4192,6 +4222,32 @@ private:
             DrawSettingsRow(row, top, L"Add to note preview",
                 L"Text shown before what you typed, e.g. \"Add to today's note: back from the gym\"",
                 settings_.noteAddPreviewPrefix, false, false, false, true);
+            return;
+        case kRowLogSummary:
+            DrawObsidianSectionSummary(row, top, kSectionLog, L"Log",
+                settings_.logEnabled, settings_.logPrefix, settings_.logPillLabel);
+            return;
+        case kRowLogEnabled:
+            DrawSettingsRow(row, top, L"Log enabled",
+                L"Insert a timestamped line after a heading in today's daily note",
+                {}, true, settings_.logEnabled);
+            return;
+        case kRowLogPrefix:
+            DrawSettingsRow(row, top, L"Log prefix", L"Type this followed by a space, then the log text",
+                settings_.logPrefix, false, false, false, true);
+            return;
+        case kRowLogPillLabel:
+            DrawSettingsRow(row, top, L"Log label", L"Result-row tag shown next to a pending log entry",
+                settings_.logPillLabel, false, false, false, true);
+            return;
+        case kRowLogPreviewPrefix:
+            DrawSettingsRow(row, top, L"Log preview",
+                L"Text shown before what you typed, e.g. \"Log: back from a walk\"",
+                settings_.logPreviewPrefix, false, false, false, true);
+            return;
+        case kRowLogHeading:
+            DrawSettingsRow(row, top, L"Log heading", L"Exact heading line to insert after, e.g. \"## Log\"",
+                settings_.logHeading, false, false, false, true);
             return;
         case kRowOverridesSummary: {
             const bool hasOverride = !settings_.dailyNoteFolderOverride.empty() ||
