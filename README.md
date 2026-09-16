@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshot2.png" alt="Lean Launcher" width="750" />
+  <img src="docs/screenshot.png" alt="Lean Launcher" width="750" />
 </p>
 
 <p align="center">
