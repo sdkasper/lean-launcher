@@ -589,6 +589,7 @@ private:
                 settings_.vaultSearchEnabled = ReadDword(key, L"VaultSearchEnabled", 1) != 0;
                 settings_.taskAddEnabled = ReadDword(key, L"TaskAddEnabled", 1) != 0;
                 settings_.noteAddEnabled = ReadDword(key, L"NoteAddEnabled", 1) != 0;
+                settings_.logEnabled = ReadDword(key, L"LogEnabled", 1) != 0;
                 const DWORD low = ReadDword(key, L"LastUpdateCheckLow", 0);
                 const DWORD high = ReadDword(key, L"LastUpdateCheckHigh", 0);
                 lastUpdateCheck_ = (static_cast<uint64_t>(high) << 32) | low;
@@ -635,6 +636,10 @@ private:
                 readStringSetting(L"NoteAddPrefix", settings_.noteAddPrefix);
                 readStringSetting(L"NoteAddPillLabel", settings_.noteAddPillLabel);
                 readStringSetting(L"NoteAddPreviewPrefix", settings_.noteAddPreviewPrefix);
+                readStringSetting(L"LogPrefix", settings_.logPrefix);
+                readStringSetting(L"LogPillLabel", settings_.logPillLabel);
+                readStringSetting(L"LogPreviewPrefix", settings_.logPreviewPrefix);
+                readStringSetting(L"LogHeading", settings_.logHeading);
                 readStringSetting(L"DailyNoteFolderOverride", settings_.dailyNoteFolderOverride);
                 readStringSetting(L"DailyNoteFormatOverride", settings_.dailyNoteFormatOverride);
 
@@ -740,6 +745,7 @@ private:
                 {L"VaultSearchEnabled", settings_.vaultSearchEnabled ? 1u : 0u},
                 {L"TaskAddEnabled", settings_.taskAddEnabled ? 1u : 0u},
                 {L"NoteAddEnabled", settings_.noteAddEnabled ? 1u : 0u},
+                {L"LogEnabled", settings_.logEnabled ? 1u : 0u},
             };
             bool saved = true;
             for (const auto& entry : entries) {
@@ -761,6 +767,10 @@ private:
             writeStringSetting(L"NoteAddPrefix", settings_.noteAddPrefix);
             writeStringSetting(L"NoteAddPillLabel", settings_.noteAddPillLabel);
             writeStringSetting(L"NoteAddPreviewPrefix", settings_.noteAddPreviewPrefix);
+            writeStringSetting(L"LogPrefix", settings_.logPrefix);
+            writeStringSetting(L"LogPillLabel", settings_.logPillLabel);
+            writeStringSetting(L"LogPreviewPrefix", settings_.logPreviewPrefix);
+            writeStringSetting(L"LogHeading", settings_.logHeading);
             writeStringSetting(L"DailyNoteFolderOverride", settings_.dailyNoteFolderOverride);
             writeStringSetting(L"DailyNoteFormatOverride", settings_.dailyNoteFormatOverride);
             RegCloseKey(key);
