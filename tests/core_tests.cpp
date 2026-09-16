@@ -1432,6 +1432,169 @@ int main() {
         RemoveDirectoryW(vaultRoot.c_str());
     }
 
+    // --- Log capture: heading-section lookup ---
+    {
+        Check(FindHeadingSectionEnd(L"# Title\nSome text\n", L"## Log") == std::wstring::npos,
+            "FindHeadingSectionEnd returns npos when the heading isn't present");
+
+        const std::wstring toEof = L"## Log\n- 10:00: a\n";
+        Check(FindHeadingSectionEnd(toEof, L"## Log") == toEof.size(),
+            "FindHeadingSectionEnd returns end-of-content when the heading's section runs to EOF");
+
+        const std::wstring sameLevel = L"## Log\n- 10:00: a\n## Other\nmore\n";
+        Check(FindHeadingSectionEnd(sameLevel, L"## Log") == sameLevel.find(L"## Other"),
+            "FindHeadingSectionEnd stops at the next heading of the same level");
+
+        const std::wstring shallower = L"## Log\n- 10:00: a\n# Bigger\n";
+        Check(FindHeadingSectionEnd(shallower, L"## Log") == shallower.find(L"# Bigger"),
+            "FindHeadingSectionEnd stops at a shallower-level heading too");
+
+        const std::wstring withSubsection = L"## Log\n### Sub\ntext\n## Other\n";
+        Check(FindHeadingSectionEnd(withSubsection, L"## Log") == withSubsection.find(L"## Other"),
+            "FindHeadingSectionEnd treats a deeper sub-heading as still inside the section");
+
+        Check(FindHeadingSectionEnd(L"## Log", L"## Log") == 6,
+            "FindHeadingSectionEnd handles a heading with no trailing newline as running to EOF");
+
+        Check(HeadingLevel(L"## Log") == 2, "HeadingLevel counts leading '#' characters");
+        Check(HeadingLevel(L"#tag not a heading") == 0,
+            "HeadingLevel rejects a '#' run with no following space (not an ATX heading)");
+        Check(HeadingLevel(L"plain text") == 0, "HeadingLevel returns 0 for a non-heading line");
+    }
+
+    {
+        const std::wstring line = BuildLogLine(L"buy milk");
+        Check(line.size() >= 11 && line.substr(0, 2) == L"- " && line[4] == L':' && line.substr(7, 2) == L": " &&
+              line.back() == L'\n',
+            "BuildLogLine formats as '- HH:MM: <text>\\n'");
+        Check(line.find(L"buy milk") != std::wstring::npos, "BuildLogLine includes the entry text");
+        Check(BuildLogLine(L"line1\r\nline2").find(L"line1line2") != std::wstring::npos,
+            "BuildLogLine strips embedded CR/LF so one entry never becomes two lines");
+    }
+
+    // --- Log capture: AppendLogEntry integration ---
+    {
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring notePath = std::wstring(tempDir) + L"LeanLauncherTest_LogNewFile.md";
+        DeleteFileW(notePath.c_str());
+
+        Check(AppendLogEntry(notePath, L"first entry", L"## Log"),
+            "AppendLogEntry creates a new file and returns true");
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        const std::string content = ss.str();
+        check.close();
+        Check(content.find("---\ncreated:") != std::string::npos,
+            "AppendLogEntry writes minimal frontmatter for a new file");
+        Check(content.find(": first entry\n") != std::string::npos,
+            "AppendLogEntry writes the log line for a new file");
+        DeleteFileW(notePath.c_str());
+    }
+
+    {
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring notePath = std::wstring(tempDir) + L"LeanLauncherTest_LogWithHeading.md";
+        DeleteFileW(notePath.c_str());
+        {
+            std::ofstream seed(notePath, std::ios::binary);
+            seed << "# Daily\n\n## Log\n- 09:00: woke up\n\n## Other section\nunrelated\n";
+        }
+
+        Check(AppendLogEntry(notePath, L"back from a walk", L"## Log"),
+            "AppendLogEntry writes to an existing file and returns true");
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        const std::string content = ss.str();
+        check.close();
+
+        const size_t logPos = content.find("- 09:00: woke up");
+        const size_t newPos = content.find(": back from a walk");
+        const size_t otherPos = content.find("## Other section");
+        Check(logPos != std::string::npos && newPos != std::string::npos && otherPos != std::string::npos &&
+              logPos < newPos && newPos < otherPos,
+            "AppendLogEntry inserts the new line after the existing log entry but before the next heading");
+        Check(content.find("unrelated") != std::string::npos,
+            "AppendLogEntry leaves content after the section untouched");
+        DeleteFileW(notePath.c_str());
+    }
+
+    {
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring notePath = std::wstring(tempDir) + L"LeanLauncherTest_LogNoHeading.md";
+        DeleteFileW(notePath.c_str());
+        {
+            std::ofstream seed(notePath, std::ios::binary);
+            seed << "# Daily\nsome notes\n";
+        }
+
+        Check(AppendLogEntry(notePath, L"no heading here", L"## Log"),
+            "AppendLogEntry succeeds even when the configured heading is missing");
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        const std::string content = ss.str();
+        check.close();
+        Check(content.find("some notes\n- ") != std::string::npos &&
+              content.find(": no heading here\n") != std::string::npos,
+            "AppendLogEntry falls back to end-of-file when the heading isn't found");
+        DeleteFileW(notePath.c_str());
+    }
+
+    {
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring notePath = std::wstring(tempDir) + L"LeanLauncherTest_LogNoTrailingNewline.md";
+        DeleteFileW(notePath.c_str());
+        {
+            std::ofstream seed(notePath, std::ios::binary);
+            seed << "## Log\n- 09:00: woke up";  // no trailing newline
+        }
+
+        Check(AppendLogEntry(notePath, L"buy milk", L"## Log"),
+            "AppendLogEntry on a no-trailing-newline file returns true");
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        const std::string content = ss.str();
+        check.close();
+        Check(content.find("- 09:00: woke up\n- ") != std::string::npos,
+            "AppendLogEntry inserts a newline so the previous line and the new entry are both intact");
+        Check(content.find("woke up- ") == std::string::npos,
+            "AppendLogEntry never merges the new entry into the previous line");
+        DeleteFileW(notePath.c_str());
+    }
+
+    {
+        wchar_t tempDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDir);
+        const std::wstring notePath = std::wstring(tempDir) + L"LeanLauncherTest_LogUtf8Roundtrip.md";
+        DeleteFileW(notePath.c_str());
+        {
+            // UTF-8 bytes for "café 🌱" seeded directly so this test doesn't
+            // depend on the compiler's source-file encoding of a literal.
+            std::ofstream seed(notePath, std::ios::binary);
+            seed << "## Log\n- 09:00: caf\xC3\xA9 \xF0\x9F\x8C\xB1\n";
+        }
+
+        Check(AppendLogEntry(notePath, L"second entry", L"## Log"),
+            "AppendLogEntry succeeds against a file containing multi-byte UTF-8 content");
+        std::ifstream check(notePath, std::ios::binary);
+        std::ostringstream ss;
+        ss << check.rdbuf();
+        const std::string content = ss.str();
+        check.close();
+        Check(content.find("caf\xC3\xA9 \xF0\x9F\x8C\xB1") != std::string::npos,
+            "AppendLogEntry preserves existing multi-byte UTF-8 content byte-for-byte");
+        Check(content.find(": second entry\n") != std::string::npos,
+            "AppendLogEntry appends the new entry after the UTF-8 content");
+        DeleteFileW(notePath.c_str());
+    }
+
     // --- NoteIndex Tests (Task 3) ---
     {
         using namespace leanlauncher::obsidian;

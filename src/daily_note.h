@@ -122,11 +122,78 @@ inline std::wstring BuildPlainLine(std::wstring_view text) {
     return StripLineBreaks(text) + L"\n";
 }
 
+// Forward declaration: FormatTimeHHMM is defined below (after
+// FormatIsoTimestamp, per the log-capture task brief's placement), but
+// BuildLogLine - placed here after BuildPlainLine, also per the brief - needs
+// to call it first in file order.
+inline std::wstring FormatTimeHHMM();
+
+// Builds a timestamped log line: "- HH:MM: <text>\n".
+inline std::wstring BuildLogLine(std::wstring_view text) {
+    return L"- " + FormatTimeHHMM() + L": " + StripLineBreaks(text) + L"\n";
+}
+
+// Returns the ATX heading level (count of leading '#' characters) of `line`,
+// or 0 if `line` isn't a heading. A run of '#' only counts as a heading if
+// it's followed by a space or the end of the line - "#tag" at the start of
+// a line is not a heading.
+inline int HeadingLevel(const std::wstring& line) {
+    size_t i = 0;
+    while (i < line.size() && line[i] == L'#') ++i;
+    if (i == 0) return 0;
+    if (i < line.size() && line[i] != L' ') return 0;
+    return static_cast<int>(i);
+}
+
+// Finds where a new line should be inserted to land at the end of the
+// section introduced by `heading` (an exact, case-sensitive line match,
+// e.g. "## Log"). The section ends at the first later line that is itself
+// a heading of level <= the target's level - a deeper sub-heading (e.g.
+// "### Sub" under "## Log") stays inside the section. Returns
+// content.size() if the heading's section runs to the end of the file, or
+// std::wstring::npos if `heading` doesn't appear in `content` at all.
+inline size_t FindHeadingSectionEnd(const std::wstring& content, const std::wstring& heading) {
+    bool found = false;
+    int targetLevel = 0;
+    size_t lineStart = 0;
+    while (lineStart <= content.size()) {
+        const size_t lineEnd = content.find(L'\n', lineStart);
+        const bool atEnd = (lineEnd == std::wstring::npos);
+        const size_t rawEnd = atEnd ? content.size() : lineEnd;
+        size_t trimEnd = rawEnd;
+        if (trimEnd > lineStart && content[trimEnd - 1] == L'\r') --trimEnd;
+        const std::wstring lineText = content.substr(lineStart, trimEnd - lineStart);
+
+        if (!found) {
+            if (lineText == heading) {
+                found = true;
+                targetLevel = HeadingLevel(lineText);
+            }
+        } else {
+            const int level = HeadingLevel(lineText);
+            if (level > 0 && level <= targetLevel) return lineStart;
+        }
+        if (atEnd) break;
+        lineStart = lineEnd + 1;
+    }
+    return found ? content.size() : std::wstring::npos;
+}
+
 inline std::wstring FormatIsoTimestamp() {
     SYSTEMTIME st;
     GetLocalTime(&st);
     wchar_t buf[32];
     swprintf_s(buf, L"%04d-%02d-%02dT%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+    return buf;
+}
+
+// HH:MM local time, matching the vault's existing QuickAdd "{{time}}" token
+// format for the "Log Entry" capture choice this action replicates.
+inline std::wstring FormatTimeHHMM() {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wchar_t buf[8];
+    swprintf_s(buf, L"%02d:%02d", st.wHour, st.wMinute);
     return buf;
 }
 
@@ -196,6 +263,46 @@ inline bool AppendTask(const std::wstring& notePath, std::wstring_view taskText)
 // Appends one plain text line (the "a " prefix) to the note at notePath.
 inline bool AppendNoteText(const std::wstring& notePath, std::wstring_view text) {
     return AppendLine(notePath, BuildPlainLine(text));
+}
+
+// Inserts one timestamped log line at the end of `heading`'s section in the
+// note at notePath - see FindHeadingSectionEnd for exactly where that is.
+// Creates the file (with the same minimal frontmatter as AppendLine) if it
+// doesn't exist yet; falls back to end-of-file if `heading` isn't found in
+// an existing file. Unlike AppendLine, this must read and rewrite the whole
+// file - the insertion point usually isn't at the end - so it opens the
+// file for a full overwrite rather than FILE_APPEND_DATA.
+inline bool AppendLogEntry(const std::wstring& notePath, std::wstring_view text, const std::wstring& heading) {
+    std::error_code ec;
+    const fs::path path(notePath);
+    fs::create_directories(path.parent_path(), ec);
+
+    const std::wstring line = BuildLogLine(text);
+    std::wstring newContent;
+
+    if (!fs::exists(path, ec)) {
+        newContent = L"---\ncreated: " + FormatIsoTimestamp() + L"\n---\n\n" + line;
+    } else {
+        const std::wstring content = Utf8ToWide(ReadFileUtf8(path));
+        const size_t boundary = FindHeadingSectionEnd(content, heading);
+        const size_t insertAt = (boundary == std::wstring::npos) ? content.size() : boundary;
+        const bool needsLeadingNewline = insertAt > 0 && content[insertAt - 1] != L'\n';
+
+        newContent = content.substr(0, insertAt);
+        if (needsLeadingNewline) newContent += L'\n';
+        newContent += line;
+        newContent += content.substr(insertAt);
+    }
+
+    const std::string utf8 = WideToUtf8(newContent);
+    HANDLE file = CreateFileW(notePath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    const bool ok = WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr) &&
+        written == static_cast<DWORD>(utf8.size());
+    CloseHandle(file);
+    return ok;
 }
 
 }  // namespace obsidian
