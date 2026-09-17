@@ -222,8 +222,10 @@ void ScanAppsFolder(std::vector<AppEntry>& apps) {
             wchar_t displayName[MAX_PATH]{};
             if (SUCCEEDED(appsFolder->GetDisplayNameOf(
                     child.get(), SHGDN_NORMAL, &displayNameResult))) {
+                // StrRetToBufW already frees displayNameResult.pOleStr (for
+                // STRRET_WSTR) itself once it copies the string out - no
+                // additional free call needed (that would double-free).
                 StrRetToBufW(&displayNameResult, child.get(), displayName, MAX_PATH);
-                takeoff::FreeStrRet(displayNameResult);
 
                 if (displayName[0] == L'@' || wcsstr(displayName, L"ms-resource:") == displayName) {
                     wchar_t resolved[MAX_PATH]{};

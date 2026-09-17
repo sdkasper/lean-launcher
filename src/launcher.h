@@ -582,7 +582,12 @@ private:
                         static_cast<int>(ReadDword(key, L"QuickLaunchHotkey", 0)));
                 }
                 settings_.showTrayIcon = ReadDword(key, L"ShowTrayIcon", 1) != 0;
-                settings_.checkForUpdates = ReadDword(key, L"CheckForUpdates", 1) != 0;
+                // Fallback must match settings_.checkForUpdates's coded default (false,
+                // per NFR-003: no release pipeline yet, opt-in only). A fallback of 1
+                // here would silently re-enable background update checks the moment
+                // the HKCU\Software\LeanLauncher key exists for any other reason, even
+                // if CheckForUpdates itself was never written.
+                settings_.checkForUpdates = ReadDword(key, L"CheckForUpdates", 0) != 0;
                 settings_.enableFileSearch = ReadDword(key, L"FileSearchEnabled", 1) != 0;
                 settings_.enableWebSearch = ReadDword(key, L"WebSearchEnabled", 1) != 0;
                 settings_.runAtStartup = ReadDword(key, L"RunAtStartup", 1) != 0;
@@ -594,20 +599,13 @@ private:
                 const DWORD high = ReadDword(key, L"LastUpdateCheckHigh", 0);
                 lastUpdateCheck_ = (static_cast<uint64_t>(high) << 32) | low;
 
+                // Update endpoints are compile-time constants only (kDefaultReleasesUrl /
+                // kDefaultApiHost / kDefaultApiPath) - no registry override. This used to
+                // read UpdateReleasesUrl/UpdateApiHost/UpdateApiPath from HKCU with no
+                // validation and no Settings UI to set them, letting any unprivileged local
+                // process redirect the updater to an attacker-controlled host.
                 wchar_t buf[512]{};
                 DWORD bufSize = sizeof(buf);
-                if (RegGetValueW(key, nullptr, L"UpdateReleasesUrl", RRF_RT_REG_SZ, nullptr, buf, &bufSize) == ERROR_SUCCESS && buf[0]) {
-                    releasesUrl_ = buf;
-                }
-                bufSize = sizeof(buf);
-                if (RegGetValueW(key, nullptr, L"UpdateApiHost", RRF_RT_REG_SZ, nullptr, buf, &bufSize) == ERROR_SUCCESS && buf[0]) {
-                    apiHost_ = buf;
-                }
-                bufSize = sizeof(buf);
-                if (RegGetValueW(key, nullptr, L"UpdateApiPath", RRF_RT_REG_SZ, nullptr, buf, &bufSize) == ERROR_SUCCESS && buf[0]) {
-                    apiPath_ = buf;
-                }
-                bufSize = sizeof(buf);
                 if (RegGetValueW(key, nullptr, L"VaultPath", RRF_RT_REG_SZ, nullptr, buf, &bufSize) == ERROR_SUCCESS && buf[0]) {
                     obsidianVaultPath_ = buf;
                 }

@@ -76,18 +76,38 @@ inline bool IsDateFormatFullySupported(const std::wstring& format) {
     return true;
 }
 
+// Rejects vault-relative config strings that could steer a write outside the
+// vault: absolute paths (fs::path::is_absolute() also catches UNC paths like
+// "\\attacker.example.com\share", which would trigger an outbound SMB auth
+// handshake) and ".." traversal segments. `folder`/`format` come straight out
+// of the vault's own .obsidian/daily-notes.json (or Periodic Notes/Journals
+// plugin config) with no validation upstream - a synced/shared vault could
+// have a tampered config, so this codebase must not trust it.
+inline bool IsUnsafeVaultRelativePath(const std::wstring& value) {
+    if (value.empty()) return false;
+    const fs::path p(value);
+    if (p.is_absolute()) return true;
+    for (const auto& part : p) {
+        if (part == L"..") return true;
+    }
+    return false;
+}
+
 inline std::wstring ResolveTodayPath(const DailyNoteConfig& config, const std::wstring& vaultPath,
     int year, int month, int day) {
     fs::path base(vaultPath);
-    if (!config.folder.empty()) {
+    if (!config.folder.empty() && !IsUnsafeVaultRelativePath(config.folder)) {
         base /= config.folder;
     }
     // Fall back to the safe default format whenever the configured format
     // contains anything FormatDateTokens can't fully account for (e.g. a
-    // Moment.js token like MMMM), rather than silently producing a garbled
-    // filename. Expanding token support is out of scope here.
+    // Moment.js token like MMMM), or is itself unsafe (e.g. "../../secret"),
+    // rather than silently producing a garbled or traversal-y filename.
+    // Expanding token support is out of scope here.
+    const bool formatIsSafe = !IsUnsafeVaultRelativePath(config.format);
     const std::wstring& formatToUse =
-        IsDateFormatFullySupported(config.format) ? config.format : std::wstring(L"YYYY-MM-DD");
+        (formatIsSafe && IsDateFormatFullySupported(config.format)) ? config.format
+                                                                     : std::wstring(L"YYYY-MM-DD");
     const std::wstring filename = FormatDateTokens(formatToUse, year, month, day) + L".md";
     return (base / filename).wstring();
 }
@@ -346,14 +366,31 @@ inline bool AppendLogEntry(const std::wstring& notePath, std::wstring_view text,
     }
 
     const std::string utf8 = WideToUtf8(newContent);
-    HANDLE file = CreateFileW(notePath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+
+    // Write to a temp file alongside notePath first, then atomically replace
+    // it - this function rewrites the whole file (unlike AppendLine's pure
+    // FILE_APPEND_DATA), so a CREATE_ALWAYS write straight to notePath that
+    // fails or is cut short partway through (full disk, a sync client
+    // holding a lock, etc) would truncate the user's note to just the new
+    // content, or to zero bytes, while reporting a generic error.
+    const fs::path tempPath = path.parent_path() / (path.filename().wstring() + L".tmp");
+    HANDLE tempFile = CreateFileW(tempPath.c_str(), GENERIC_WRITE, 0, nullptr,
         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
+    if (tempFile == INVALID_HANDLE_VALUE) return false;
     DWORD written = 0;
-    const bool ok = WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr) &&
+    const bool writeOk = WriteFile(tempFile, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr) &&
         written == static_cast<DWORD>(utf8.size());
-    CloseHandle(file);
-    return ok;
+    FlushFileBuffers(tempFile);
+    CloseHandle(tempFile);
+    if (!writeOk) {
+        DeleteFileW(tempPath.c_str());
+        return false;
+    }
+    if (!MoveFileExW(tempPath.c_str(), notePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(tempPath.c_str());
+        return false;
+    }
+    return true;
 }
 
 }  // namespace obsidian

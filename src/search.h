@@ -396,14 +396,6 @@ struct PidlDeleter {
 };
 using UniquePidl = std::unique_ptr<ITEMIDLIST UNALIGNED, PidlDeleter>;
 
-// Safely releases STRRET internal allocations without leaking pOleStr
-inline void FreeStrRet(STRRET& str) noexcept {
-    if (str.uType == STRRET_WSTR && str.pOleStr) {
-        CoTaskMemFree(str.pOleStr);
-        str.pOleStr = nullptr;
-    }
-}
-
 // Canonicalize shell:AppsFolder path
 inline std::wstring FormatAppsFolderPath(std::wstring_view parsingName) {
     if (parsingName.empty()) return {};
@@ -441,10 +433,12 @@ inline bool ResolveShellItemParsingName(
     STRRET parseResult{};
     if (SUCCEEDED(appsFolder->GetDisplayNameOf(child, SHGDN_FORPARSING, &parseResult))) {
         wchar_t parseBuf[MAX_PATH * 2]{};
+        // StrRetToBufW already frees parseResult.pOleStr (for STRRET_WSTR)
+        // itself once it copies the string out - calling any additional
+        // free on it afterward is a double-free / heap corruption.
         if (SUCCEEDED(StrRetToBufW(&parseResult, child, parseBuf, static_cast<UINT>(std::size(parseBuf))))) {
             outParsingName = parseBuf;
         }
-        FreeStrRet(parseResult);
         return !outParsingName.empty();
     }
 
@@ -475,10 +469,11 @@ inline std::wstring ResolveShellItemParsingName(
     if (SUCCEEDED(appsFolder->GetDisplayNameOf(child, SHGDN_FORPARSING, &parseResult))) {
         wchar_t parseBuf[MAX_PATH * 2]{};
         std::wstring result;
+        // See the other GetDisplayNameOf/StrRetToBufW call site above - no
+        // extra free needed here either, for the same reason.
         if (SUCCEEDED(StrRetToBufW(&parseResult, child, parseBuf, static_cast<UINT>(std::size(parseBuf))))) {
             result = parseBuf;
         }
-        FreeStrRet(parseResult);
         return result;
     }
 

@@ -225,16 +225,23 @@ public:
 
         fs::directory_iterator dit(dirPath, fs::directory_options::skip_permission_denied, ec);
         if (!ec) {
-            for (const auto& entry : dit) {
-                if (entry.is_regular_file(ec)) {
-                    std::wstring ext = entry.path().extension().wstring();
-                    std::transform(ext.begin(), ext.end(), ext.begin(),
-                        [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
-                    if (ext == L".sln" || ext == L".vcxproj") {
-                        return true;
+            // Range-for's implicit operator++ on directory_iterator throws
+            // fs::filesystem_error on a mid-iteration error (e.g. a
+            // removable drive unplugged during the scan) - guard it the
+            // same way ScanPath does, so that isn't an uncaught exception
+            // and std::terminate().
+            try {
+                for (const auto& entry : dit) {
+                    if (entry.is_regular_file(ec)) {
+                        std::wstring ext = entry.path().extension().wstring();
+                        std::transform(ext.begin(), ext.end(), ext.begin(),
+                            [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+                        if (ext == L".sln" || ext == L".vcxproj") {
+                            return true;
+                        }
                     }
                 }
-            }
+            } catch (...) {}
         }
         return false;
     }
@@ -584,26 +591,28 @@ private:
             std::vector<FileItem> step2Items;
             step2Items.reserve(8192);
             fs::directory_iterator dit(profilePath, fs::directory_options::skip_permission_denied, ec);
-            for (const auto& entry : dit) {
-                if (!running_.load() || totalIndexed + step2Items.size() >= kMaxFiles) break;
-                if (entry.is_directory(ec)) {
-                    std::wstring name = entry.path().filename().wstring();
-                    if (!ShouldSkipDirectory(entry.path()) &&
-                        _wcsicmp(name.c_str(), L"Desktop") != 0 &&
-                        _wcsicmp(name.c_str(), L"Documents") != 0 &&
-                        _wcsicmp(name.c_str(), L"Downloads") != 0 &&
-                        _wcsicmp(name.c_str(), L"Pictures") != 0 &&
-                        _wcsicmp(name.c_str(), L"Music") != 0 &&
-                        _wcsicmp(name.c_str(), L"Videos") != 0) {
-                        AddItem(entry.path(), true, step2Items, seen);
-                        ScanPath(entry.path(), step2Items, seen, 8, kMaxFiles, totalIndexed);
-                    }
-                } else if (entry.is_regular_file(ec)) {
-                    if (IsUserRelevantFile(entry.path())) {
-                        AddItem(entry.path(), false, step2Items, seen);
+            try {
+                for (const auto& entry : dit) {
+                    if (!running_.load() || totalIndexed + step2Items.size() >= kMaxFiles) break;
+                    if (entry.is_directory(ec)) {
+                        std::wstring name = entry.path().filename().wstring();
+                        if (!ShouldSkipDirectory(entry.path()) &&
+                            _wcsicmp(name.c_str(), L"Desktop") != 0 &&
+                            _wcsicmp(name.c_str(), L"Documents") != 0 &&
+                            _wcsicmp(name.c_str(), L"Downloads") != 0 &&
+                            _wcsicmp(name.c_str(), L"Pictures") != 0 &&
+                            _wcsicmp(name.c_str(), L"Music") != 0 &&
+                            _wcsicmp(name.c_str(), L"Videos") != 0) {
+                            AddItem(entry.path(), true, step2Items, seen);
+                            ScanPath(entry.path(), step2Items, seen, 8, kMaxFiles, totalIndexed);
+                        }
+                    } else if (entry.is_regular_file(ec)) {
+                        if (IsUserRelevantFile(entry.path())) {
+                            AddItem(entry.path(), false, step2Items, seen);
+                        }
                     }
                 }
-            }
+            } catch (...) {}
             CoTaskMemFree(profilePath);
             totalIndexed += step2Items.size();
             publishOrAppend(std::move(step2Items));
@@ -622,24 +631,26 @@ private:
                     const wchar_t driveLetter = towupper(drive[0]);
                     const bool isDriveC = (driveLetter == L'C');
                     fs::directory_iterator dit(drive, fs::directory_options::skip_permission_denied, ec);
-                    for (const auto& entry : dit) {
-                        if (!running_.load() || totalIndexed + driveItems.size() >= kMaxFiles) break;
-                        if (entry.is_directory(ec)) {
-                            std::wstring dirName = entry.path().filename().wstring();
-                            if (isDriveC && _wcsicmp(dirName.c_str(), L"Users") == 0) {
-                                continue;
-                            }
-                            if (!ShouldSkipDirectory(entry.path())) {
-                                AddItem(entry.path(), true, driveItems, seen);
-                                const int maxDepth = isDriveC ? 4 : 8;
-                                ScanPath(entry.path(), driveItems, seen, maxDepth, kMaxFiles, totalIndexed);
-                            }
-                        } else if (entry.is_regular_file(ec)) {
-                            if (IsUserRelevantFile(entry.path())) {
-                                AddItem(entry.path(), false, driveItems, seen);
+                    try {
+                        for (const auto& entry : dit) {
+                            if (!running_.load() || totalIndexed + driveItems.size() >= kMaxFiles) break;
+                            if (entry.is_directory(ec)) {
+                                std::wstring dirName = entry.path().filename().wstring();
+                                if (isDriveC && _wcsicmp(dirName.c_str(), L"Users") == 0) {
+                                    continue;
+                                }
+                                if (!ShouldSkipDirectory(entry.path())) {
+                                    AddItem(entry.path(), true, driveItems, seen);
+                                    const int maxDepth = isDriveC ? 4 : 8;
+                                    ScanPath(entry.path(), driveItems, seen, maxDepth, kMaxFiles, totalIndexed);
+                                }
+                            } else if (entry.is_regular_file(ec)) {
+                                if (IsUserRelevantFile(entry.path())) {
+                                    AddItem(entry.path(), false, driveItems, seen);
+                                }
                             }
                         }
-                    }
+                    } catch (...) {}
                     totalIndexed += driveItems.size();
                     publishOrAppend(std::move(driveItems));
                 }
