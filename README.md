@@ -1,9 +1,14 @@
 <h1 align="center">Lean Launcher</h1>
 
-[![License](https://img.shields.io/badge/License-MIT-007BFF?style=flat-square&labelColor=000000)](https://github.com/sdkasper/lean-launcher/blob/master/LICENSE)
+[![Release](https://img.shields.io/github/release/sdkasper/lean-launcher?style=flat-square&labelColor=000000&color=25D0F7)](https://github.com/sdkasper/lean-launcher/releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=flat-square&labelColor=000000&logo=windows&logoColor=0078D6)](#build-from-source)
 [![Obsidian](https://img.shields.io/badge/Obsidian-optional-A991D4?style=flat-square&labelColor=000000&logo=obsidian&logoColor=A991D4)](#obsidian-integration)
 [![Issues](https://img.shields.io/github/issues/sdkasper/lean-launcher?logo=github&style=flat-square&labelColor=000000&color=FC3634)](https://github.com/sdkasper/lean-launcher/issues)
+[![Closed](https://img.shields.io/github/issues-closed/sdkasper/lean-launcher?logo=github&style=flat-square&labelColor=000000&color=18BC9C)](https://github.com/sdkasper/lean-launcher/issues?q=is%3Aissue+is%3Aclosed)
+[![Downloads](https://img.shields.io/github/downloads/sdkasper/lean-launcher/total?logo=github&style=flat-square&labelColor=000000&color=25D0F7)](https://github.com/sdkasper/lean-launcher/releases)
+[![Stars](https://img.shields.io/github/stars/sdkasper/lean-launcher?logo=github&style=flat-square&labelColor=000000&color=000000)](https://github.com/sdkasper/lean-launcher/stargazers)
+[![License](https://img.shields.io/badge/License-MIT-007BFF?style=flat-square&labelColor=000000)](https://github.com/sdkasper/lean-launcher/blob/master/LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=flat-square&labelColor=000000&logo=discord&logoColor=5865F2)](https://discord.gg/sbMg6PP2vq)
 
 > Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/takeoff-launcher)
 > by akiraeng, distributed under the same MIT license. See `LICENSE` for the full license text.
