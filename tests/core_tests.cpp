@@ -633,35 +633,28 @@ int main() {
     }
 
     // 4. Live FileIndex background indexing & sub-millisecond search benchmark
-    FileIndex::Instance().Start();
+    //
+    // Scoped to this repo's own root (not the whole machine) via the same
+    // FindVerifiedProjectRoot() the app itself uses to recognize a real
+    // project root, so this test is deterministic and independent of
+    // whatever else exists on the machine actually running it - a
+    // whole-disk scan capped at 50k files used to make "is the repo folder
+    // itself the #1 result" depend on unrelated real disk content.
+    std::error_code ec;
+    fs::path currentPath = fs::current_path(ec);
+    fs::path repoPath = FileIndex::FindVerifiedProjectRoot(currentPath);
+    if (repoPath.empty()) repoPath = currentPath;
+    const std::wstring repoPathStr = repoPath.wstring();
+    const std::wstring repoFolderName = repoPath.filename().wstring();
+
+    FileIndex::Instance().Start(nullptr, repoPathStr);
     for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
     const size_t indexedCount = FileIndex::Instance().Count();
-    std::cout << "[FileIndex] Live index populated " << indexedCount << " files/folders (ready=" << FileIndex::Instance().IsReady() << ").\n";
+    std::cout << "[FileIndex] Scoped index populated " << indexedCount << " files/folders under "
+              << repoPath.string() << " (ready=" << FileIndex::Instance().IsReady() << ").\n";
     Check(indexedCount > 0, "FileIndex populated files from disk");
-
-    // Determine the active workspace directory (project root)
-    std::error_code ec;
-    fs::path currentPath = fs::current_path(ec);
-    fs::path repoPath = currentPath;
-    while (repoPath.has_parent_path()) {
-        const auto name = repoPath.filename().wstring();
-        if (_wcsicmp(name.c_str(), L"build") == 0 ||
-            _wcsicmp(name.c_str(), L"cmake") == 0 ||
-            _wcsicmp(name.c_str(), L"msbuild") == 0 ||
-            _wcsicmp(name.c_str(), L"Release") == 0 ||
-            _wcsicmp(name.c_str(), L"Debug") == 0 ||
-            _wcsicmp(name.c_str(), L"bin") == 0 ||
-            _wcsicmp(name.c_str(), L"obj") == 0 ||
-            _wcsicmp(name.c_str(), L"x64") == 0) {
-            repoPath = repoPath.parent_path();
-        } else {
-            break;
-        }
-    }
-    const std::wstring repoPathStr = repoPath.wstring();
-    const std::wstring repoFolderName = repoPath.filename().wstring();
 
     // Verify broad file & folder search finds repo folder and its files
     auto takeoffLauncherResults = FileIndex::Instance().Search(repoFolderName, 10);

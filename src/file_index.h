@@ -64,9 +64,14 @@ public:
 
     ~FileIndex() { Stop(); }
 
-    void Start(HWND notifyHwnd = nullptr) {
+    // scanRootOverride is test-only: when non-empty, BuildIndex() scans just
+    // that one directory tree instead of the whole machine (known user
+    // folders, %USERPROFILE%, all fixed/removable drives). Production
+    // callers must leave it empty.
+    void Start(HWND notifyHwnd = nullptr, const std::wstring& scanRootOverride = L"") {
         if (running_.exchange(true)) return;
         notifyHwnd_ = notifyHwnd;
+        scanRootOverride_ = scanRootOverride;
         stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         worker_ = std::thread([this]() { WorkerLoop(); });
     }
@@ -268,7 +273,8 @@ public:
             std::wstring lower = name;
             std::transform(lower.begin(), lower.end(), lower.begin(),
                 [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
-            if (lower == L"build" || lower == L"release" || lower == L"debug" ||
+            if (lower == L"build" || lower == L"cmake" || lower == L"msbuild" ||
+                lower == L"release" || lower == L"debug" ||
                 lower == L"bin" || lower == L"obj" || lower == L"out" ||
                 lower == L"target" || lower == L"dist" || lower == L"x64" || lower == L"x86") {
                 curr = curr.parent_path();
@@ -526,6 +532,28 @@ private:
 
         size_t totalIndexed = 0;
 
+        if (!scanRootOverride_.empty()) {
+            // Test-only path: scan just the given directory tree, skipping
+            // the whole-machine scan below entirely - keeps the live index
+            // deterministic and independent of whatever else happens to be
+            // on the real disk running the test.
+            std::error_code overrideEc;
+            fs::path overrideRoot(scanRootOverride_);
+            if (fs::exists(overrideRoot, overrideEc)) {
+                std::vector<FileItem> overrideItems;
+                overrideItems.reserve(8192);
+                AddItem(overrideRoot, true, overrideItems, seen);
+                ScanPath(overrideRoot, overrideItems, seen, 8, kMaxFiles, totalIndexed);
+                totalIndexed += overrideItems.size();
+                publishOrAppend(std::move(overrideItems));
+            }
+            ready_ = true;
+            if (notifyHwnd_) {
+                PostMessageW(notifyHwnd_, kFilesReadyMessage, 0, 0);
+            }
+            return;
+        }
+
         // 0. Scan verified user project/repo root immediately (if any)
         std::error_code ec;
         fs::path currentDir = fs::current_path(ec);
@@ -717,6 +745,7 @@ private:
     std::thread worker_;
     HANDLE stopEvent_ = nullptr;
     HWND notifyHwnd_ = nullptr;
+    std::wstring scanRootOverride_;
 };
 
 } // namespace takeoff
