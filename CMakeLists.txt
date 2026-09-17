@@ -37,7 +37,13 @@ target_link_libraries(${target} PRIVATE
 
 set_target_properties(${target} PROPERTIES
     VS_GLOBAL_EnableCppCoreCheck false
+    INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE
 )
+# Match LeanLauncher.vcxproj's Release settings (WholeProgramOptimization +
+# EnableCOMDATFolding/OptimizeReferences) so the CMake and MSBuild build
+# paths produce the same size binary - CMake's own Release defaults don't
+# enable whole-program optimization or linker dead-code/COMDAT folding.
+target_link_options(${target} PRIVATE $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
 endfunction()
 
 add_launcher(LeanLauncher)
