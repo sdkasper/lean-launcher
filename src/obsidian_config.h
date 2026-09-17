@@ -351,8 +351,17 @@ inline DailyNoteConfig ReadDailyNoteConfig(const std::wstring& vaultPath) {
         if (!json.empty()) {
             const size_t dailyPos = json.find("\"daily\"");
             if (dailyPos != std::string::npos) {
-                DailyNoteConfig config = ParseDailyNoteConfigJson(std::string_view(json).substr(dailyPos));
-                if (config.found) return config;
+                // Bound the scan to the "daily" object's own braces via
+                // FindBalancedObject - substr(dailyPos) with no upper bound
+                // used to hand ExtractStringField the rest of the file,
+                // so a sibling "weekly"/"monthly" section's folder/format
+                // (if "daily" itself lacked one) could win instead.
+                size_t start = 0, end = 0;
+                if (FindBalancedObject(json, dailyPos, start, end)) {
+                    DailyNoteConfig config = ParseDailyNoteConfigJson(
+                        std::string_view(json).substr(start, end - start));
+                    if (config.found) return config;
+                }
             }
         }
     }

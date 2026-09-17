@@ -118,8 +118,16 @@ inline std::wstring ExtractAssetDownloadUrl(std::string_view json, std::wstring_
         std::wstring url(rawUrl.begin(), rawUrl.end());
         std::wstring urlLower = toLowerW(url);
 
-        // Match exact or contains preferred name (e.g. LeanLauncher.exe)
-        if (urlLower.find(targetLower) != std::wstring::npos) {
+        // Match the asset filename (final path segment) exactly against
+        // preferredName - a substring/"contains" match would let a checksum
+        // sidecar like "LeanLauncher.exe.sha256" (which contains
+        // "leanlauncher.exe") win over the real executable if it's
+        // enumerated first, permanently breaking auto-update.
+        const size_t lastSlash = urlLower.find_last_of(L'/');
+        const std::wstring_view assetName = (lastSlash == std::wstring::npos)
+            ? std::wstring_view(urlLower)
+            : std::wstring_view(urlLower).substr(lastSlash + 1);
+        if (assetName == targetLower) {
             return url;
         }
         // If it's an .exe file, save as secondary fallback
@@ -494,27 +502,38 @@ inline bool ApplyUpdateAndRestart(const std::wstring& updateExePath) {
         HANDLE batFile = CreateFileW(batPath.c_str(), GENERIC_WRITE, 0, nullptr,
                                      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (batFile != INVALID_HANDLE_VALUE) {
-            char batContent[2048]{};
-            sprintf_s(batContent,
-                "@echo off\r\n"
-                ":wait_pid\r\n"
-                "tasklist /fi \"pid eq %lu\" 2>nul | find \"%lu\" >nul\r\n"
-                "if not errorlevel 1 (\r\n"
-                "    ping 127.0.0.1 -n 2 >nul\r\n"
-                "    goto wait_pid\r\n"
-                ")\r\n"
-                ":move_loop\r\n"
-                "move /y \"%ls\" \"%ls\" >nul 2>&1\r\n"
-                "if errorlevel 1 (\r\n"
-                "    ping 127.0.0.1 -n 2 >nul\r\n"
-                "    goto move_loop\r\n"
-                ")\r\n"
-                "start \"\" \"%ls\" --replace\r\n"
-                "del \"%%~f0\"\r\n",
-                pid, pid, updateExePath.c_str(), currentExeStr.c_str(), currentExeStr.c_str());
+            wchar_t pidStr[16]{};
+            swprintf_s(pidStr, L"%lu", pid);
 
+            // Built as a wide string and written out as UTF-16LE with a BOM
+            // (which cmd.exe natively understands) instead of going through
+            // a narrow sprintf_s("%ls", ...) into a char buffer - that
+            // conversion silently mangled updateExePath/currentExeStr for
+            // any Windows username outside the current ANSI codepage,
+            // corrupting the move/relaunch paths without any error.
+            const std::wstring batContent =
+                L"@echo off\r\n"
+                L":wait_pid\r\n"
+                L"tasklist /fi \"pid eq " + std::wstring(pidStr) + L"\" 2>nul | find \"" +
+                    pidStr + L"\" >nul\r\n"
+                L"if not errorlevel 1 (\r\n"
+                L"    ping 127.0.0.1 -n 2 >nul\r\n"
+                L"    goto wait_pid\r\n"
+                L")\r\n"
+                L":move_loop\r\n"
+                L"move /y \"" + updateExePath + L"\" \"" + currentExeStr + L"\" >nul 2>&1\r\n"
+                L"if errorlevel 1 (\r\n"
+                L"    ping 127.0.0.1 -n 2 >nul\r\n"
+                L"    goto move_loop\r\n"
+                L")\r\n"
+                L"start \"\" \"" + currentExeStr + L"\" --replace\r\n"
+                L"del \"%~f0\"\r\n";
+
+            const wchar_t bom = 0xFEFF;
             DWORD written = 0;
-            WriteFile(batFile, batContent, static_cast<DWORD>(strlen(batContent)), &written, nullptr);
+            WriteFile(batFile, &bom, sizeof(bom), &written, nullptr);
+            WriteFile(batFile, batContent.data(),
+                static_cast<DWORD>(batContent.size() * sizeof(wchar_t)), &written, nullptr);
             CloseHandle(batFile);
 
             SHELLEXECUTEINFOW sei{sizeof(sei)};

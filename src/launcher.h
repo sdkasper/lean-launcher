@@ -71,7 +71,9 @@ public:
             }
         }
         SetTimer(hwnd_, kHotkeyTimer, 2000, nullptr);
-        CheckForUpdatesAsync(true);
+        // Not forced: let the 24h throttle in CheckForUpdatesAsync decide
+        // whether a launch actually warrants a network call.
+        CheckForUpdatesAsync();
         return true;
     }
 
@@ -196,6 +198,11 @@ private:
                 }
             }
             baseAppsCount_ = apps_.size();
+            // Set here (UI thread, via the PostMessageW handoff) rather than
+            // on the index worker thread that posted this message - writing
+            // it there raced Show()'s read of the same field with no
+            // synchronization.
+            lastIndexTime_ = std::chrono::steady_clock::now();
             UpdateResults();
             return 0;
         }
@@ -486,7 +493,19 @@ private:
             }
             iconCv_.notify_one();
             if (iconThread_.joinable()) iconThread_.join();
-            if (updateThread_.joinable()) updateThread_.join();
+            if (updateThread_.joinable()) {
+                // The update thread can be mid network-request/download (up
+                // to ~45s). An unconditional join() here would block the
+                // whole shutdown for that long and trigger a Windows "not
+                // responding" prompt. Wait briefly, then detach rather than
+                // block - PostQuitMessage follows shortly below, so the
+                // imminent process exit reaps the thread instead.
+                if (WaitForSingleObject(updateThread_.native_handle(), 250) == WAIT_OBJECT_0) {
+                    updateThread_.join();
+                } else {
+                    updateThread_.detach();
+                }
+            }
             if constexpr (!kUiTest) {
                 FileIndex::Instance().Stop();
                 leanlauncher::obsidian::NoteIndex::Instance().Stop();
@@ -795,14 +814,19 @@ private:
     void CheckForUpdatesAsync(bool force = false) {
         if constexpr (kUiTest) return;
         if (!settings_.checkForUpdates) return;
-        (void)force;
+        const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
+        // Throttle to at most once per 24h unless explicitly forced (startup
+        // used to pass force=true unconditionally, so this check was never
+        // actually consulted and the update endpoint got hit on every launch).
+        if (!force && !takeoff::ShouldCheckForUpdates(lastUpdateCheck_, now, settings_.checkForUpdates)) {
+            return;
+        }
         if (updateInProgress_.exchange(true)) {
             return; // Already checking or downloading, do not block UI
         }
         if (updateThread_.joinable()) {
             updateThread_.join();
         }
-        const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
         lastUpdateCheck_ = now;
         SaveLastUpdateCheck(now);
         const HWND hwnd = hwnd_;
@@ -2629,10 +2653,10 @@ private:
             ResetCaret();
             InvalidateRect(hwnd_, nullptr, FALSE);
         } else {
-            recent_.erase(std::remove(recent_.begin(), recent_.end(), index), recent_.end());
-            recent_.insert(recent_.begin(), index);
-            if (recent_.size() > 8) recent_.resize(8);
-            SaveRecent();
+            // Only Application/System launches update the recent-apps list -
+            // opening a file/folder/other result must not evict a real
+            // recently-used app from it (this used to run unconditionally
+            // above the category check, making the guard below a no-op).
             if (app.category == takeoff::AppCategory::Application ||
                 app.category == takeoff::AppCategory::System) {
                 recent_.erase(std::remove(recent_.begin(), recent_.end(), index), recent_.end());
@@ -3304,7 +3328,6 @@ private:
                 if (PostMessageW(hwnd_, kAppsReadyMessage, 0,
                         reinterpret_cast<LPARAM>(apps.get()))) {
                     apps.release();
-                    lastIndexTime_ = std::chrono::steady_clock::now();
                 }
             }
         };

@@ -116,10 +116,17 @@ inline int MatchScore(std::wstring_view name, std::wstring_view query) {
     if (query.empty()) return -1;
     if (name == query) return 10000;
 
-    const std::wstring queryCondensed = Condense(query);
-    const std::wstring nameCondensed = Condense(name);
-    if (!queryCondensed.empty() && queryCondensed == nameCondensed) {
-        return 9500;
+    // Condense() heap-allocates; skip it entirely when neither string has a
+    // space to collapse - the condensed forms would just equal the
+    // originals, which the `name == query` check above already ruled out.
+    // This is the common case (most app/file names and queries are a single
+    // word), and MatchScore runs once per candidate on every keystroke.
+    if (query.find(L' ') != std::wstring_view::npos || name.find(L' ') != std::wstring_view::npos) {
+        const std::wstring queryCondensed = Condense(query);
+        const std::wstring nameCondensed = Condense(name);
+        if (!queryCondensed.empty() && queryCondensed == nameCondensed) {
+            return 9500;
+        }
     }
 
     // Check word boundary matches
