@@ -118,3 +118,5 @@ Use this repo to report bugs, request features, or ask questions.
 ## License
 
 Lean Launcher is open source under the [MIT License](LICENSE), retained byte-for-byte from the upstream [Takeoff](https://github.com/akiraeng/takeoff-launcher) project it was forked from.
+
+If you like my work and want to support me, you can do so [here](https://kspr.me/cheers).
