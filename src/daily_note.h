@@ -62,14 +62,16 @@ inline std::wstring FormatDateTokens(const std::wstring& format, int year, int m
 // (Moment.js's full-month-name token) as two consecutive MM tokens and
 // incorrectly call it fully supported - exactly the silent-garbling bug
 // this function exists to catch. Guard against that by requiring the "MM"
-// match not be immediately followed by another 'M'.
+// match not be immediately followed by another 'M'. "DD" needs the same
+// guard because Moment.js's "DDDD" (day of year) would misread the same way.
 inline bool IsDateFormatFullySupported(const std::wstring& format) {
     size_t i = 0;
     while (i < format.size()) {
         if (format.compare(i, 4, L"YYYY") == 0) { i += 4; }
         else if (format.compare(i, 2, L"MM") == 0 &&
                  (i + 2 >= format.size() || format[i + 2] != L'M')) { i += 2; }
-        else if (format.compare(i, 2, L"DD") == 0) { i += 2; }
+        else if (format.compare(i, 2, L"DD") == 0 &&
+                 (i + 2 >= format.size() || format[i + 2] != L'D')) { i += 2; }
         else if (std::iswalpha(format[i])) { return false; }
         else { ++i; }
     }

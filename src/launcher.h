@@ -847,15 +847,24 @@ private:
                 if (takeoff::QueryLatestReleaseInfo(host, path, tag, htmlUrl, assetUrl)) {
                     if (takeoff::IsNewerVersion(tag, takeoff::kAppVersion)) {
                         const std::wstring stagingPath = takeoff::GetUpdateStagingPath(tag);
+                        // The handler takes ownership of the posted path, so
+                        // only release it once the post is known to have
+                        // succeeded - it fails if shutdown got there first.
                         if (!stagingPath.empty() && takeoff::ValidateExecutableFile(stagingPath)) {
-                            auto* p = new std::wstring(stagingPath);
-                            PostMessageW(hwnd, kUpdateCheckCompletedMessage, 2, reinterpret_cast<LPARAM>(p));
+                            auto p = std::make_unique<std::wstring>(stagingPath);
+                            if (PostMessageW(hwnd, kUpdateCheckCompletedMessage, 2,
+                                    reinterpret_cast<LPARAM>(p.get()))) {
+                                p.release();
+                            }
                             return;
                         }
                         if (!assetUrl.empty() && !stagingPath.empty()) {
                             if (takeoff::DownloadUpdateFile(assetUrl, stagingPath)) {
-                                auto* p = new std::wstring(stagingPath);
-                                PostMessageW(hwnd, kUpdateCheckCompletedMessage, 2, reinterpret_cast<LPARAM>(p));
+                                auto p = std::make_unique<std::wstring>(stagingPath);
+                                if (PostMessageW(hwnd, kUpdateCheckCompletedMessage, 2,
+                                        reinterpret_cast<LPARAM>(p.get()))) {
+                                    p.release();
+                                }
                                 return;
                             }
                         }
@@ -1224,8 +1233,23 @@ private:
     // list, not a fixed formula. Each action's summary row is always
     // present when Obsidian is enabled; its detail rows only appear while
     // that action is the expanded section.
-    std::vector<int> ObsidianVisibleRows() const {
-        std::vector<int> rows;
+    //
+    // The list depends on nothing but obsidianEnabled and the expanded
+    // section, yet hit-testing and painting ask for it dozens of times per
+    // mouse move, so it is memoized on those two inputs. The returned
+    // reference stays valid until one of them changes - callers must not
+    // hold on to it across a settings mutation.
+    const std::vector<int>& ObsidianVisibleRows() const {
+        if (!obsidianRowsCache_.empty() &&
+            obsidianRowsCacheEnabled_ == settings_.obsidianEnabled &&
+            obsidianRowsCacheSection_ == obsidianExpandedSection_) {
+            return obsidianRowsCache_;
+        }
+        obsidianRowsCacheEnabled_ = settings_.obsidianEnabled;
+        obsidianRowsCacheSection_ = obsidianExpandedSection_;
+
+        std::vector<int>& rows = obsidianRowsCache_;
+        rows.clear();
         rows.push_back(kRowObsidianEnabled);
         if (!settings_.obsidianEnabled) return rows;
         rows.push_back(kRowVaultPicker);
@@ -1274,7 +1298,7 @@ private:
 
     // -1 if row isn't currently visible in the Obsidian section.
     int ObsidianRowRank(int row) const {
-        const auto rows = ObsidianVisibleRows();
+        const auto& rows = ObsidianVisibleRows();
         const auto it = std::find(rows.begin(), rows.end(), row);
         return it == rows.end() ? -1 : static_cast<int>(std::distance(rows.begin(), it));
     }
@@ -1308,7 +1332,7 @@ private:
         if (cat == SettingsCategory::About) return kRowAboutGithubLink;
         // Obsidian, and the fallback used for "All" (whose last row is
         // whatever the Obsidian section's current last row is).
-        const auto rows = ObsidianVisibleRows();
+        const auto& rows = ObsidianVisibleRows();
         return rows.empty() ? kRowObsidianEnabled : rows.back();
     }
 
@@ -1487,9 +1511,15 @@ private:
         const HWND hwnd = hwnd_;
         try {
             std::thread([hwnd] {
-                auto* result = new std::vector<std::wstring>(leanlauncher::obsidian::FindKnownVaults());
-                PostMessageW(hwnd, leanlauncher::obsidian::kKnownVaultsReadyMessage,
-                    0, reinterpret_cast<LPARAM>(result));
+                auto result = std::make_unique<std::vector<std::wstring>>(
+                    leanlauncher::obsidian::FindKnownVaults());
+                // Ownership transfers to the message handler only if the post
+                // succeeds - a shutdown in flight makes it fail, and the
+                // payload would otherwise leak.
+                if (PostMessageW(hwnd, leanlauncher::obsidian::kKnownVaultsReadyMessage,
+                        0, reinterpret_cast<LPARAM>(result.get()))) {
+                    result.release();
+                }
             }).detach();
         } catch (const std::system_error&) {
             // Thread creation failed - keep whatever knownVaults_ already has.
@@ -2650,7 +2680,6 @@ private:
             ShowWindow(hwnd_, SW_SHOWNORMAL);
             SetForegroundWindow(hwnd_);
             SetFocus(hwnd_);
-            status_ = L"Could not open this app. Try another result.";
             status_ = L"Could not open this item. Try another result.";
             ResetCaret();
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -2862,19 +2891,10 @@ private:
         return -1;
     }
 
+    // Same hit test as ResultAtPoint, expressed relative to the first visible row.
     int ResultSlotAtPoint(float x, float y) const {
-        if (page_ != Page::Launcher) return -1;
-        if (x < 8 || x > width_ - 12 || y < ResultsTop() || y >= FooterTop() - 8) return -1;
-        float top = ResultsTop();
-        for (int i = firstVisible_; i < static_cast<int>(results_.size()); ++i) {
-            const float h = RowHeight(i);
-            if (top + h > FooterTop()) break;
-            if (y >= top && y < top + h) {
-                return i - firstVisible_;
-            }
-            top += h;
-        }
-        return -1;
+        const int result = ResultAtPoint(x, y);
+        return result < 0 ? -1 : result - firstVisible_;
     }
 
     void HandleClick(float x, float y) {
@@ -4484,7 +4504,7 @@ private:
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Obsidian) {
             const float hY = (settingsCategory_ == SettingsCategory::All) ? 553.0f : 16.0f;
             const float cY = (settingsCategory_ == SettingsCategory::All) ? 573.0f : 36.0f;
-            const auto visibleRows = ObsidianVisibleRows();
+            const auto& visibleRows = ObsidianVisibleRows();
             drawCard(L"OBSIDIAN", hY, cY, static_cast<int>(visibleRows.size()));
             for (size_t i = 0; i < visibleRows.size(); ++i) {
                 DrawObsidianRow(visibleRows[i], cY + static_cast<float>(i) * kSettingsRowHeight + offsetY);
@@ -4676,6 +4696,10 @@ private:
     bool vaultDropdownOpen_ = false;
     int vaultDropdownHighlight_ = -1;  // index into knownVaults_ while the dropdown is open
     int obsidianExpandedSection_ = -1;  // kSection* of the expanded action block, or -1
+    // Memoized ObsidianVisibleRows() result; empty means "not built yet".
+    mutable std::vector<int> obsidianRowsCache_;
+    mutable bool obsidianRowsCacheEnabled_ = false;
+    mutable int obsidianRowsCacheSection_ = -1;
     float textScroll_ = 0, caretX_ = kTextLeft, mouseX_ = 0, mouseY_ = 0;
     float settingsScroll_ = 0.0f;
     bool settingsDraggingScroll_ = false;

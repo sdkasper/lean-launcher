@@ -872,6 +872,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
             while (PeekMessageW(&message, nullptr, kIconReadyMessage, kIconReadyMessage, PM_REMOVE)) {
                 delete reinterpret_cast<IconResult*>(message.lParam);
             }
+            // lParam only carries a staged-update path when wParam is 2; the
+            // other verdicts post a null lParam, which delete tolerates.
+            while (PeekMessageW(&message, nullptr, kUpdateCheckCompletedMessage,
+                    kUpdateCheckCompletedMessage, PM_REMOVE)) {
+                delete reinterpret_cast<std::wstring*>(message.lParam);
+            }
+            while (PeekMessageW(&message, nullptr, kKnownVaultsReadyMessage,
+                    kKnownVaultsReadyMessage, PM_REMOVE)) {
+                delete reinterpret_cast<std::vector<std::wstring>*>(message.lParam);
+            }
             exitCode = status == -1 ? 1 : 0;
         }
     }

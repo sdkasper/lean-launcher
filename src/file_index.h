@@ -88,10 +88,6 @@ public:
         }
     }
 
-    void TriggerReindex() {
-        if (triggerEvent_) SetEvent(triggerEvent_);
-    }
-
     bool IsReady() const {
         return ready_.load();
     }
@@ -115,11 +111,6 @@ public:
         }
     }
 
-    void PublishSnapshot(const std::vector<FileItem>& items) {
-        std::vector<FileItem> copy = items;
-        PublishSnapshot(std::move(copy));
-    }
-
     void AppendSnapshotChunk(std::vector<FileItem>&& items) {
         if (items.empty()) return;
         auto chunk = std::make_shared<const IndexChunk>(IndexChunk{std::move(items)});
@@ -137,11 +128,6 @@ public:
             snapshot_ = std::move(newSnapshot);
             ready_ = true;
         }
-    }
-
-    void AppendSnapshotChunk(const std::vector<FileItem>& items) {
-        std::vector<FileItem> copy = items;
-        AppendSnapshotChunk(std::move(copy));
     }
 
     static bool IsDriveRoot(const fs::path& p) {
