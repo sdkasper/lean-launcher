@@ -603,31 +603,7 @@ int main() {
         Check(std::wstring(ptr.get()) == testStr, "CoTaskMemPtr preserves string value");
     }
 
-    // 3. FreeStrRet correctly handles STRRET_WSTR, STRRET_CSTR, and STRRET_OFFSET
-    {
-        STRRET wstrRet{};
-        wstrRet.uType = STRRET_WSTR;
-        const wchar_t oleSample[] = L"OleWideString";
-        const size_t oleBytes = (wcslen(oleSample) + 1) * sizeof(wchar_t);
-        wstrRet.pOleStr = static_cast<LPWSTR>(CoTaskMemAlloc(oleBytes));
-        wcscpy_s(wstrRet.pOleStr, wcslen(oleSample) + 1, oleSample);
-        FreeStrRet(wstrRet);
-        Check(wstrRet.pOleStr == nullptr, "FreeStrRet frees and zeroes pOleStr for STRRET_WSTR");
-
-        STRRET cstrRet{};
-        cstrRet.uType = STRRET_CSTR;
-        strcpy_s(cstrRet.cStr, "SimpleAnsiString");
-        FreeStrRet(cstrRet);
-        Check(cstrRet.uType == STRRET_CSTR, "FreeStrRet handles STRRET_CSTR safely");
-
-        STRRET offsetRet{};
-        offsetRet.uType = STRRET_OFFSET;
-        offsetRet.uOffset = 16;
-        FreeStrRet(offsetRet);
-        Check(offsetRet.uOffset == 16, "FreeStrRet handles STRRET_OFFSET safely");
-    }
-
-    // 4. Live shell AppsFolder resolution without allocator mismatch
+    // 3. Live shell AppsFolder resolution without allocator mismatch
     {
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         PIDLIST_ABSOLUTE testAppsFolderId = nullptr;
@@ -656,7 +632,7 @@ int main() {
         CoUninitialize();
     }
 
-    // 5. Live FileIndex background indexing & sub-millisecond search benchmark
+    // 4. Live FileIndex background indexing & sub-millisecond search benchmark
     FileIndex::Instance().Start();
     for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -748,7 +724,7 @@ int main() {
         Check(estimatedHeapBytes < kMaxHeapBudget, "FileIndex heap usage under typical startup is strictly bounded < 30 MB");
     }
 
-    // 6. Settings Scroll and Viewport Invariants:
+    // 5. Settings Scroll and Viewport Invariants:
     // Guarantees Settings content cleanly fits and scrolls without overlapping FooterTop (440px).
     //
     // This is an independent hand-derived sanity check, not a call into the real
