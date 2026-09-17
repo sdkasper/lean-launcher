@@ -68,7 +68,6 @@ public:
         if (running_.exchange(true)) return;
         notifyHwnd_ = notifyHwnd;
         stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        triggerEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         worker_ = std::thread([this]() { WorkerLoop(); });
     }
 
@@ -81,10 +80,6 @@ public:
         if (stopEvent_) {
             CloseHandle(stopEvent_);
             stopEvent_ = nullptr;
-        }
-        if (triggerEvent_) {
-            CloseHandle(triggerEvent_);
-            triggerEvent_ = nullptr;
         }
     }
 
@@ -679,7 +674,6 @@ private:
 
         std::vector<HANDLE> waitHandles;
         if (stopEvent_) waitHandles.push_back(stopEvent_);
-        if (triggerEvent_) waitHandles.push_back(triggerEvent_);
         if (hDesktop != INVALID_HANDLE_VALUE && hDesktop != nullptr) waitHandles.push_back(hDesktop);
         if (hDocs != INVALID_HANDLE_VALUE && hDocs != nullptr) waitHandles.push_back(hDocs);
         if (hDownloads != INVALID_HANDLE_VALUE && hDownloads != nullptr) waitHandles.push_back(hDownloads);
@@ -722,7 +716,6 @@ private:
     std::shared_ptr<const IndexSnapshot> snapshot_;
     std::thread worker_;
     HANDLE stopEvent_ = nullptr;
-    HANDLE triggerEvent_ = nullptr;
     HWND notifyHwnd_ = nullptr;
 };
 

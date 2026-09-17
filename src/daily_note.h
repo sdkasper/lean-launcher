@@ -25,7 +25,12 @@ namespace fs = std::filesystem;
 // Replaces YYYY/MM/DD tokens in a Moment.js-style date format string with
 // zero-padded values. Only the three tokens Obsidian's daily-notes format
 // actually needs for this codebase's vault conventions are supported;
-// anything else in the format string passes through unchanged.
+// anything else in the format string passes through unchanged. The DD branch
+// mirrors IsDateFormatFullySupported's lookahead guard (below) so this
+// function can't garble a token like "DDDD" if a future caller ever reaches
+// it without validating the format first - today ResolveTodayPath is the
+// only caller and always validates, but the two functions must agree on
+// what counts as a real DD token.
 inline std::wstring FormatDateTokens(const std::wstring& format, int year, int month, int day) {
     std::wstring result;
     result.reserve(format.size());
@@ -40,7 +45,8 @@ inline std::wstring FormatDateTokens(const std::wstring& format, int year, int m
             swprintf_s(buf, L"%02d", month);
             result += buf;
             i += 2;
-        } else if (format.compare(i, 2, L"DD") == 0) {
+        } else if (format.compare(i, 2, L"DD") == 0 &&
+                   (i + 2 >= format.size() || format[i + 2] != L'D')) {
             swprintf_s(buf, L"%02d", day);
             result += buf;
             i += 2;

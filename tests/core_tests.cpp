@@ -1079,6 +1079,8 @@ int main() {
         "IsDateFormatFullySupported false for unsupported MMMM token");
     Check(!IsDateFormatFullySupported(L"dddd, MMMM Do YYYY"),
         "IsDateFormatFullySupported false for unsupported dddd/MMMM/Do tokens");
+    Check(!IsDateFormatFullySupported(L"YYYY-DDDD"),
+        "IsDateFormatFullySupported false for unsupported DDDD token (day-of-year), not misread as two DD tokens");
 
     {
         // Regression: an unsupported format token must not silently produce a
