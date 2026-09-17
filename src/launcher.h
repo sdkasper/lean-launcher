@@ -3671,7 +3671,9 @@ private:
                 }
             }
             if (input_.text.empty() && composition_.empty()) {
-                Text(L"Search apps and launch something\u2026",
+                Text(settings_.obsidianEnabled
+                         ? L"Launch apps, search files, capture thoughts\u2026"
+                         : L"Launch apps, search files\u2026",
                     D2D1::RectF(kTextLeft + 2, 0, right, kSearchHeight), searchFormat_.Get(), Muted());
             } else {
                 brush_->SetColor(Foreground());
