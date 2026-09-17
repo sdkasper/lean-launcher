@@ -6,6 +6,6 @@ Fixes #(issue)
 
 ## Testing
 
-- [ ] Core tests passed (`ctest --test-dir build -C Release`)
+- [ ] Core tests passed (`ctest --test-dir cmake -C Release`)
 - [ ] Tested locally on Windows
 

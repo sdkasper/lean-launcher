@@ -21,20 +21,20 @@ Write-Host "==> Packaging Takeoff v$Version..." -ForegroundColor Cyan
 
 if (-not $SkipBuild) {
     Write-Host "==> Building Release x64 with CMake..." -ForegroundColor Yellow
-    if (-not (Test-Path "build")) {
-        cmake -S . -B build -A x64
+    if (-not (Test-Path "cmake")) {
+        cmake -S . -B cmake -A x64
     }
-    cmake --build build --config Release --target Takeoff
+    cmake --build cmake --config Release --target Takeoff
 }
 
-$exePath = Join-Path $rootDir "build\Release\Takeoff.exe"
+$exePath = Join-Path $rootDir "cmake\Release\Takeoff.exe"
 if (-not (Test-Path $exePath)) {
     # Fallback to Visual Studio output path if built with Takeoff.sln
-    $exePath = Join-Path $rootDir "x64\Release\Takeoff.exe"
+    $exePath = Join-Path $rootDir "msbuild\bin\x64\Release\Takeoff.exe"
 }
 
 if (-not (Test-Path $exePath)) {
-    Write-Error "Could not find Takeoff.exe in either build\Release\ or x64\Release\. Build failed?"
+    Write-Error "Could not find Takeoff.exe in either cmake\Release\ or msbuild\bin\x64\Release\. Build failed?"
     exit 1
 }
 

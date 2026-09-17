@@ -1,12 +1,12 @@
 # Build directories
-/build/
-/x64/
+/cmake/
+/msbuild/
 /QuickLaunch/
 /Takeoff/
-/LeanLauncher/
 /out/
 /dist/
 /dist_release/
+/archive/
 *.zip
 *.sha256
 

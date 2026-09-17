@@ -12,11 +12,12 @@ Lean Launcher is a native Windows application launcher (Alt+Space, type, Enter),
 
 ```powershell
 # CMake (primary)
-cmake -S . -B build -A x64
-cmake --build build --config Release
-# Binary at build/Release/LeanLauncher.exe
+cmake -S . -B cmake -A x64
+cmake --build cmake --config Release
+# Binary at cmake/Release/LeanLauncher.exe
 
 # Or Visual Studio 2022: open LeanLauncher.sln, set Release/x64, Ctrl+Shift+B
+# (outputs under msbuild/bin and msbuild/obj - see LeanLauncher.vcxproj)
 ```
 
 Requires Windows 10 1809+ or Windows 11, VS2022 with the Desktop C++ workload, Windows SDK. Compiler flags: `/W4 /permissive- /utf-8`, C++17, `UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN`. Keep builds clean at `/W4` - CI enforces both the CMake build and the raw `msbuild LeanLauncher.sln` build.
@@ -25,16 +26,16 @@ Requires Windows 10 1809+ or Windows 11, VS2022 with the Desktop C++ workload, W
 
 ```powershell
 # Core regression tests (fuzzy matching, text navigation, hotkeys, recency, version compare)
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir cmake -C Release --output-on-failure
 # or directly:
-.\build\Release\LeanLauncherCoreTests.exe
+.\cmake\Release\LeanLauncherCoreTests.exe
 
 # Run a single check: core_tests.cpp is one flat main() of sequential Check(condition, "label")
 # assertions (see tests/core_tests.cpp) - there's no test-name filter, so isolate by
 # temporarily commenting out other Check() calls, or grep the label to find the line.
 
 # Interactive UI smoke test (window creation, acrylic, caret, selection, actions overlay)
-py tests/ui_smoke.py build/Release/LeanLauncherUiTests.exe
+py tests/ui_smoke.py cmake/Release/LeanLauncherUiTests.exe
 ```
 
 `LeanLauncherUiTests` is a second executable built from the same sources (`add_launcher` in CMakeLists.txt is a function invoked twice) but compiled with `LEANLAUNCHER_UI_TEST` defined, giving it a separate window class/mutex and no global hotkey registration - it never attaches to or replaces a real running launcher instance. This is the mechanism to know about before adding anything that behaves differently under test vs. production; check `kUiTest` (from `LEANLAUNCHER_UI_TEST`) at the call site.

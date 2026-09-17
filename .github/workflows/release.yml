@@ -26,15 +26,15 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Configure CMake
-        run: cmake -S . -B build -A x64
+        run: cmake -S . -B cmake -A x64
 
       - name: Build LeanLauncher (Release x64)
-        run: cmake --build build --config Release --target LeanLauncher
+        run: cmake --build cmake --config Release --target LeanLauncher
 
       - name: Run Core Tests
         run: |
-          cmake --build build --config Release --target LeanLauncherCoreTests
-          ctest --test-dir build -C Release --output-on-failure
+          cmake --build cmake --config Release --target LeanLauncherCoreTests
+          ctest --test-dir cmake -C Release --output-on-failure
 
       - name: Package Release
         id: package
@@ -48,8 +48,8 @@ jobs:
           $distDir = "dist_release"
 
           New-Item -ItemType Directory -Force -Path $distDir | Out-Null
-          Copy-Item "build/Release/LeanLauncher.exe" -Destination "build/Release/$versionExeName"
-          Copy-Item "build/Release/LeanLauncher.exe" -Destination $distDir/
+          Copy-Item "cmake/Release/LeanLauncher.exe" -Destination "cmake/Release/$versionExeName"
+          Copy-Item "cmake/Release/LeanLauncher.exe" -Destination $distDir/
           Copy-Item "README.md" -Destination $distDir/
           Copy-Item "LICENSE" -Destination $distDir/
 
@@ -60,7 +60,7 @@ jobs:
           Write-Output "tag=$tag" >> $env:GITHUB_OUTPUT
           Write-Output "archive=$archiveName" >> $env:GITHUB_OUTPUT
           Write-Output "sha256=$archiveName.sha256" >> $env:GITHUB_OUTPUT
-          Write-Output "version_exe=build/Release/$versionExeName" >> $env:GITHUB_OUTPUT
+          Write-Output "version_exe=cmake/Release/$versionExeName" >> $env:GITHUB_OUTPUT
 
       - name: Extract Changelog Section
         id: notes
@@ -89,7 +89,7 @@ jobs:
           tag_name: ${{ steps.package.outputs.tag }}
           files: |
             ${{ steps.package.outputs.version_exe }}
-            build/Release/LeanLauncher.exe
+            cmake/Release/LeanLauncher.exe
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.sha256 }}
           body_path: ${{ steps.notes.outputs.notes_file }}

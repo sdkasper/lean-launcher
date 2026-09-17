@@ -648,9 +648,13 @@ int main() {
     while (repoPath.has_parent_path()) {
         const auto name = repoPath.filename().wstring();
         if (_wcsicmp(name.c_str(), L"build") == 0 ||
+            _wcsicmp(name.c_str(), L"cmake") == 0 ||
+            _wcsicmp(name.c_str(), L"msbuild") == 0 ||
             _wcsicmp(name.c_str(), L"Release") == 0 ||
             _wcsicmp(name.c_str(), L"Debug") == 0 ||
-            _wcsicmp(name.c_str(), L"bin") == 0) {
+            _wcsicmp(name.c_str(), L"bin") == 0 ||
+            _wcsicmp(name.c_str(), L"obj") == 0 ||
+            _wcsicmp(name.c_str(), L"x64") == 0) {
             repoPath = repoPath.parent_path();
         } else {
             break;

@@ -90,16 +90,16 @@ The launcher itself is unchanged from its Takeoff heritage: a direct Win32 messa
 ## Build from Source
 
 ```powershell
-cmake -S . -B build -A x64
-cmake --build build --config Release
+cmake -S . -B cmake -A x64
+cmake --build cmake --config Release
 ```
 
-The compiled binary will be at `build/Release/LeanLauncher.exe`.
+The compiled binary will be at `cmake/Release/LeanLauncher.exe`.
 
 Run the test suite:
 
 ```powershell
-ctest --test-dir build -C Release
+ctest --test-dir cmake -C Release
 ```
 
 ## Changelog

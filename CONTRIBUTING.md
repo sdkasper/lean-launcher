@@ -31,19 +31,19 @@ This is a solo-maintained project ([@sdkasper](https://github.com/sdkasper)) - t
 1. Open `LeanLauncher.sln` in Visual Studio.
 2. Set configuration to `Release` and platform to `x64`.
 3. Choose **Build > Build Solution** (or press `Ctrl+Shift+B`).
-4. The executable will be produced at `build\Release\LeanLauncher.exe`.
+4. The executable will be produced at `msbuild\bin\x64\Release\LeanLauncher.exe`.
 
 #### Option B: CMake (Command Line)
 
 ```powershell
 # Configure
-cmake -S . -B build -A x64
+cmake -S . -B cmake -A x64
 
 # Build
-cmake --build build --config Release
+cmake --build cmake --config Release
 ```
 
-The output executable will be located at `build\Release\LeanLauncher.exe`.
+The output executable will be located at `cmake\Release\LeanLauncher.exe`.
 
 ## Running Tests
 
@@ -52,13 +52,13 @@ The output executable will be located at `build\Release\LeanLauncher.exe`.
 The CMake build configures a fast, dependency-free test suite that validates fuzzy matching, text input navigation, hotkey formatting/migrations, recency ranking, and update version comparisons:
 
 ```powershell
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir cmake -C Release --output-on-failure
 ```
 
 You can also run the test executable directly:
 
 ```powershell
-.\build\Release\LeanLauncherCoreTests.exe
+.\cmake\Release\LeanLauncherCoreTests.exe
 ```
 
 ### UI Smoke Test
@@ -66,7 +66,7 @@ You can also run the test executable directly:
 An interactive UI smoke test validates window creation, acrylic composition, caret blinking, text selection, and actions overlay using a standalone fixture window:
 
 ```powershell
-py tests/ui_smoke.py build/Release/LeanLauncherUiTests.exe
+py tests/ui_smoke.py cmake/Release/LeanLauncherUiTests.exe
 ```
 
 *Note: The test executable `LeanLauncherUiTests.exe` runs in an isolated mode with separate window classes and mutexes, so it does not interfere with your running launcher.*

@@ -18,13 +18,13 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Configure CMake
-        run: cmake -S . -B build -A x64
+        run: cmake -S . -B cmake -A x64
 
       - name: Build with CMake (Release x64)
-        run: cmake --build build --config Release
+        run: cmake --build cmake --config Release
 
       - name: Run Core Tests (CTest)
-        run: ctest --test-dir build -C Release --output-on-failure
+        run: ctest --test-dir cmake -C Release --output-on-failure
 
       - name: Verify Visual Studio Solution Build
         run: msbuild LeanLauncher.sln /p:Configuration=Release /p:Platform=x64 /v:m

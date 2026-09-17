@@ -1,6 +1,6 @@
 """Interactive Windows smoke test. Captures only our fixture window.
 
-Usage: py tests/ui_smoke.py build/Release/TakeoffUiTests.exe
+Usage: py tests/ui_smoke.py cmake/Release/TakeoffUiTests.exe
 Requires Pillow and tkinter. Does not launch apps or use the clipboard.
 """
 
