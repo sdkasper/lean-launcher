@@ -10,6 +10,31 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.2.1] - 2026-09-17
+
+A full-codebase security and code review round (2 security findings, 4 high, 8 medium, and 6 low-severity code review findings) - no user-facing feature changes, but several fixes affect behavior users could actually notice.
+
+### Security
+- **Untrusted vault config could redirect note writes outside the vault** - `folder`/`format` values read from a vault's own `daily-notes.json`/Periodic Notes/Journals config are now validated before use; a synced/shared vault with a tampered config could otherwise use a UNC path (triggering an outbound network authentication handshake) or `..` traversal to redirect captures
+- **Update endpoints could be silently redirected via undocumented registry keys** - removed the unvalidated `HKCU\Software\LeanLauncher` override for the update host/path/releases URL; these are compile-time constants only now
+
+### Fixed
+- Crash (heap corruption) during app-index builds caused by a double-free of a Shell API string result
+- Crash (`std::terminate`) if a removable drive was unplugged mid-scan during file indexing
+- A daily note could be truncated to zero bytes if a log-capture write failed partway through (e.g. full disk, sync client lock) - log capture now writes to a temp file and swaps it in atomically
+- Update checks silently defaulted to enabled the moment the settings registry key existed for any unrelated reason, even though update checking is opt-in
+- Update checks fired on every launch instead of respecting the intended 24-hour throttle
+- Opening a file or folder result could silently evict genuinely recent apps from the "Recent" list
+- Update-asset selection used substring matching, so a published checksum file (e.g. `LeanLauncher.exe.sha256`) could be picked over the real executable and permanently break auto-update
+- The auto-update fallback script could corrupt file paths - and silently fail to relaunch - for Windows usernames containing non-ASCII characters
+- Daily-note detection via the Periodic Notes plugin could pick up a sibling section's folder (e.g. "weekly") instead of "daily"'s own
+- App shutdown could hang for up to ~45 seconds (triggering a Windows "not responding" prompt) if an update check/download was in progress
+- `DDDD`-style date formats could silently render as garbled filenames instead of falling back to the default format
+- Two background-thread result messages could leak their heap payload if the app was closed before they were processed
+
+### Changed
+- Internal: search-scoring and Settings row-list hot paths no longer allocate on every keystroke/mouse-move (performance only, no visible behavior change)
+
 ## [1.2.0] - 2026-09-16
 
 ### Added
