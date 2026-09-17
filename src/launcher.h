@@ -1899,9 +1899,14 @@ private:
                 return;  // stay in edit mode so the user can fix it
             }
         }
+        const bool wasLogHeadingRow = (editingRow_ == kRowLogHeading);
         *field = settingsEdit_.text;
         editingRow_ = -1;
-        settingsStatus_.clear();
+        if (wasLogHeadingRow && leanlauncher::obsidian::HeadingLevel(settingsEdit_.text) == 0) {
+            settingsStatus_ = L"No matching heading - log entries will be appended to the end of the note.";
+        } else {
+            settingsStatus_.clear();
+        }
         // dailyNoteConfig_ is a cache derived from the override fields, not
         // read from them directly (see ResolveTodayPath's call sites) - it
         // must be refreshed here or a folder/format override just edited
@@ -4214,7 +4219,7 @@ private:
         switch (row) {
         case kRowObsidianEnabled:
             DrawSettingsRow(row, top, L"Enable Obsidian integration",
-                L"Turn on vault search, task capture, and note capture from the launcher",
+                L"Turn on vault search, task capture, note capture, and log capture from the launcher",
                 {}, true, settings_.obsidianEnabled);
             return;
         case kRowVaultPicker: {

@@ -197,6 +197,12 @@ inline std::wstring FormatTimeHHMM() {
     return buf;
 }
 
+// Minimal frontmatter written when a daily note is created for the first
+// time by any of the append actions below - just a created timestamp.
+inline std::wstring BuildFrontmatter() {
+    return L"---\ncreated: " + FormatIsoTimestamp() + L"\n---\n\n";
+}
+
 // Appends one already-formatted line to the note at notePath, creating the
 // file (with parent directories and minimal frontmatter) if it doesn't exist
 // yet. Returns false on any I/O failure - callers must surface this to the
@@ -234,19 +240,15 @@ inline bool AppendLine(const std::wstring& notePath, const std::wstring& line) {
 
     std::wstring content;
     if (isNewFile) {
-        content = L"---\ncreated: " + FormatIsoTimestamp() + L"\n---\n\n";
+        content = BuildFrontmatter();
     } else if (needsLeadingNewline) {
         content = L"\n";
     }
     content += line;
 
     bool ok = false;
-    const int utf8Len = WideCharToMultiByte(CP_UTF8, 0, content.data(), static_cast<int>(content.size()),
-        nullptr, 0, nullptr, nullptr);
-    if (utf8Len > 0) {
-        std::string utf8(static_cast<size_t>(utf8Len), '\0');
-        WideCharToMultiByte(CP_UTF8, 0, content.data(), static_cast<int>(content.size()),
-            utf8.data(), utf8Len, nullptr, nullptr);
+    const std::string utf8 = WideToUtf8(content);
+    if (!utf8.empty()) {
         DWORD written = 0;
         ok = WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr) &&
              written == utf8.size();
@@ -305,7 +307,7 @@ inline bool AppendLogEntry(const std::wstring& notePath, std::wstring_view text,
     std::wstring newContent;
 
     if (!fs::exists(path, ec)) {
-        newContent = L"---\ncreated: " + FormatIsoTimestamp() + L"\n---\n\n" + line;
+        newContent = BuildFrontmatter() + line;
     } else {
         const std::string raw = ReadFileUtf8(path);
         // ReadFileUtf8 returns "" both for a legitimately empty file and for
