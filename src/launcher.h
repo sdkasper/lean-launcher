@@ -821,7 +821,7 @@ private:
         if (!force && !takeoff::ShouldCheckForUpdates(lastUpdateCheck_, now, settings_.checkForUpdates)) {
             return;
         }
-        if (updateInProgress_.exchange(true)) {
+        if (updateInProgress_->exchange(true)) {
             return; // Already checking or downloading, do not block UI
         }
         if (updateThread_.joinable()) {
@@ -833,11 +833,13 @@ private:
         const std::wstring host = apiHost_;
         const std::wstring path = apiPath_;
         try {
-            updateThread_ = std::thread([this, hwnd, host, path] {
+            // The flag is held by shared_ptr and captured by value: shutdown may
+            // detach this thread, so the guard can outlive the LauncherWindow.
+            updateThread_ = std::thread([hwnd, host, path, flag = updateInProgress_] {
                 struct Guard {
-                    std::atomic<bool>& flag;
-                    ~Guard() { flag = false; }
-                } guard{updateInProgress_};
+                    std::shared_ptr<std::atomic<bool>> flag;
+                    ~Guard() { *flag = false; }
+                } guard{flag};
 
                 std::wstring tag;
                 std::wstring htmlUrl;
@@ -864,7 +866,7 @@ private:
                 PostMessageW(hwnd, kUpdateCheckCompletedMessage, 0, 0);
             });
         } catch (const std::system_error&) {
-            updateInProgress_ = false;
+            *updateInProgress_ = false;
         }
     }
 
@@ -4694,7 +4696,7 @@ private:
     bool updateHovered_ = false;
     bool webSearchCardHovered_ = false;
     bool adminActionHovered_ = false;
-    std::atomic<bool> updateInProgress_{false};
+    std::shared_ptr<std::atomic<bool>> updateInProgress_ = std::make_shared<std::atomic<bool>>(false);
     std::thread updateThread_;
     uint64_t lastUpdateCheck_ = 0;
     std::wstring releasesUrl_ = takeoff::kDefaultReleasesUrl;

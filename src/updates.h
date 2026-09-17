@@ -458,6 +458,35 @@ inline bool QueryLatestReleaseTag(std::wstring_view host, std::wstring_view path
     return QueryLatestReleaseInfo(host, path, outTag, outHtmlUrl, dummyAssetUrl);
 }
 
+// cmd.exe parses .bat files byte-wise in the console codepage, so the updater
+// script has to be narrow text - a UTF-16LE file is not understood and fails on
+// the first token. Interpolating a raw long path into narrow text corrupts it
+// for any username outside that codepage, so the directory (which is where a
+// non-ASCII username shows up) is replaced by its 8.3 short name: that is pure
+// ASCII and therefore representable in every single-byte codepage.
+//
+// Only the directory is shortened, never the file name: `move` creates the
+// destination under exactly the name it is given, so a short destination name
+// would leave the updated executable permanently called LEANLA~1.EXE.
+inline std::wstring ShortenPathDirectory(const std::wstring& path) {
+    const size_t slash = path.find_last_of(L"\\/");
+    if (slash == std::wstring::npos || slash < 3) {
+        return path;
+    }
+    const std::wstring directory = path.substr(0, slash);
+    const DWORD needed = GetShortPathNameW(directory.c_str(), nullptr, 0);
+    if (needed == 0) {
+        return path;
+    }
+    std::wstring shortDirectory(needed, L'\0');
+    const DWORD written = GetShortPathNameW(directory.c_str(), shortDirectory.data(), needed);
+    if (written == 0 || written >= needed) {
+        return path;
+    }
+    shortDirectory.resize(written);
+    return shortDirectory + path.substr(slash);
+}
+
 inline bool ApplyUpdateAndRestart(const std::wstring& updateExePath) {
     if (!ValidateExecutableFile(updateExePath)) {
         return false;
@@ -505,12 +534,11 @@ inline bool ApplyUpdateAndRestart(const std::wstring& updateExePath) {
             wchar_t pidStr[16]{};
             swprintf_s(pidStr, L"%lu", pid);
 
-            // Built as a wide string and written out as UTF-16LE with a BOM
-            // (which cmd.exe natively understands) instead of going through
-            // a narrow sprintf_s("%ls", ...) into a char buffer - that
-            // conversion silently mangled updateExePath/currentExeStr for
-            // any Windows username outside the current ANSI codepage,
-            // corrupting the move/relaunch paths without any error.
+            // See ShortenPathDirectory: the script must be plain narrow text, so
+            // only ASCII-safe paths are interpolated into it.
+            const std::wstring shortUpdatePath = ShortenPathDirectory(updateExePath);
+            const std::wstring shortCurrentPath = ShortenPathDirectory(currentExeStr);
+
             const std::wstring batContent =
                 L"@echo off\r\n"
                 L":wait_pid\r\n"
@@ -521,20 +549,34 @@ inline bool ApplyUpdateAndRestart(const std::wstring& updateExePath) {
                 L"    goto wait_pid\r\n"
                 L")\r\n"
                 L":move_loop\r\n"
-                L"move /y \"" + updateExePath + L"\" \"" + currentExeStr + L"\" >nul 2>&1\r\n"
+                L"move /y \"" + shortUpdatePath + L"\" \"" + shortCurrentPath + L"\" >nul 2>&1\r\n"
                 L"if errorlevel 1 (\r\n"
                 L"    ping 127.0.0.1 -n 2 >nul\r\n"
                 L"    goto move_loop\r\n"
                 L")\r\n"
-                L"start \"\" \"" + currentExeStr + L"\" --replace\r\n"
+                L"start \"\" \"" + shortCurrentPath + L"\" --replace\r\n"
                 L"del \"%~f0\"\r\n";
 
-            const wchar_t bom = 0xFEFF;
+            const int narrowLen = WideCharToMultiByte(CP_OEMCP, 0, batContent.c_str(),
+                static_cast<int>(batContent.size()), nullptr, 0, nullptr, nullptr);
+            if (narrowLen <= 0) {
+                CloseHandle(batFile);
+                DeleteFileW(batPath.c_str());
+                return false;
+            }
+            std::string narrowContent(static_cast<size_t>(narrowLen), '\0');
+            WideCharToMultiByte(CP_OEMCP, 0, batContent.c_str(),
+                static_cast<int>(batContent.size()), narrowContent.data(), narrowLen,
+                nullptr, nullptr);
+
             DWORD written = 0;
-            WriteFile(batFile, &bom, sizeof(bom), &written, nullptr);
-            WriteFile(batFile, batContent.data(),
-                static_cast<DWORD>(batContent.size() * sizeof(wchar_t)), &written, nullptr);
+            const BOOL wrote = WriteFile(batFile, narrowContent.data(),
+                static_cast<DWORD>(narrowContent.size()), &written, nullptr);
             CloseHandle(batFile);
+            if (!wrote || written != narrowContent.size()) {
+                DeleteFileW(batPath.c_str());
+                return false;
+            }
 
             SHELLEXECUTEINFOW sei{sizeof(sei)};
             sei.fMask = SEE_MASK_FLAG_NO_UI;
