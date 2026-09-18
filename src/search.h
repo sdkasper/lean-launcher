@@ -31,7 +31,8 @@ enum class AppCategory : uint8_t {
     TaskAdd,
     NoteJump,
     NoteAdd,
-    LogAdd
+    LogAdd,
+    WebSearch
 };
 
 inline std::wstring Normalize(std::wstring_view value) {

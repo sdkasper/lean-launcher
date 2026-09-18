@@ -13,6 +13,7 @@
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -57,16 +58,17 @@ inline bool DefaultObsidianEnabled(const std::wstring& vaultPath) {
     return !vaultPath.empty();
 }
 
-// Returns a user-facing error message if the four configured action
-// prefixes aren't all non-empty and mutually distinct (case-insensitive),
-// or nullptr if they're valid. Used to reject an in-progress Settings edit
-// before it's saved - two prefixes colliding would make one action
-// permanently unreachable, and an empty prefix would match every input.
-inline const wchar_t* FindPrefixConflict(
-    const std::wstring& vaultSearchPrefix, const std::wstring& taskPrefix,
-    const std::wstring& noteAddPrefix, const std::wstring& logPrefix) {
-    if (vaultSearchPrefix.empty() || taskPrefix.empty() || noteAddPrefix.empty() || logPrefix.empty()) {
-        return L"Prefix cannot be empty.";
+// Returns a user-facing error message if the configured action prefixes
+// (the four Obsidian ones plus, as of US-017, web/file/app search) aren't
+// all non-empty and mutually distinct (case-insensitive), or nullptr if
+// they're valid. Used to reject an in-progress Settings edit before it's
+// saved - two prefixes colliding would make one action permanently
+// unreachable, and an empty prefix would match every input. Takes an
+// arbitrary-length list rather than fixed parameters so the prefix count
+// can keep growing without changing this signature again.
+inline const wchar_t* FindPrefixConflict(std::initializer_list<std::wstring> prefixes) {
+    for (const auto& prefix : prefixes) {
+        if (prefix.empty()) return L"Prefix cannot be empty.";
     }
     auto ciEqual = [](const std::wstring& a, const std::wstring& b) {
         if (a.size() != b.size()) return false;
@@ -75,10 +77,9 @@ inline const wchar_t* FindPrefixConflict(
         }
         return true;
     };
-    const std::wstring* prefixes[] = {&vaultSearchPrefix, &taskPrefix, &noteAddPrefix, &logPrefix};
-    for (size_t i = 0; i < 4; ++i) {
-        for (size_t j = i + 1; j < 4; ++j) {
-            if (ciEqual(*prefixes[i], *prefixes[j])) return L"Prefixes must be unique.";
+    for (auto i = prefixes.begin(); i != prefixes.end(); ++i) {
+        for (auto j = std::next(i); j != prefixes.end(); ++j) {
+            if (ciEqual(*i, *j)) return L"Prefixes must be unique.";
         }
     }
     return nullptr;

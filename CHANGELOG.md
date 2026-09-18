@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.4.0] - 2026-09-18
+
+### Added
+- **Customizable search-scope prefixes** - three new prefixes narrow or force a search: `w <query>` (default) forces a single top web-search result regardless of other matches, respecting the Web search toggle; `f <query>` (default) shows only file/folder matches; `p <query>` (default) shows only installed-app matches and is always active. All three prefixes are inline-editable in Settings > Search and validated as mutually unique against each other and the existing Obsidian `t`/`a`/`l`/`o` prefixes.
+
 ## [1.3.0] - 2026-09-18
 
 ### Added

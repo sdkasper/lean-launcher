@@ -47,6 +47,17 @@ struct Settings {
     std::wstring webSearchUrlTemplate = L"https://www.google.com/search?q={query}";
     std::wstring webSearchEngineName = L"Google";
 
+    // Search-scope prefixes (US-017): "w" forces a single-result web search
+    // (respects enableWebSearch); "f"/"p" narrow the results list to just
+    // files/folders or just installed apps (f respects enableFileSearch; p
+    // has no toggle - app search is core functionality). Validated as
+    // mutually unique against every other prefix in Settings, alongside the
+    // existing Obsidian t/a/l/o prefixes - see FindPrefixConflict.
+    std::wstring webSearchPrefix = L"w";
+    std::wstring webSearchPillLabel = L"Web";
+    std::wstring fileSearchPrefix = L"f";
+    std::wstring appSearchPrefix = L"p";
+
     // Obsidian integration: master toggle plus one sub-toggle per action.
     // obsidianEnabled's on-disk default is computed at load time (see
     // LoadSettings) rather than fixed here - migration-safe for an install

@@ -784,11 +784,12 @@ int main() {
     // This is an independent hand-derived sanity check, not a call into the real
     // SettingsContentBottom() (that's a private member of a class defined in
     // main.cpp's anonymous namespace, unreachable from this test binary). As of
-    // the Search category's 3-row layout (File search / Web search / Search
-    // engine - US-016 added the third row) and Obsidian being the last
-    // section in the All view, the real All-category SettingsContentBottom()
-    // with Obsidian disabled (1 visible row) is 683.0f; this block's
-    // constants are kept in sync with that value by hand.
+    // the Search category's 6-row layout (File search / Web search / Search
+    // engine - US-016; File/Web/App search prefix - US-017 added three more
+    // rows) and Obsidian being the last section in the All view, the real
+    // All-category SettingsContentBottom() with Obsidian disabled (1 visible
+    // row) is 824.0f; this block's constants are kept in sync with that
+    // value by hand.
     constexpr float kWindowHeight = 482.0f;
     constexpr float kFooterH = 42.0f;
     constexpr float kSettingsHeaderH = 46.0f;
@@ -796,17 +797,17 @@ int main() {
     constexpr float footerTop = kWindowHeight - kFooterH; // 440.0f
     // The Obsidian section is a one-off, variable-height block, not part of
     // the repeating row grid, so its top is taken directly from source
-    // (header@600, card@620) rather than derived from a generalTop + N*rowH
+    // (header@741, card@761) rather than derived from a generalTop + N*rowH
     // formula. With Obsidian disabled (the default), it's a single row.
-    constexpr float obsidianRowTop = 620.0f;
-    constexpr float obsidianRowBottom = obsidianRowTop + kSettingsRowH;  // 667.0f
-    constexpr float contentBottom = obsidianRowBottom + 16.0f;           // 683.0f (16px bottom padding)
-    constexpr float maxScroll = contentBottom - footerTop;               // 243.0f
+    constexpr float obsidianRowTop = 761.0f;
+    constexpr float obsidianRowBottom = obsidianRowTop + kSettingsRowH;  // 808.0f
+    constexpr float contentBottom = obsidianRowBottom + 16.0f;           // 824.0f (16px bottom padding)
+    constexpr float maxScroll = contentBottom - footerTop;               // 384.0f
 
     Check(footerTop == 440.0f, "footer top is exactly 440px");
     Check(obsidianRowBottom > footerTop,
         "unscrolled Obsidian row (the last row with Obsidian disabled) exceeds footer top, proving scroll is required");
-    Check(maxScroll == 243.0f, "settings max scroll is 243px");
+    Check(maxScroll == 384.0f, "settings max scroll is 384px");
 
     // When scrolled to maxScroll:
     const float scrolledObsidianRowBottom = obsidianRowBottom - maxScroll;
@@ -820,8 +821,8 @@ int main() {
     // In individual categories, content height is well under viewportHeight (394px)
     constexpr float kCategoryShortcutsContentH = 36.0f + 2 * kSettingsRowH + 12.0f; // 142px
     constexpr float kCategorySystemContentH = 36.0f + 5 * kSettingsRowH + 12.0f;    // 283px
-    // US-016 added a third Search row (Search engine); was 2 rows before.
-    constexpr float kCategorySearchContentH = 36.0f + 3 * kSettingsRowH + 12.0f;    // 189px
+    // US-017 added File/Web/App search prefix rows (was 3 rows after US-016).
+    constexpr float kCategorySearchContentH = 36.0f + 6 * kSettingsRowH + 12.0f;    // 330px
     constexpr float kCategoryVaultContentH = 36.0f + 1 * kSettingsRowH + 16.0f;     // 99px
     Check(kCategoryShortcutsContentH < viewportHeight, "Shortcuts category has zero overflow in viewport");
     Check(kCategorySystemContentH < viewportHeight, "System category has zero overflow in viewport");
@@ -1310,16 +1311,27 @@ int main() {
         Check(TryParsePrefix(L"vault standup", L"vault", text) && text == L"standup",
             "TryParsePrefix works with a multi-character prefix, not just a single letter");
 
-        Check(FindPrefixConflict(L"O", L"T", L"a", L"l") == nullptr,
+        Check(FindPrefixConflict({L"O", L"T", L"a", L"l"}) == nullptr,
             "FindPrefixConflict accepts four distinct non-empty prefixes");
-        Check(FindPrefixConflict(L"", L"T", L"a", L"l") != nullptr,
+        Check(FindPrefixConflict({L"", L"T", L"a", L"l"}) != nullptr,
             "FindPrefixConflict rejects an empty prefix");
-        Check(FindPrefixConflict(L"T", L"T", L"a", L"l") != nullptr,
+        Check(FindPrefixConflict({L"T", L"T", L"a", L"l"}) != nullptr,
             "FindPrefixConflict rejects an exact duplicate");
-        Check(FindPrefixConflict(L"t", L"T", L"a", L"l") != nullptr,
+        Check(FindPrefixConflict({L"t", L"T", L"a", L"l"}) != nullptr,
             "FindPrefixConflict rejects a case-insensitive duplicate");
-        Check(FindPrefixConflict(L"O", L"T", L"a", L"a") != nullptr,
+        Check(FindPrefixConflict({L"O", L"T", L"a", L"a"}) != nullptr,
             "FindPrefixConflict rejects a duplicate against the fourth (log) prefix");
+
+        // US-017: all 7 prefixes (Obsidian's o/t/a/l plus web/file/app
+        // search's w/f/p) are validated together through the same function.
+        Check(FindPrefixConflict({L"O", L"T", L"a", L"l", L"w", L"f", L"p"}) == nullptr,
+            "FindPrefixConflict accepts seven distinct non-empty prefixes");
+        Check(FindPrefixConflict({L"O", L"T", L"a", L"l", L"w", L"f", L"W"}) != nullptr,
+            "FindPrefixConflict rejects the app-search prefix case-insensitively duplicating the web-search prefix");
+        Check(FindPrefixConflict({L"O", L"T", L"a", L"l", L"t", L"f", L"p"}) != nullptr,
+            "FindPrefixConflict rejects a new prefix colliding with an existing Obsidian prefix");
+        Check(FindPrefixConflict({L"O", L"T", L"a", L"l", L"w", L"", L"p"}) != nullptr,
+            "FindPrefixConflict rejects an empty prefix among the new web/file/app trio");
     }
 
     {

@@ -647,6 +647,10 @@ private:
                 };
                 readStringSetting(L"WebSearchUrlTemplate", settings_.webSearchUrlTemplate);
                 readStringSetting(L"WebSearchEngineName", settings_.webSearchEngineName);
+                readStringSetting(L"WebSearchPrefix", settings_.webSearchPrefix);
+                readStringSetting(L"WebSearchPillLabel", settings_.webSearchPillLabel);
+                readStringSetting(L"FileSearchPrefix", settings_.fileSearchPrefix);
+                readStringSetting(L"AppSearchPrefix", settings_.appSearchPrefix);
                 readStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
                 readStringSetting(L"VaultSearchPillLabel", settings_.vaultSearchPillLabel);
                 readStringSetting(L"TaskPrefix", settings_.taskPrefix);
@@ -779,6 +783,10 @@ private:
             };
             writeStringSetting(L"WebSearchUrlTemplate", settings_.webSearchUrlTemplate);
             writeStringSetting(L"WebSearchEngineName", settings_.webSearchEngineName);
+            writeStringSetting(L"WebSearchPrefix", settings_.webSearchPrefix);
+            writeStringSetting(L"WebSearchPillLabel", settings_.webSearchPillLabel);
+            writeStringSetting(L"FileSearchPrefix", settings_.fileSearchPrefix);
+            writeStringSetting(L"AppSearchPrefix", settings_.appSearchPrefix);
             writeStringSetting(L"VaultPath", obsidianVaultPath_);
             writeStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
             writeStringSetting(L"VaultSearchPillLabel", settings_.vaultSearchPillLabel);
@@ -1183,49 +1191,52 @@ private:
 
     enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, Obsidian, About };
 
-    // Settings rows 0-3: keyboard shortcuts. 4-6: system. 7-9: search (7
-    // File search, 8 Web search, 9 Search engine - the picker added for
-    // US-016). 10-34: Obsidian (only row 10 is active when
-    // settings_.obsidianEnabled is false - see IsRowInCategory/
-    // ObsidianRowCount). Each of the five *Summary rows is always shown
-    // when Obsidian is enabled; its detail rows only appear while
-    // obsidianExpandedSection_ names that section - see
-    // ObsidianVisibleRows(). 35 is the About tab's one row (not part of
-    // "All" - see IsRowInCategory). 36 is the Reset button, handled as a
+    // Settings rows 0-3: keyboard shortcuts. 4-6: system. 7-12: search (7
+    // File search, 8 Web search, 9 Search engine picker - US-016; 10-12 add
+    // the File/Web/App search prefix fields - US-017). 13-37: Obsidian
+    // (only row 13 is active when settings_.obsidianEnabled is false - see
+    // IsRowInCategory/ObsidianRowCount). Each of the five *Summary rows is
+    // always shown when Obsidian is enabled; its detail rows only appear
+    // while obsidianExpandedSection_ names that section - see
+    // ObsidianVisibleRows(). 38 is the About tab's one row (not part of
+    // "All" - see IsRowInCategory). 39 is the Reset button, handled as a
     // sentinel row rather than a real settings row.
-    // Row 9 (kRowWebSearchEngine) is not part of the Obsidian block below -
-    // it lives in the Search category alongside rows 7-8 - so every
-    // Obsidian row constant shifts by one relative to the original 9-33
-    // numbering.
+    // Rows 9-12 are not part of the Obsidian block below - they live in the
+    // Search category alongside rows 7-8 - so every Obsidian row constant
+    // shifts relative to the row it would otherwise have under a plain
+    // contiguous 0.. numbering.
     static constexpr int kRowWebSearchEngine = 9;
-    static constexpr int kRowObsidianEnabled = 10;
-    static constexpr int kRowVaultPicker = 11;
-    static constexpr int kRowVaultSearchSummary = 12;
-    static constexpr int kRowVaultSearchEnabled = 13;
-    static constexpr int kRowVaultSearchPrefix = 14;
-    static constexpr int kRowVaultSearchPillLabel = 15;
-    static constexpr int kRowTaskSummary = 16;
-    static constexpr int kRowTaskAddEnabled = 17;
-    static constexpr int kRowTaskPrefix = 18;
-    static constexpr int kRowTaskPillLabel = 19;
-    static constexpr int kRowTaskPreviewPrefix = 20;
-    static constexpr int kRowNoteAddSummary = 21;
-    static constexpr int kRowNoteAddEnabled = 22;
-    static constexpr int kRowNoteAddPrefix = 23;
-    static constexpr int kRowNoteAddPillLabel = 24;
-    static constexpr int kRowNoteAddPreviewPrefix = 25;
-    static constexpr int kRowLogSummary = 26;
-    static constexpr int kRowLogEnabled = 27;
-    static constexpr int kRowLogPrefix = 28;
-    static constexpr int kRowLogPillLabel = 29;
-    static constexpr int kRowLogPreviewPrefix = 30;
-    static constexpr int kRowLogHeading = 31;
-    static constexpr int kRowOverridesSummary = 32;
-    static constexpr int kRowDailyNoteFolderOverride = 33;
-    static constexpr int kRowDailyNoteFormatOverride = 34;
-    static constexpr int kRowAboutGithubLink = 35;
-    static constexpr int kSettingsMaxRow = 35;
-    static constexpr int kRowResetToDefaults = 36;
+    static constexpr int kRowFileSearchPrefix = 10;
+    static constexpr int kRowWebSearchPrefix = 11;
+    static constexpr int kRowAppSearchPrefix = 12;
+    static constexpr int kRowObsidianEnabled = 13;
+    static constexpr int kRowVaultPicker = 14;
+    static constexpr int kRowVaultSearchSummary = 15;
+    static constexpr int kRowVaultSearchEnabled = 16;
+    static constexpr int kRowVaultSearchPrefix = 17;
+    static constexpr int kRowVaultSearchPillLabel = 18;
+    static constexpr int kRowTaskSummary = 19;
+    static constexpr int kRowTaskAddEnabled = 20;
+    static constexpr int kRowTaskPrefix = 21;
+    static constexpr int kRowTaskPillLabel = 22;
+    static constexpr int kRowTaskPreviewPrefix = 23;
+    static constexpr int kRowNoteAddSummary = 24;
+    static constexpr int kRowNoteAddEnabled = 25;
+    static constexpr int kRowNoteAddPrefix = 26;
+    static constexpr int kRowNoteAddPillLabel = 27;
+    static constexpr int kRowNoteAddPreviewPrefix = 28;
+    static constexpr int kRowLogSummary = 29;
+    static constexpr int kRowLogEnabled = 30;
+    static constexpr int kRowLogPrefix = 31;
+    static constexpr int kRowLogPillLabel = 32;
+    static constexpr int kRowLogPreviewPrefix = 33;
+    static constexpr int kRowLogHeading = 34;
+    static constexpr int kRowOverridesSummary = 35;
+    static constexpr int kRowDailyNoteFolderOverride = 36;
+    static constexpr int kRowDailyNoteFormatOverride = 37;
+    static constexpr int kRowAboutGithubLink = 38;
+    static constexpr int kSettingsMaxRow = 38;
+    static constexpr int kRowResetToDefaults = 39;
 
     // Which of the five Obsidian action blocks is currently expanded, or
     // -1 if all are collapsed. A single int gives accordion behavior for
@@ -1321,7 +1332,7 @@ private:
         }
         if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
-        if (cat == SettingsCategory::Search) return row >= 7 && row <= kRowWebSearchEngine;
+        if (cat == SettingsCategory::Search) return row >= 7 && row <= kRowAppSearchPrefix;
         if (cat == SettingsCategory::Obsidian) return ObsidianRowRank(row) >= 0;
         if (cat == SettingsCategory::About) return row == kRowAboutGithubLink;
         return false;
@@ -1339,7 +1350,7 @@ private:
     int LastRowInCategory(SettingsCategory cat) const {
         if (cat == SettingsCategory::Shortcuts) return 3;
         if (cat == SettingsCategory::System) return 6;
-        if (cat == SettingsCategory::Search) return kRowWebSearchEngine;
+        if (cat == SettingsCategory::Search) return kRowAppSearchPrefix;
         if (cat == SettingsCategory::About) return kRowAboutGithubLink;
         // Obsidian, and the fallback used for "All" (whose last row is
         // whatever the Obsidian section's current last row is).
@@ -1395,17 +1406,18 @@ private:
 
     float SettingsContentBottom() const {
         if (settingsCategory_ == SettingsCategory::All) {
-            // 620 = fixed header offset for the OBSIDIAN card in the All view
-            // (Search card start 441 + 3 rows * 47 + 38 gap, see the Search
+            // 761 = fixed header offset for the OBSIDIAN card in the All view
+            // (Search card start 441 + 6 rows * 47 + 38 gap, see the Search
             // branch below); +16 bottom padding.
-            return 620.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
+            return 761.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 240.0f;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 193.0f;
         } else if (settingsCategory_ == SettingsCategory::Search) {
-            // 3 rows (File search, Web search, Search engine - US-016) + 16 bottom padding.
-            return 193.0f;
+            // 6 rows (File search, Web search, Search engine - US-016; File/Web/App
+            // search prefix - US-017) + 16 bottom padding.
+            return 334.0f;
         } else if (settingsCategory_ == SettingsCategory::Obsidian) {
             // 36 header offset + N rows + 16 bottom padding.
             return 36.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
@@ -1433,8 +1445,8 @@ private:
             if (row < 4) return 36.0f + row * kSettingsRowHeight;
             if (row < 7) return 262.0f + (row - 4) * kSettingsRowHeight;
             if (row < kRowObsidianEnabled) return 441.0f + (row - 7) * kSettingsRowHeight;
-            // Obsidian section, All-view only: header@600, card@620.
-            return 620.0f + ObsidianRowRank(row) * kSettingsRowHeight;
+            // Obsidian section, All-view only: header@741, card@761.
+            return 761.0f + ObsidianRowRank(row) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 36.0f + row * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::System) {
@@ -1488,7 +1500,7 @@ private:
             if (row == 0) sectionHeaderTop = 16.0f;
             else if (row == 4) sectionHeaderTop = 242.0f;
             else if (row == 7) sectionHeaderTop = 421.0f;
-            else if (row == kRowObsidianEnabled) sectionHeaderTop = 600.0f;
+            else if (row == kRowObsidianEnabled) sectionHeaderTop = 741.0f;
         } else {
             if (row == 0 || row == 4 || row == 7 || row == kRowObsidianEnabled || row == kRowAboutGithubLink) sectionHeaderTop = 16.0f;
         }
@@ -1609,7 +1621,25 @@ private:
         if (apps_.size() > baseAppsCount_) {
             apps_.resize(baseAppsCount_);
         }
-        const std::wstring query = Normalize(input_.text);
+        // US-017: "f "/"p " narrow this pass to just files or just apps by
+        // stripping the prefix and gating which of the two ranking sources
+        // below run. Only attempted when the underlying feature is on (File
+        // search for "f"; "p" has no toggle) - otherwise the raw text is
+        // scored normally below, same as Task/Note/Log when their own
+        // toggle is off.
+        std::wstring scopedText = input_.text;
+        bool fileSearchOnly = false;
+        bool appSearchOnly = false;
+        std::wstring scopedRemainder;
+        if (settings_.enableFileSearch &&
+            leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.fileSearchPrefix, scopedRemainder)) {
+            fileSearchOnly = true;
+            scopedText = scopedRemainder;
+        } else if (leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.appSearchPrefix, scopedRemainder)) {
+            appSearchOnly = true;
+            scopedText = scopedRemainder;
+        }
+        const std::wstring query = Normalize(scopedText);
         if (input_.text.empty()) {
             for (size_t index : recent_) {
                 if (index < apps_.size()) results_.push_back(index);
@@ -1620,16 +1650,18 @@ private:
         } else if (!query.empty()) {
             std::vector<RankedResult> ranked;
             ranked.reserve(apps_.size());
-            for (size_t i = 0; i < apps_.size(); ++i) {
-                int recencyRank = -1;
-                auto it = std::find(recent_.begin(), recent_.end(), i);
-                if (it != recent_.end()) {
-                    recencyRank = static_cast<int>(std::distance(recent_.begin(), it));
+            if (!fileSearchOnly) {
+                for (size_t i = 0; i < apps_.size(); ++i) {
+                    int recencyRank = -1;
+                    auto it = std::find(recent_.begin(), recent_.end(), i);
+                    if (it != recent_.end()) {
+                        recencyRank = static_cast<int>(std::distance(recent_.begin(), it));
+                    }
+                    const int score = takeoff::ScoreApp(apps_[i].normalizedName, apps_[i].aliases, query, recencyRank);
+                    if (score >= 0) ranked.push_back({i, score});
                 }
-                const int score = takeoff::ScoreApp(apps_[i].normalizedName, apps_[i].aliases, query, recencyRank);
-                if (score >= 0) ranked.push_back({i, score});
             }
-            if (settings_.enableFileSearch) {
+            if (!appSearchOnly && settings_.enableFileSearch) {
                 const auto fileResults = takeoff::FileIndex::Instance().Search(query, 30);
                 for (const auto& item : fileResults) {
                     AppEntry entry;
@@ -1749,6 +1781,22 @@ private:
             constexpr int kStrongMatchThreshold = 9000;
             const size_t insertPos = (topAppScore >= kStrongMatchThreshold) ? 1 : 0;
             results_.insert(results_.begin() + std::min(insertPos, results_.size()), logIdx);
+        }
+        std::wstring webSearchText;
+        if (settings_.enableWebSearch &&
+            leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.webSearchPrefix, webSearchText)) {
+            AppEntry entry;
+            entry.category = AppCategory::WebSearch;
+            entry.parameters = webSearchText;
+            entry.name = L"Search " + settings_.webSearchEngineName + L" for “" + webSearchText + L"”";
+            entry.iconPath = L"msedge.exe";
+            entry.normalizedName = Normalize(entry.name);
+            const size_t webSearchIdx = apps_.size();
+            apps_.push_back(std::move(entry));
+            // Same strong-app-match guard as TaskAdd above.
+            constexpr int kStrongMatchThreshold = 9000;
+            const size_t insertPos = (topAppScore >= kStrongMatchThreshold) ? 1 : 0;
+            results_.insert(results_.begin() + std::min(insertPos, results_.size()), webSearchIdx);
         }
         std::wstring noteQuery;
         if (settings_.obsidianEnabled && settings_.vaultSearchEnabled &&
@@ -1990,6 +2038,9 @@ private:
     std::wstring* SettingsTextFieldForRow(int row) {
         switch (row) {
         case kRowWebSearchEngine: return &settings_.webSearchUrlTemplate;
+        case kRowFileSearchPrefix: return &settings_.fileSearchPrefix;
+        case kRowWebSearchPrefix: return &settings_.webSearchPrefix;
+        case kRowAppSearchPrefix: return &settings_.appSearchPrefix;
         case kRowVaultSearchPrefix: return &settings_.vaultSearchPrefix;
         case kRowVaultSearchPillLabel: return &settings_.vaultSearchPillLabel;
         case kRowTaskPrefix: return &settings_.taskPrefix;
@@ -2010,7 +2061,8 @@ private:
 
     bool IsPrefixRow(int row) const {
         return row == kRowVaultSearchPrefix || row == kRowTaskPrefix || row == kRowNoteAddPrefix ||
-            row == kRowLogPrefix;
+            row == kRowLogPrefix || row == kRowWebSearchPrefix || row == kRowFileSearchPrefix ||
+            row == kRowAppSearchPrefix;
     }
 
     void BeginEditingRow(int row, const std::wstring& currentValue) {
@@ -2035,12 +2087,19 @@ private:
             std::wstring taskCandidate = settings_.taskPrefix;
             std::wstring noteAddCandidate = settings_.noteAddPrefix;
             std::wstring logCandidate = settings_.logPrefix;
+            std::wstring webSearchCandidate = settings_.webSearchPrefix;
+            std::wstring fileSearchCandidate = settings_.fileSearchPrefix;
+            std::wstring appSearchCandidate = settings_.appSearchPrefix;
             if (editingRow_ == kRowVaultSearchPrefix) vaultSearchCandidate = settingsEdit_.text;
             else if (editingRow_ == kRowTaskPrefix) taskCandidate = settingsEdit_.text;
             else if (editingRow_ == kRowNoteAddPrefix) noteAddCandidate = settingsEdit_.text;
             else if (editingRow_ == kRowLogPrefix) logCandidate = settingsEdit_.text;
+            else if (editingRow_ == kRowWebSearchPrefix) webSearchCandidate = settingsEdit_.text;
+            else if (editingRow_ == kRowFileSearchPrefix) fileSearchCandidate = settingsEdit_.text;
+            else if (editingRow_ == kRowAppSearchPrefix) appSearchCandidate = settingsEdit_.text;
             if (const wchar_t* error = leanlauncher::obsidian::FindPrefixConflict(
-                    vaultSearchCandidate, taskCandidate, noteAddCandidate, logCandidate)) {
+                    {vaultSearchCandidate, taskCandidate, noteAddCandidate, logCandidate,
+                     webSearchCandidate, fileSearchCandidate, appSearchCandidate})) {
                 settingsStatus_ = error;
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return;  // stay in edit mode so the user can fix it
@@ -2719,6 +2778,10 @@ private:
             }
             return;
         }
+        if (app.category == takeoff::AppCategory::WebSearch) {
+            OpenWebSearch(app.parameters);
+            return;
+        }
         if (app.category == takeoff::AppCategory::NoteJump) {
             if (app.path.empty()) {
                 OpenSettings(SettingsCategory::Obsidian);
@@ -2932,6 +2995,25 @@ private:
                     ShellExecuteW(nullptr, L"open", app.path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 }
                 Hide();
+                return;
+            }
+        }
+        if (app.category == takeoff::AppCategory::WebSearch) {
+            if (action == 0) {
+                LaunchSelected(false);
+                return;
+            } else if (action == 1) {
+                const bool copied = CopyText(app.parameters);
+                status_ = copied ? L"Query text copied" : L"Clipboard is busy. Try again.";
+                ResetCaret();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return;
+            } else if (action == 2) {
+                const std::wstring url = takeoff::BuildSearchUrl(settings_.webSearchUrlTemplate, app.parameters);
+                const bool copied = CopyText(url);
+                status_ = copied ? L"Search URL copied" : L"Clipboard is busy. Try again.";
+                ResetCaret();
+                InvalidateRect(hwnd_, nullptr, FALSE);
                 return;
             }
         }
@@ -3990,7 +4072,8 @@ private:
                     : (app.category == takeoff::AppCategory::TaskAdd ? settings_.taskPillLabel.c_str()
                     : (app.category == takeoff::AppCategory::NoteAdd ? settings_.noteAddPillLabel.c_str()
                     : (app.category == takeoff::AppCategory::LogAdd ? settings_.logPillLabel.c_str()
-                    : (app.category == takeoff::AppCategory::NoteJump ? settings_.vaultSearchPillLabel.c_str() : L"Application")))))));
+                    : (app.category == takeoff::AppCategory::NoteJump ? settings_.vaultSearchPillLabel.c_str()
+                    : (app.category == takeoff::AppCategory::WebSearch ? settings_.webSearchPillLabel.c_str() : L"Application"))))))));
                 Text(categoryLabel,
                     D2D1::RectF(width_ - 154, top, width_ - 28, top + 40), hintFormat_.Get(),
                     highContrast_ && selected ? textColor : Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -4042,7 +4125,8 @@ private:
             app.category == takeoff::AppCategory::TaskAdd ||
             app.category == takeoff::AppCategory::NoteAdd ||
             app.category == takeoff::AppCategory::NoteJump ||
-            app.category == takeoff::AppCategory::LogAdd) return false;
+            app.category == takeoff::AppCategory::LogAdd ||
+            app.category == takeoff::AppCategory::WebSearch) return false;
         if (settings_.administratorHotkey.disabled) return false;
         const float top = FooterTop();
         if (y < top || y > height_) return false;
@@ -4259,6 +4343,10 @@ private:
                 Text(L"Open in Obsidian", D2D1::RectF(24, top, 156, height_),
                     hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
                 Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
+            } else if (app.category == takeoff::AppCategory::WebSearch) {
+                Text(L"Search in browser", D2D1::RectF(24, top, 156, height_),
+                    hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
+                Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
             } else {
                 const bool adminHover = mouseKnown_ && PointInAdminAction(mouseX_, mouseY_);
                 Text(L"Open as Administrator", D2D1::RectF(24, top, 156, height_),
@@ -4312,6 +4400,7 @@ private:
         const bool isNoteAdd = (app.category == takeoff::AppCategory::NoteAdd);
         const bool isLogAdd = (app.category == takeoff::AppCategory::LogAdd);
         const bool isNoteJump = (app.category == takeoff::AppCategory::NoteJump);
+        const bool isWebSearch = (app.category == takeoff::AppCategory::WebSearch);
         const bool isFileOrFolder = (app.category == takeoff::AppCategory::File ||
                                      app.category == takeoff::AppCategory::Folder);
         const wchar_t* appLabels[] = {L"Open as Administrator", L"Copy app name", L"Copy launch path"};
@@ -4321,12 +4410,14 @@ private:
         const wchar_t* noteAddLabels[] = {L"Add to note", L"Copy text", L"Open today's note"};
         const wchar_t* logAddLabels[] = {L"Add log entry", L"Copy text", L"Open today's note"};
         const wchar_t* noteLabels[] = {L"Open in Obsidian", L"Copy note title", L"Reveal in Explorer"};
+        const wchar_t* webSearchLabels[] = {L"Search in browser", L"Copy query text", L"Copy search URL"};
         const wchar_t** labels = isCalc ? calcLabels
             : (isTaskAdd ? taskLabels
             : (isNoteAdd ? noteAddLabels
             : (isLogAdd ? logAddLabels
             : (isNoteJump ? noteLabels
-            : (isFileOrFolder ? fileLabels : appLabels)))));
+            : (isWebSearch ? webSearchLabels
+            : (isFileOrFolder ? fileLabels : appLabels))))));
         for (int i = 0; i < 3; ++i) {
             const float top = rect.top + 32 + i * 36;
             const auto row = D2D1::RectF(rect.left + 6, top, rect.right - 6, top + 34);
@@ -4688,7 +4779,7 @@ private:
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Search) {
             const float hY = (settingsCategory_ == SettingsCategory::All) ? 421.0f : 16.0f;
             const float cY = (settingsCategory_ == SettingsCategory::All) ? 441.0f : 36.0f;
-            drawCard(L"SEARCH & FEATURES", hY, cY, 3);
+            drawCard(L"SEARCH & FEATURES", hY, cY, 6);
 
             DrawSettingsRow(7, cY + offsetY, L"File search",
                 L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
@@ -4699,11 +4790,20 @@ private:
                 webSearchDropdownOpen_ ? L"Tap to collapse"
                     : L"Search engine used for the \"Web search\" fallback",
                 settings_.webSearchEngineName, false, false, false, true);
+            DrawSettingsRow(kRowFileSearchPrefix, cY + 3 * kSettingsRowHeight + offsetY, L"File search prefix",
+                L"Type this followed by a space to show only files and folders",
+                settings_.fileSearchPrefix, false, false, false, true);
+            DrawSettingsRow(kRowWebSearchPrefix, cY + 4 * kSettingsRowHeight + offsetY, L"Web search prefix",
+                L"Type this followed by a space to force a \"" + settings_.webSearchEngineName + L"\" search",
+                settings_.webSearchPrefix, false, false, false, true);
+            DrawSettingsRow(kRowAppSearchPrefix, cY + 5 * kSettingsRowHeight + offsetY, L"App search prefix",
+                L"Type this followed by a space to show only installed apps",
+                settings_.appSearchPrefix, false, false, false, true);
         }
 
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Obsidian) {
-            const float hY = (settingsCategory_ == SettingsCategory::All) ? 600.0f : 16.0f;
-            const float cY = (settingsCategory_ == SettingsCategory::All) ? 620.0f : 36.0f;
+            const float hY = (settingsCategory_ == SettingsCategory::All) ? 741.0f : 16.0f;
+            const float cY = (settingsCategory_ == SettingsCategory::All) ? 761.0f : 36.0f;
             const auto& visibleRows = ObsidianVisibleRows();
             drawCard(L"OBSIDIAN", hY, cY, static_cast<int>(visibleRows.size()));
             for (size_t i = 0; i < visibleRows.size(); ++i) {
