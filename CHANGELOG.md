@@ -10,6 +10,15 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.2.2] - 2026-09-18
+
+### Fixed
+- **Search no longer hides apps whose brand name fuses "uninstall(er)" without a space** (e.g. BC Uninstaller) - the filter meant to hide auto-generated "Uninstall \<App\>" helper shortcuts matched on an unanchored substring instead of a word boundary, so an app's own primary shortcut could be mistaken for its uninstall helper and excluded from the index entirely
+
+### Changed
+- Search placeholder text now varies based on whether Obsidian integration is enabled ("Launch apps, search files, capture thoughts…" vs "Launch apps, search files…"), so it never implies capture prefixes that aren't active
+- Internal: closed the CMake/MSBuild Release binary-size gap (~17KB down to ~0.5KB) by adding the `/sdl` compiler flag to `CMakeLists.txt` that the hand-maintained `.vcxproj` already had
+
 ## [1.2.1] - 2026-09-17
 
 A full-codebase security and code review round (2 security findings, 4 high, 8 medium, and 6 low-severity code review findings) - no user-facing feature changes, but several fixes affect behavior users could actually notice.
