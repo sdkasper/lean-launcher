@@ -85,6 +85,9 @@ int main() {
     Check(!IsUninstaller(L"universal"), "universal is not uninstaller");
     Check(!IsUninstaller(L"unity"), "unity is not uninstaller");
     Check(!IsUninstaller(L"notepad"), "notepad is not uninstaller");
+    Check(!IsUninstaller(L"BCUninstaller"), "BCUninstaller (fused brand name) is not filtered as uninstaller");
+    Check(!IsUninstaller(L"IObitUninstaller"), "IObitUninstaller (fused brand name) is not filtered as uninstaller");
+    Check(IsUninstaller(L"Uninstall BCUninstaller"), "Uninstall BCUninstaller helper shortcut is still filtered");
 
     // Helper / internal binary filtering checks
     Check(IsHelperBinary(L"crashpad_handler"), "crashpad_handler filtered");

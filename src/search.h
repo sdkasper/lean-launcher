@@ -332,11 +332,20 @@ public:
 
 inline bool IsUninstaller(std::wstring_view name) {
     const std::wstring normalized = Normalize(name);
-    return normalized.rfind(L"uninstall", 0) == 0 ||
-           normalized.rfind(L"unins", 0) == 0 ||
-           normalized.rfind(L"remove ", 0) == 0 ||
-           normalized.find(L"uninstaller") != std::wstring::npos ||
-           normalized == L"uninst";
+    // Word-boundary checks, not raw substring: an app whose own brand name
+    // fuses "uninstall(er)" with no separating space (e.g. "BCUninstaller",
+    // "IObitUninstaller") is a real, launchable app - not an installer's
+    // auto-generated "Uninstall <App>" / "<App> Uninstaller" helper shortcut.
+    if (normalized == L"uninstall" || normalized == L"uninst") return true;
+    if (normalized.rfind(L"unins", 0) == 0) return true;
+    if (normalized.rfind(L"uninstall ", 0) == 0) return true;
+    if (normalized.rfind(L"remove ", 0) == 0) return true;
+    const size_t spacePos = normalized.rfind(L' ');
+    if (spacePos != std::wstring::npos &&
+        normalized.compare(spacePos + 1, std::wstring::npos, L"uninstaller") == 0) {
+        return true;
+    }
+    return false;
 }
 
 inline bool IsHelperBinary(std::wstring_view name) {
