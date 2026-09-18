@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.4.1] - 2026-09-18
+
+### Fixed
+- **In-app version display and update-check comparison were stuck at 1.2.2** - `kAppVersion` in `src/updates.h` is a separate hardcoded constant from the `CMakeLists.txt`/`LeanLauncher.rc` version and was missed by the last two version bumps (v1.3.0, v1.4.0), so the Settings footer and the `checkForUpdates` newer-version comparison were both reading a stale value. Now in sync.
+
 ## [1.4.0] - 2026-09-18
 
 ### Added
