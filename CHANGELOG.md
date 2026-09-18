@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.3.0] - 2026-09-18
+
+### Added
+- **Configurable web search engine** - the "Web search" fallback now supports Google, Bing, DuckDuckGo, Startpage, Ecosia, Brave, Kagi, or a custom search URL, picked from a new "Search engine" row in Settings > Search. A custom URL template must contain a literal `{query}` token and use `http://`/`https://`; its display name is auto-derived from the hostname. Existing installs default to Google with no behavior change.
+
 ## [1.2.2] - 2026-09-18
 
 ### Fixed

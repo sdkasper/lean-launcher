@@ -645,6 +645,8 @@ private:
                         target = strBuf;
                     }
                 };
+                readStringSetting(L"WebSearchUrlTemplate", settings_.webSearchUrlTemplate);
+                readStringSetting(L"WebSearchEngineName", settings_.webSearchEngineName);
                 readStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
                 readStringSetting(L"VaultSearchPillLabel", settings_.vaultSearchPillLabel);
                 readStringSetting(L"TaskPrefix", settings_.taskPrefix);
@@ -775,6 +777,8 @@ private:
                     reinterpret_cast<const BYTE*>(value.c_str()),
                     static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS && saved;
             };
+            writeStringSetting(L"WebSearchUrlTemplate", settings_.webSearchUrlTemplate);
+            writeStringSetting(L"WebSearchEngineName", settings_.webSearchEngineName);
             writeStringSetting(L"VaultPath", obsidianVaultPath_);
             writeStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
             writeStringSetting(L"VaultSearchPillLabel", settings_.vaultSearchPillLabel);
@@ -1179,42 +1183,49 @@ private:
 
     enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, Obsidian, About };
 
-    // Settings rows 0-3: keyboard shortcuts. 4-6: system. 7-8: search.
-    // 9-33: Obsidian (only row 9 is active when settings_.obsidianEnabled is
-    // false - see IsRowInCategory/ObsidianRowCount). Each of the five
-    // *Summary rows is always shown when Obsidian is enabled; its detail
-    // rows only appear while obsidianExpandedSection_ names that section -
-    // see ObsidianVisibleRows(). 34 is the About tab's one row (not part of
-    // "All" - see IsRowInCategory). 35 is the Reset button, handled as a
+    // Settings rows 0-3: keyboard shortcuts. 4-6: system. 7-9: search (7
+    // File search, 8 Web search, 9 Search engine - the picker added for
+    // US-016). 10-34: Obsidian (only row 10 is active when
+    // settings_.obsidianEnabled is false - see IsRowInCategory/
+    // ObsidianRowCount). Each of the five *Summary rows is always shown
+    // when Obsidian is enabled; its detail rows only appear while
+    // obsidianExpandedSection_ names that section - see
+    // ObsidianVisibleRows(). 35 is the About tab's one row (not part of
+    // "All" - see IsRowInCategory). 36 is the Reset button, handled as a
     // sentinel row rather than a real settings row.
-    static constexpr int kRowObsidianEnabled = 9;
-    static constexpr int kRowVaultPicker = 10;
-    static constexpr int kRowVaultSearchSummary = 11;
-    static constexpr int kRowVaultSearchEnabled = 12;
-    static constexpr int kRowVaultSearchPrefix = 13;
-    static constexpr int kRowVaultSearchPillLabel = 14;
-    static constexpr int kRowTaskSummary = 15;
-    static constexpr int kRowTaskAddEnabled = 16;
-    static constexpr int kRowTaskPrefix = 17;
-    static constexpr int kRowTaskPillLabel = 18;
-    static constexpr int kRowTaskPreviewPrefix = 19;
-    static constexpr int kRowNoteAddSummary = 20;
-    static constexpr int kRowNoteAddEnabled = 21;
-    static constexpr int kRowNoteAddPrefix = 22;
-    static constexpr int kRowNoteAddPillLabel = 23;
-    static constexpr int kRowNoteAddPreviewPrefix = 24;
-    static constexpr int kRowLogSummary = 25;
-    static constexpr int kRowLogEnabled = 26;
-    static constexpr int kRowLogPrefix = 27;
-    static constexpr int kRowLogPillLabel = 28;
-    static constexpr int kRowLogPreviewPrefix = 29;
-    static constexpr int kRowLogHeading = 30;
-    static constexpr int kRowOverridesSummary = 31;
-    static constexpr int kRowDailyNoteFolderOverride = 32;
-    static constexpr int kRowDailyNoteFormatOverride = 33;
-    static constexpr int kRowAboutGithubLink = 34;
-    static constexpr int kSettingsMaxRow = 34;
-    static constexpr int kRowResetToDefaults = 35;
+    // Row 9 (kRowWebSearchEngine) is not part of the Obsidian block below -
+    // it lives in the Search category alongside rows 7-8 - so every
+    // Obsidian row constant shifts by one relative to the original 9-33
+    // numbering.
+    static constexpr int kRowWebSearchEngine = 9;
+    static constexpr int kRowObsidianEnabled = 10;
+    static constexpr int kRowVaultPicker = 11;
+    static constexpr int kRowVaultSearchSummary = 12;
+    static constexpr int kRowVaultSearchEnabled = 13;
+    static constexpr int kRowVaultSearchPrefix = 14;
+    static constexpr int kRowVaultSearchPillLabel = 15;
+    static constexpr int kRowTaskSummary = 16;
+    static constexpr int kRowTaskAddEnabled = 17;
+    static constexpr int kRowTaskPrefix = 18;
+    static constexpr int kRowTaskPillLabel = 19;
+    static constexpr int kRowTaskPreviewPrefix = 20;
+    static constexpr int kRowNoteAddSummary = 21;
+    static constexpr int kRowNoteAddEnabled = 22;
+    static constexpr int kRowNoteAddPrefix = 23;
+    static constexpr int kRowNoteAddPillLabel = 24;
+    static constexpr int kRowNoteAddPreviewPrefix = 25;
+    static constexpr int kRowLogSummary = 26;
+    static constexpr int kRowLogEnabled = 27;
+    static constexpr int kRowLogPrefix = 28;
+    static constexpr int kRowLogPillLabel = 29;
+    static constexpr int kRowLogPreviewPrefix = 30;
+    static constexpr int kRowLogHeading = 31;
+    static constexpr int kRowOverridesSummary = 32;
+    static constexpr int kRowDailyNoteFolderOverride = 33;
+    static constexpr int kRowDailyNoteFormatOverride = 34;
+    static constexpr int kRowAboutGithubLink = 35;
+    static constexpr int kSettingsMaxRow = 35;
+    static constexpr int kRowResetToDefaults = 36;
 
     // Which of the five Obsidian action blocks is currently expanded, or
     // -1 if all are collapsed. A single int gives accordion behavior for
@@ -1310,7 +1321,7 @@ private:
         }
         if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
-        if (cat == SettingsCategory::Search) return row >= 7 && row <= 8;
+        if (cat == SettingsCategory::Search) return row >= 7 && row <= kRowWebSearchEngine;
         if (cat == SettingsCategory::Obsidian) return ObsidianRowRank(row) >= 0;
         if (cat == SettingsCategory::About) return row == kRowAboutGithubLink;
         return false;
@@ -1328,7 +1339,7 @@ private:
     int LastRowInCategory(SettingsCategory cat) const {
         if (cat == SettingsCategory::Shortcuts) return 3;
         if (cat == SettingsCategory::System) return 6;
-        if (cat == SettingsCategory::Search) return 8;
+        if (cat == SettingsCategory::Search) return kRowWebSearchEngine;
         if (cat == SettingsCategory::About) return kRowAboutGithubLink;
         // Obsidian, and the fallback used for "All" (whose last row is
         // whatever the Obsidian section's current last row is).
@@ -1384,15 +1395,17 @@ private:
 
     float SettingsContentBottom() const {
         if (settingsCategory_ == SettingsCategory::All) {
-            // 573 = fixed header offset for the OBSIDIAN card in the All view
-            // (unchanged from the original 1-row layout); +16 bottom padding.
-            return 573.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
+            // 620 = fixed header offset for the OBSIDIAN card in the All view
+            // (Search card start 441 + 3 rows * 47 + 38 gap, see the Search
+            // branch below); +16 bottom padding.
+            return 620.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 240.0f;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 193.0f;
         } else if (settingsCategory_ == SettingsCategory::Search) {
-            return 146.0f;
+            // 3 rows (File search, Web search, Search engine - US-016) + 16 bottom padding.
+            return 193.0f;
         } else if (settingsCategory_ == SettingsCategory::Obsidian) {
             // 36 header offset + N rows + 16 bottom padding.
             return 36.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
@@ -1419,9 +1432,9 @@ private:
         if (settingsCategory_ == SettingsCategory::All) {
             if (row < 4) return 36.0f + row * kSettingsRowHeight;
             if (row < 7) return 262.0f + (row - 4) * kSettingsRowHeight;
-            if (row < 9) return 441.0f + (row - 7) * kSettingsRowHeight;
-            // Obsidian section, All-view only: header@553, card@573.
-            return 573.0f + ObsidianRowRank(row) * kSettingsRowHeight;
+            if (row < kRowObsidianEnabled) return 441.0f + (row - 7) * kSettingsRowHeight;
+            // Obsidian section, All-view only: header@600, card@620.
+            return 620.0f + ObsidianRowRank(row) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 36.0f + row * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::System) {
@@ -1456,6 +1469,7 @@ private:
         if (newScroll != settingsScroll_) {
             settingsScroll_ = newScroll;
             if (vaultDropdownOpen_) CloseVaultDropdown();
+            if (webSearchDropdownOpen_) CloseWebSearchDropdown();
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
     }
@@ -1474,7 +1488,7 @@ private:
             if (row == 0) sectionHeaderTop = 16.0f;
             else if (row == 4) sectionHeaderTop = 242.0f;
             else if (row == 7) sectionHeaderTop = 421.0f;
-            else if (row == kRowObsidianEnabled) sectionHeaderTop = 553.0f;
+            else if (row == kRowObsidianEnabled) sectionHeaderTop = 600.0f;
         } else {
             if (row == 0 || row == 4 || row == 7 || row == kRowObsidianEnabled || row == kRowAboutGithubLink) sectionHeaderTop = 16.0f;
         }
@@ -1501,6 +1515,8 @@ private:
         editingRow_ = -1;
         vaultDropdownOpen_ = false;
         vaultDropdownHighlight_ = -1;
+        webSearchDropdownOpen_ = false;
+        webSearchDropdownHighlight_ = -1;
         obsidianExpandedSection_ = -1;
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
@@ -1533,6 +1549,8 @@ private:
         editingRow_ = -1;
         vaultDropdownOpen_ = false;
         vaultDropdownHighlight_ = -1;
+        webSearchDropdownOpen_ = false;
+        webSearchDropdownHighlight_ = -1;
         obsidianExpandedSection_ = -1;
         settingsScroll_ = 0.0f;
         settingsDraggingScroll_ = false;
@@ -1794,6 +1812,8 @@ private:
         editingRow_ = -1;
         vaultDropdownOpen_ = false;
         vaultDropdownHighlight_ = -1;
+        webSearchDropdownOpen_ = false;
+        webSearchDropdownHighlight_ = -1;
         obsidianExpandedSection_ = -1;
         settingsStatus_.clear();
         settings_ = quicklaunch::Settings{};
@@ -1876,6 +1896,78 @@ private:
         return -1;
     }
 
+    // Screen-space Y where the web search engine dropdown list begins.
+    // Unlike VaultDropdownTop() (which never has more than a handful of
+    // real-world entries), this list always has kWebSearchPresetCount + 1
+    // fixed entries and the "Search engine" row sits near the bottom of a
+    // 3-row category - directly below the row overflows past FooterTop()
+    // with no way to scroll to the last items. Clamp so the whole list
+    // stays inside [viewportTop, viewportBottom], sliding it up over
+    // whatever rows are above (same "drawn on top" philosophy as the vault
+    // dropdown) rather than letting it run off the bottom of the window.
+    float WebSearchDropdownTop() const {
+        const float desired =
+            SettingsRowTop(kRowWebSearchEngine) + kSettingsRowHeight + (kSettingsHeaderHeight - settingsScroll_);
+        const int itemCount = static_cast<int>(takeoff::kWebSearchPresetCount) + 1;
+        const float listHeight = static_cast<float>(itemCount) * kVaultDropdownItemHeight;
+        const float viewportTop = kSettingsHeaderHeight;
+        const float viewportBottom = FooterTop();
+        return std::clamp(desired, viewportTop, (std::max)(viewportTop, viewportBottom - listHeight));
+    }
+
+    void OpenWebSearchDropdown() {
+        if (editingRow_ >= 0) CancelEditingRow();
+        webSearchDropdownOpen_ = true;
+        const int presetIndex = takeoff::FindWebSearchPresetIndex(settings_.webSearchUrlTemplate);
+        webSearchDropdownHighlight_ = (presetIndex >= 0) ? presetIndex : static_cast<int>(takeoff::kWebSearchPresetCount);
+        settingsStatus_.clear();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void CloseWebSearchDropdown() {
+        webSearchDropdownOpen_ = false;
+        webSearchDropdownHighlight_ = -1;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    // index in [0, kWebSearchPresetCount) picks a preset immediately; index
+    // == kWebSearchPresetCount ("Custom") opens inline text edit on the
+    // current template instead of applying anything yet - matching AC3's
+    // "Selecting Custom reveals a text field", not an immediate save.
+    void SelectWebSearchDropdownItem(int index) {
+        const int presetCount = static_cast<int>(takeoff::kWebSearchPresetCount);
+        if (index < 0 || index > presetCount) {
+            CloseWebSearchDropdown();
+            return;
+        }
+        CloseWebSearchDropdown();
+        if (index == presetCount) {
+            BeginEditingRow(kRowWebSearchEngine, settings_.webSearchUrlTemplate);
+            return;
+        }
+        settings_.webSearchUrlTemplate = takeoff::kWebSearchPresets[index].urlTemplate;
+        settings_.webSearchEngineName = takeoff::kWebSearchPresets[index].name;
+        SaveSettings();
+    }
+
+    // Index into [0, kWebSearchPresetCount] ("Custom" is the trailing
+    // entry) for a point inside the open dropdown list, or -1 if the point
+    // misses the list (including when it's closed). Mirrors VaultDropdownItemAtPoint.
+    int WebSearchDropdownItemAtPoint(float x, float y) const {
+        if (!webSearchDropdownOpen_) return -1;
+        if (x < 16.0f || x > width_ - 16.0f) return -1;
+        if (y < kSettingsHeaderHeight || y >= FooterTop()) return -1;
+        const float listTop = WebSearchDropdownTop();
+        const int itemCount = static_cast<int>(takeoff::kWebSearchPresetCount) + 1;
+        for (int i = 0; i < itemCount; ++i) {
+            const float itemTop = listTop + static_cast<float>(i) * kVaultDropdownItemHeight;
+            if (y >= itemTop && y < itemTop + kVaultDropdownItemHeight) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     // Expands the given section, collapsing whichever other one was open;
     // expanding the already-expanded section collapses it instead.
     void ToggleObsidianSection(int section) {
@@ -1897,6 +1989,7 @@ private:
     // ChangeSetting/BeginEditingRow/CommitEditingRow can't drift apart.
     std::wstring* SettingsTextFieldForRow(int row) {
         switch (row) {
+        case kRowWebSearchEngine: return &settings_.webSearchUrlTemplate;
         case kRowVaultSearchPrefix: return &settings_.vaultSearchPrefix;
         case kRowVaultSearchPillLabel: return &settings_.vaultSearchPillLabel;
         case kRowTaskPrefix: return &settings_.taskPrefix;
@@ -1953,9 +2046,20 @@ private:
                 return;  // stay in edit mode so the user can fix it
             }
         }
+        if (editingRow_ == kRowWebSearchEngine) {
+            if (const wchar_t* error = takeoff::FindWebSearchUrlError(settingsEdit_.text)) {
+                settingsStatus_ = error;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return;  // stay in edit mode so the user can fix it
+            }
+        }
         const bool wasLogHeadingRow = (editingRow_ == kRowLogHeading);
+        const bool wasWebSearchEngineRow = (editingRow_ == kRowWebSearchEngine);
         *field = settingsEdit_.text;
         editingRow_ = -1;
+        if (wasWebSearchEngineRow) {
+            settings_.webSearchEngineName = takeoff::DeriveSearchEngineName(*field);
+        }
         if (wasLogHeadingRow && leanlauncher::obsidian::HeadingLevel(settingsEdit_.text) == 0) {
             settingsStatus_ = L"No matching heading - log entries will be appended to the end of the note.";
         } else {
@@ -2004,6 +2108,10 @@ private:
         }
         if (row == kRowVaultPicker) {
             OpenVaultDropdown();
+            return;
+        }
+        if (row == kRowWebSearchEngine) {
+            OpenWebSearchDropdown();
             return;
         }
         if (row == kRowAboutGithubLink) {
@@ -2293,6 +2401,22 @@ private:
                 }
                 if (key == VK_RETURN) { SelectVaultDropdownItem(vaultDropdownHighlight_); return 0; }
                 if (key == VK_ESCAPE) { CloseVaultDropdown(); return 0; }
+                return 0;
+            }
+            if (webSearchDropdownOpen_) {
+                const int itemCount = static_cast<int>(takeoff::kWebSearchPresetCount) + 1;
+                if (key == VK_UP) {
+                    webSearchDropdownHighlight_ = (webSearchDropdownHighlight_ - 1 + itemCount) % itemCount;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                if (key == VK_DOWN) {
+                    webSearchDropdownHighlight_ = (webSearchDropdownHighlight_ + 1) % itemCount;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                if (key == VK_RETURN) { SelectWebSearchDropdownItem(webSearchDropdownHighlight_); return 0; }
+                if (key == VK_ESCAPE) { CloseWebSearchDropdown(); return 0; }
                 return 0;
             }
             if (editingRow_ >= 0) {
@@ -2700,7 +2824,7 @@ private:
 
     bool OpenWebSearch(std::wstring_view query) {
         if (query.empty()) return false;
-        const std::wstring url = L"https://www.google.com/search?q=" + takeoff::UrlEncode(query);
+        const std::wstring url = takeoff::BuildSearchUrl(settings_.webSearchUrlTemplate, query);
         Hide();
         const INT_PTR result = reinterpret_cast<INT_PTR>(
             ShellExecuteW(hwnd_, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
@@ -2937,6 +3061,22 @@ private:
                 // edit is cancelled but the click that cancelled it still
                 // proceeds.
             }
+            // Close-on-click-away for the web search engine dropdown - mirrors
+            // the vault dropdown block above.
+            if (webSearchDropdownOpen_) {
+                const int clickedItem = WebSearchDropdownItemAtPoint(x, y);
+                if (clickedItem >= 0) {
+                    SelectWebSearchDropdownItem(clickedItem);
+                    return;
+                }
+                const bool clickedTrigger = (SettingsRowAtPoint(x, y) == kRowWebSearchEngine);
+                CloseWebSearchDropdown();
+                if (clickedTrigger) {
+                    settingsSelected_ = kRowWebSearchEngine;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return;
+                }
+            }
             if (y < kSettingsHeaderHeight) {
                 if (x < 46.0f) {
                     CloseSettings();
@@ -3136,6 +3276,7 @@ private:
                     if (newScroll != settingsScroll_) {
                         settingsScroll_ = newScroll;
                         if (vaultDropdownOpen_) CloseVaultDropdown();
+                        if (webSearchDropdownOpen_) CloseWebSearchDropdown();
                         InvalidateRect(hwnd_, nullptr, FALSE);
                     }
                 }
@@ -3145,6 +3286,14 @@ private:
                 const int hoveredItem = VaultDropdownItemAtPoint(x, y);
                 if (hoveredItem >= 0 && hoveredItem != vaultDropdownHighlight_) {
                     vaultDropdownHighlight_ = hoveredItem;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+                return;
+            }
+            if (webSearchDropdownOpen_) {
+                const int hoveredItem = WebSearchDropdownItemAtPoint(x, y);
+                if (hoveredItem >= 0 && hoveredItem != webSearchDropdownHighlight_) {
+                    webSearchDropdownHighlight_ = hoveredItem;
                     InvalidateRect(hwnd_, nullptr, FALSE);
                 }
                 return;
@@ -3733,7 +3882,8 @@ private:
 
                 SearchGlyph(cardRect.left + 22.0f, (cardRect.top + cardRect.bottom) / 2.0f - 1.0f, 6.0f);
 
-                const std::wstring searchPrompt = L"Search Google for \u201C" + input_.text + L"\u201D";
+                const std::wstring searchPrompt =
+                    L"Search " + settings_.webSearchEngineName + L" for \u201C" + input_.text + L"\u201D";
                 const auto promptRect = D2D1::RectF(cardRect.left + 38.0f, cardRect.top, cardRect.right - 54.0f, cardRect.bottom);
                 const auto textColor = highContrast_ && hovering ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground();
                 Text(searchPrompt, promptRect, resultFormat_.Get(), textColor);
@@ -4136,7 +4286,7 @@ private:
                 DWRITE_TEXT_ALIGNMENT_TRAILING);
         }
         if (results_.empty() && !takeoff::Normalize(input_.text).empty() && settings_.enableWebSearch) {
-            Text(L"Search Google", D2D1::RectF(middle, top, width_ - 58, height_),
+            Text(L"Search " + settings_.webSearchEngineName, D2D1::RectF(middle, top, width_ - 58, height_),
                 hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
             Key(L"↵", width_ - 48, top + (kFooterHeight - 22) / 2, 28);
         }
@@ -4431,6 +4581,49 @@ private:
         target_->PopAxisAlignedClip();
     }
 
+    // Mirrors DrawVaultDropdown() for the "Search engine" row's picker
+    // (US-016): presets 0..kWebSearchPresetCount-1 plus a trailing "Custom"
+    // entry, with a checkmark on whichever one matches the active template.
+    void DrawWebSearchDropdown() {
+        if (!webSearchDropdownOpen_) return;
+        const float viewportTop = kSettingsHeaderHeight;
+        const float viewportBottom = FooterTop();
+        target_->PushAxisAlignedClip(
+            D2D1::RectF(0, viewportTop, width_, viewportBottom),
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+        const float listTop = WebSearchDropdownTop();
+        const int presetCount = static_cast<int>(takeoff::kWebSearchPresetCount);
+        const int itemCount = presetCount + 1;
+        const float listHeight = static_cast<float>(itemCount) * kVaultDropdownItemHeight;
+        const auto listRect = D2D1::RectF(16, listTop, width_ - 16, listTop + listHeight);
+
+        Fill(listRect, highContrast_ ? SystemColor(COLOR_BTNFACE) : D2D1::ColorF(0x1C1C1E, 0.98f), 8.0f);
+        brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.14f));
+        target_->DrawRoundedRectangle(D2D1::RoundedRect(listRect, 8.0f, 8.0f), brush_.Get(), 1.0f);
+
+        const int activePreset = takeoff::FindWebSearchPresetIndex(settings_.webSearchUrlTemplate);
+        for (int i = 0; i < itemCount; ++i) {
+            const float itemTop = listTop + static_cast<float>(i) * kVaultDropdownItemHeight;
+            const bool highlighted = (i == webSearchDropdownHighlight_);
+            const bool current = (i < presetCount) ? (i == activePreset) : (activePreset < 0);
+            const std::wstring_view name = (i < presetCount) ? takeoff::kWebSearchPresets[i].name : L"Custom";
+            if (highlighted) {
+                Fill(D2D1::RectF(18, itemTop + 1, width_ - 18, itemTop + kVaultDropdownItemHeight - 1),
+                    highContrast_ ? SystemColor(COLOR_HIGHLIGHT) : D2D1::ColorF(1, 1, 1, 0.10f), 5.0f);
+            }
+            const auto textColor = highContrast_ && highlighted ? SystemColor(COLOR_HIGHLIGHTTEXT)
+                : current ? Foreground() : Muted();
+            Text(name, D2D1::RectF(32, itemTop, width_ - 44, itemTop + kVaultDropdownItemHeight),
+                hintFormat_.Get(), textColor);
+            if (current) {
+                Text(L"✓", D2D1::RectF(width_ - 44, itemTop, width_ - 24, itemTop + kVaultDropdownItemHeight),
+                    hintFormat_.Get(), textColor, DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+        }
+        target_->PopAxisAlignedClip();
+    }
+
     void DrawSettings() {
         const float viewportTop = kSettingsHeaderHeight;
         const float viewportBottom = FooterTop();
@@ -4495,17 +4688,22 @@ private:
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Search) {
             const float hY = (settingsCategory_ == SettingsCategory::All) ? 421.0f : 16.0f;
             const float cY = (settingsCategory_ == SettingsCategory::All) ? 441.0f : 36.0f;
-            drawCard(L"SEARCH & FEATURES", hY, cY, 2);
+            drawCard(L"SEARCH & FEATURES", hY, cY, 3);
 
             DrawSettingsRow(7, cY + offsetY, L"File search",
                 L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
             DrawSettingsRow(8, cY + kSettingsRowHeight + offsetY, L"Web search",
-                L"Open Google when no results match your query", {}, true, settings_.enableWebSearch);
+                L"Open " + settings_.webSearchEngineName + L" when no results match your query",
+                {}, true, settings_.enableWebSearch);
+            DrawSettingsRow(kRowWebSearchEngine, cY + 2 * kSettingsRowHeight + offsetY, L"Search engine",
+                webSearchDropdownOpen_ ? L"Tap to collapse"
+                    : L"Search engine used for the \"Web search\" fallback",
+                settings_.webSearchEngineName, false, false, false, true);
         }
 
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Obsidian) {
-            const float hY = (settingsCategory_ == SettingsCategory::All) ? 553.0f : 16.0f;
-            const float cY = (settingsCategory_ == SettingsCategory::All) ? 573.0f : 36.0f;
+            const float hY = (settingsCategory_ == SettingsCategory::All) ? 600.0f : 16.0f;
+            const float cY = (settingsCategory_ == SettingsCategory::All) ? 620.0f : 36.0f;
             const auto& visibleRows = ObsidianVisibleRows();
             drawCard(L"OBSIDIAN", hY, cY, static_cast<int>(visibleRows.size()));
             for (size_t i = 0; i < visibleRows.size(); ++i) {
@@ -4630,6 +4828,7 @@ private:
             DWRITE_TEXT_ALIGNMENT_TRAILING);
 
         DrawVaultDropdown();
+        DrawWebSearchDropdown();
     }
 
     void Paint() {
@@ -4697,6 +4896,10 @@ private:
     int editingRow_ = -1;
     bool vaultDropdownOpen_ = false;
     int vaultDropdownHighlight_ = -1;  // index into knownVaults_ while the dropdown is open
+    bool webSearchDropdownOpen_ = false;
+    // Index into [0, kWebSearchPresetCount] while the dropdown is open -
+    // kWebSearchPresetCount itself is the trailing "Custom" entry.
+    int webSearchDropdownHighlight_ = -1;
     int obsidianExpandedSection_ = -1;  // kSection* of the expanded action block, or -1
     // Memoized ObsidianVisibleRows() result; empty means "not built yet".
     mutable std::vector<int> obsidianRowsCache_;

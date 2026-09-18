@@ -393,6 +393,100 @@ inline std::wstring UrlEncode(std::wstring_view text) {
     return encoded;
 }
 
+// Named search-engine presets for the "Web search" fallback (US-016). The
+// active engine is fully described by Settings::webSearchUrlTemplate +
+// webSearchEngineName; this table is only consulted to populate the picker
+// and to detect which preset (if any) the current template matches - it is
+// not itself persisted.
+struct WebSearchPreset {
+    const wchar_t* name;
+    const wchar_t* urlTemplate;
+};
+
+inline constexpr WebSearchPreset kWebSearchPresets[] = {
+    {L"Google", L"https://www.google.com/search?q={query}"},
+    {L"Bing", L"https://www.bing.com/search?q={query}"},
+    {L"DuckDuckGo", L"https://duckduckgo.com/?q={query}"},
+    {L"Startpage", L"https://www.startpage.com/sp/search?query={query}"},
+    {L"Ecosia", L"https://www.ecosia.org/search?q={query}"},
+    {L"Brave", L"https://search.brave.com/search?q={query}"},
+    {L"Kagi", L"https://kagi.com/search?q={query}"},
+};
+inline constexpr size_t kWebSearchPresetCount =
+    sizeof(kWebSearchPresets) / sizeof(kWebSearchPresets[0]);
+
+// Index into kWebSearchPresets for an exact template match, or -1 if the
+// template doesn't match any preset (i.e. it's a custom URL).
+inline int FindWebSearchPresetIndex(const std::wstring& urlTemplate) {
+    for (size_t i = 0; i < kWebSearchPresetCount; ++i) {
+        if (urlTemplate == kWebSearchPresets[i].urlTemplate) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+inline bool HasHttpScheme(const std::wstring& url) {
+    auto startsWithCi = [&](const wchar_t* scheme) {
+        const size_t len = wcslen(scheme);
+        if (url.size() < len) return false;
+        for (size_t i = 0; i < len; ++i) {
+            if (towlower(url[i]) != scheme[i]) return false;
+        }
+        return true;
+    };
+    return startsWithCi(L"http://") || startsWithCi(L"https://");
+}
+
+// Returns a user-facing error message if a custom search URL template is
+// unusable, or nullptr if it's valid. Used to reject an in-progress Settings
+// edit before it's saved - matches FindPrefixConflict's contract/pattern in
+// obsidian_config.h (nullptr = valid).
+inline const wchar_t* FindWebSearchUrlError(const std::wstring& urlTemplate) {
+    if (urlTemplate.empty()) return L"URL cannot be empty.";
+    if (!HasHttpScheme(urlTemplate)) return L"URL must start with http:// or https://.";
+    if (urlTemplate.find(L"{query}") == std::wstring::npos) return L"URL must contain {query}.";
+    return nullptr;
+}
+
+// Best-effort display name for a custom search URL, derived from its
+// hostname (e.g. "https://kagi.com/search?q={query}" -> "Kagi"). Falls back
+// to "Custom" if no usable label can be extracted - callers should only
+// reach this after FindWebSearchUrlError has already validated the
+// template, but this stays defensive against a malformed host anyway.
+inline std::wstring DeriveSearchEngineName(const std::wstring& urlTemplate) {
+    size_t hostStart = urlTemplate.find(L"://");
+    if (hostStart == std::wstring::npos) return L"Custom";
+    hostStart += 3;
+    size_t authorityEnd = urlTemplate.find_first_of(L"/?#", hostStart);
+    if (authorityEnd == std::wstring::npos) authorityEnd = urlTemplate.size();
+    // Skip a "user:pass@" userinfo prefix within the authority segment, if
+    // present - otherwise "https://user:pass@host.com/..." would derive
+    // "User" instead of "Host".
+    const size_t at = urlTemplate.find(L'@', hostStart);
+    if (at != std::wstring::npos && at < authorityEnd) hostStart = at + 1;
+    size_t hostEnd = urlTemplate.find(L':', hostStart);
+    if (hostEnd == std::wstring::npos || hostEnd > authorityEnd) hostEnd = authorityEnd;
+    std::wstring host = urlTemplate.substr(hostStart, hostEnd - hostStart);
+    if (host.size() > 4 && _wcsnicmp(host.c_str(), L"www.", 4) == 0) {
+        host = host.substr(4);
+    }
+    const size_t dot = host.find(L'.');
+    std::wstring label = (dot == std::wstring::npos) ? host : host.substr(0, dot);
+    if (label.empty()) return L"Custom";
+    for (wchar_t& ch : label) ch = static_cast<wchar_t>(towlower(ch));
+    label[0] = static_cast<wchar_t>(towupper(label[0]));
+    return label;
+}
+
+// Substitutes the URL-encoded query into the template's {query} token. If
+// the token is somehow missing (should be unreachable past
+// FindWebSearchUrlError), returns the template unchanged rather than
+// guessing at an append point.
+inline std::wstring BuildSearchUrl(const std::wstring& urlTemplate, std::wstring_view query) {
+    const size_t token = urlTemplate.find(L"{query}");
+    if (token == std::wstring::npos) return urlTemplate;
+    return urlTemplate.substr(0, token) + UrlEncode(query) + urlTemplate.substr(token + 7);
+}
+
 // RAII deleter for CoTaskMemAlloc allocations (strings, PIDLs, known folder paths)
 template <typename T>
 struct CoTaskMemDeleter {

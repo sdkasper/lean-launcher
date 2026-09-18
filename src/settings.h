@@ -40,6 +40,12 @@ struct Settings {
     bool checkForUpdates = false;  // No release pipeline yet; user can opt in via Settings.
     bool enableFileSearch = true;
     bool enableWebSearch = true;
+    // Default matches the Google preset in search.h's kWebSearchPresets -
+    // existing installs with no saved value get identical behavior to
+    // before this setting existed (AC: no behavior change for anyone who
+    // hasn't touched it).
+    std::wstring webSearchUrlTemplate = L"https://www.google.com/search?q={query}";
+    std::wstring webSearchEngineName = L"Google";
 
     // Obsidian integration: master toggle plus one sub-toggle per action.
     // obsidianEnabled's on-disk default is computed at load time (see

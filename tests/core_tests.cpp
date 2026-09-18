@@ -472,6 +472,60 @@ int main() {
     Check(Normalize(L"\t \r\n ").empty(), "whitespace query normalizes to empty");
     Check(!Normalize(L"google search").empty(), "valid search query normalizes to non-empty");
 
+    // Configurable web search engine tests (US-016)
+    Check(defaultSettings.webSearchUrlTemplate == L"https://www.google.com/search?q={query}",
+        "web search URL template defaults to Google");
+    Check(defaultSettings.webSearchEngineName == L"Google", "web search engine name defaults to Google");
+
+    // FindWebSearchUrlError
+    Check(FindWebSearchUrlError(L"https://kagi.com/search?q={query}") == nullptr,
+        "valid https custom URL with {query} passes validation");
+    Check(FindWebSearchUrlError(L"http://example.com/?q={query}") == nullptr,
+        "valid http custom URL with {query} passes validation");
+    Check(FindWebSearchUrlError(L"") != nullptr, "empty URL is rejected");
+    Check(FindWebSearchUrlError(L"https://example.com/search") != nullptr,
+        "URL missing {query} is rejected");
+    Check(FindWebSearchUrlError(L"file:///{query}") != nullptr,
+        "non-http(s) scheme is rejected");
+    Check(FindWebSearchUrlError(L"ftp://example.com/{query}") != nullptr,
+        "ftp scheme is rejected");
+
+    // DeriveSearchEngineName
+    Check(DeriveSearchEngineName(L"https://kagi.com/search?q={query}") == L"Kagi",
+        "engine name derived from simple hostname");
+    Check(DeriveSearchEngineName(L"https://www.example.com/?q={query}") == L"Example",
+        "engine name strips leading www.");
+    Check(DeriveSearchEngineName(L"https://EXAMPLE.CO.UK/search?q={query}") == L"Example",
+        "engine name derivation is case-insensitive and takes the first label");
+    Check(DeriveSearchEngineName(L"not a url") == L"Custom",
+        "engine name falls back to Custom for an unparseable URL");
+    Check(DeriveSearchEngineName(L"https://user:pass@host.com/search?q={query}") == L"Host",
+        "engine name skips a user:pass@ userinfo prefix instead of deriving from it");
+    // A dotted host like "host.com:8080" would derive "Host" via the
+    // dot-truncation step alone, even without explicit port-stripping - use
+    // a dotless host so this actually exercises (and would fail without)
+    // the port-stripping logic specifically.
+    Check(DeriveSearchEngineName(L"https://localhost:8080/search?q={query}") == L"Localhost",
+        "engine name strips an explicit port from a dotless host");
+
+    // BuildSearchUrl
+    Check(BuildSearchUrl(L"https://www.google.com/search?q={query}", L"visual studio code") ==
+        L"https://www.google.com/search?q=visual+studio+code",
+        "BuildSearchUrl substitutes the URL-encoded query into {query}");
+    Check(BuildSearchUrl(L"https://kagi.com/search?q={query}&foo=bar", L"c++") ==
+        L"https://kagi.com/search?q=c%2B%2B&foo=bar",
+        "BuildSearchUrl preserves template text after the {query} token");
+    Check(BuildSearchUrl(L"https://example.com/no-token", L"anything") == L"https://example.com/no-token",
+        "BuildSearchUrl returns the template unchanged if {query} is missing");
+
+    // FindWebSearchPresetIndex
+    Check(FindWebSearchPresetIndex(L"https://www.google.com/search?q={query}") == 0,
+        "preset index found for exact Google template match");
+    Check(FindWebSearchPresetIndex(L"https://kagi.com/search?q={query}") ==
+        static_cast<int>(kWebSearchPresetCount) - 1, "preset index found for exact Kagi template match");
+    Check(FindWebSearchPresetIndex(L"https://example.com/?q={query}") == -1,
+        "preset index is -1 for a custom (non-preset) template");
+
     // 4. Zero-query app-only invariant:
     // When input query is empty, FileIndex returns 0 results.
     auto emptyQueryFileResults = FileIndex::Instance().Search(L"");
@@ -730,31 +784,34 @@ int main() {
     // This is an independent hand-derived sanity check, not a call into the real
     // SettingsContentBottom() (that's a private member of a class defined in
     // main.cpp's anonymous namespace, unreachable from this test binary). As of
-    // the 5-category/10-row layout (Shortcuts/System/Search/Vault, row 9 being
-    // the newest - the single-row Vault card - and now the last row in the All
-    // view), the real All-category SettingsContentBottom() is 636.0f; this
-    // block's constants are kept in sync with that value by hand.
+    // the Search category's 3-row layout (File search / Web search / Search
+    // engine - US-016 added the third row) and Obsidian being the last
+    // section in the All view, the real All-category SettingsContentBottom()
+    // with Obsidian disabled (1 visible row) is 683.0f; this block's
+    // constants are kept in sync with that value by hand.
     constexpr float kWindowHeight = 482.0f;
     constexpr float kFooterH = 42.0f;
     constexpr float kSettingsHeaderH = 46.0f;
     constexpr float kSettingsRowH = 47.0f;
     constexpr float footerTop = kWindowHeight - kFooterH; // 440.0f
-    // Row 9 (Vault) is a one-off section, not part of the repeating row grid,
-    // so its top is taken directly from source (header@553, card@573) rather
-    // than derived from a generalTop + N*rowH formula.
-    constexpr float row9Top = 573.0f;
-    constexpr float row9Bottom = row9Top + kSettingsRowH;      // 620.0f
-    constexpr float contentBottom = row9Bottom + 16.0f;        // 636.0f (16px bottom padding)
-    constexpr float maxScroll = contentBottom - footerTop;     // 196.0f
+    // The Obsidian section is a one-off, variable-height block, not part of
+    // the repeating row grid, so its top is taken directly from source
+    // (header@600, card@620) rather than derived from a generalTop + N*rowH
+    // formula. With Obsidian disabled (the default), it's a single row.
+    constexpr float obsidianRowTop = 620.0f;
+    constexpr float obsidianRowBottom = obsidianRowTop + kSettingsRowH;  // 667.0f
+    constexpr float contentBottom = obsidianRowBottom + 16.0f;           // 683.0f (16px bottom padding)
+    constexpr float maxScroll = contentBottom - footerTop;               // 243.0f
 
     Check(footerTop == 440.0f, "footer top is exactly 440px");
-    Check(row9Bottom > footerTop, "unscrolled row 9 (Vault, the last row) exceeds footer top, proving scroll is required");
-    Check(maxScroll == 196.0f, "settings max scroll is 196px");
+    Check(obsidianRowBottom > footerTop,
+        "unscrolled Obsidian row (the last row with Obsidian disabled) exceeds footer top, proving scroll is required");
+    Check(maxScroll == 243.0f, "settings max scroll is 243px");
 
     // When scrolled to maxScroll:
-    const float scrolledRow9Bottom = row9Bottom - maxScroll;
-    Check(scrolledRow9Bottom < footerTop, "scrolled row 9 bottom is strictly above footer top");
-    Check(footerTop - scrolledRow9Bottom >= 16.0f, "row 9 has at least 16px clearance above footer");
+    const float scrolledObsidianRowBottom = obsidianRowBottom - maxScroll;
+    Check(scrolledObsidianRowBottom < footerTop, "scrolled Obsidian row bottom is strictly above footer top");
+    Check(footerTop - scrolledObsidianRowBottom >= 16.0f, "Obsidian row has at least 16px clearance above footer");
 
     // Check viewport height and scrollable area:
     constexpr float viewportHeight = footerTop - kSettingsHeaderH; // 394.0f
@@ -763,7 +820,8 @@ int main() {
     // In individual categories, content height is well under viewportHeight (394px)
     constexpr float kCategoryShortcutsContentH = 36.0f + 2 * kSettingsRowH + 12.0f; // 142px
     constexpr float kCategorySystemContentH = 36.0f + 5 * kSettingsRowH + 12.0f;    // 283px
-    constexpr float kCategorySearchContentH = 36.0f + 2 * kSettingsRowH + 12.0f;    // 142px
+    // US-016 added a third Search row (Search engine); was 2 rows before.
+    constexpr float kCategorySearchContentH = 36.0f + 3 * kSettingsRowH + 12.0f;    // 189px
     constexpr float kCategoryVaultContentH = 36.0f + 1 * kSettingsRowH + 16.0f;     // 99px
     Check(kCategoryShortcutsContentH < viewportHeight, "Shortcuts category has zero overflow in viewport");
     Check(kCategorySystemContentH < viewportHeight, "System category has zero overflow in viewport");
