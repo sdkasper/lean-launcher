@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(LeanLauncher VERSION 1.2.0 LANGUAGES CXX)
+project(LeanLauncher VERSION 1.2.1 LANGUAGES CXX)
 
 function(add_launcher target)
 add_executable(${target} WIN32
@@ -19,7 +19,7 @@ add_executable(${target} WIN32
 
 target_compile_features(${target} PRIVATE cxx_std_17)
 target_compile_definitions(${target} PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
+target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8 /sdl)
 target_link_libraries(${target} PRIVATE
     dwmapi
     shell32

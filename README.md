@@ -94,6 +94,8 @@ The launcher itself is unchanged from its Takeoff heritage: a direct Win32 messa
 
 ## Build from Source
 
+Run these from a **VS Developer Command Prompt** (or after calling `vcvars64.bat`) so `cmake`/`msbuild` can find the MSVC toolchain.
+
 ```powershell
 cmake -S . -B cmake -A x64
 cmake --build cmake --config Release
