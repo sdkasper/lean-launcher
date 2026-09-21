@@ -1482,6 +1482,76 @@ int main() {
         DeleteFileW(incrementalCachePath.c_str());
     }
 
+    // -----------------------------------------------------------------------------
+    // End-to-end: user exclusions are honored during a scoped BuildIndex() pass (US-019)
+    // -----------------------------------------------------------------------------
+    {
+        FileIndex::Instance().Stop();
+        FileIndex::Instance().ResetForTest();
+
+        fs::path testRoot = fs::current_path() / L"llfi_user_exclusions_test_root";
+        fs::path excludedSub = testRoot / L"excluded_sub";
+        std::error_code ec;
+        fs::remove_all(testRoot, ec);
+        fs::create_directories(excludedSub, ec);
+        {
+            std::ofstream keep((testRoot / L"keep.txt").wstring());
+            keep << "keep";
+        }
+        {
+            std::ofstream excludedByExt((testRoot / L"movie.iso").wstring());
+            excludedByExt << "iso";
+        }
+        {
+            std::ofstream buried((excludedSub / L"buried.txt").wstring());
+            buried << "buried";
+        }
+
+        wchar_t tempDirBuf[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf);
+        fs::path scratchDir = fs::path(tempDirBuf) / L"llfi_user_exclusions_scratch";
+        fs::create_directories(scratchDir, ec);
+        const std::wstring exclusionsPath = (scratchDir / L"exclusions_e2e_test.txt").wstring();
+        {
+            std::ofstream out(exclusionsPath, std::ios::binary | std::ios::trunc);
+            out << "# test exclusions\r\n"
+                << takeoff::FileIndex::WideToUtf8Bytes(excludedSub.wstring()) << "\r\n"
+                << ".iso\r\n";
+        }
+        const std::wstring cachePath = (scratchDir / L"exclusions_e2e_test_cache.bin").wstring();
+        DeleteFileW(cachePath.c_str());
+
+        auto waitSettled = []() {
+            int stable = 0;
+            for (int w = 0; w < 60 && stable < 3; ++w) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                if (FileIndex::Instance().IsReady() &&
+                    FileIndex::Instance().GetPhase() == takeoff::FileIndex::Phase::Loaded) {
+                    ++stable;
+                } else {
+                    stable = 0;
+                }
+            }
+        };
+
+        FileIndex::Instance().Start(nullptr, testRoot.wstring(), cachePath, exclusionsPath);
+        waitSettled();
+        FileIndex::Instance().Stop();
+
+        auto keepResults = FileIndex::Instance().Search(L"keep.txt");
+        Check(!keepResults.empty(), "US-019 e2e: non-excluded file is indexed and findable");
+
+        auto isoResults = FileIndex::Instance().Search(L"movie.iso");
+        Check(isoResults.empty(), "US-019 e2e: file with a user-excluded extension is not indexed");
+
+        auto buriedResults = FileIndex::Instance().Search(L"buried.txt");
+        Check(buriedResults.empty(), "US-019 e2e: file inside a user-excluded folder is not indexed");
+
+        FileIndex::Instance().ResetForTest();
+        fs::remove_all(testRoot, ec);
+        fs::remove_all(scratchDir, ec);
+    }
+
     // 5. Settings Scroll and Viewport Invariants:
     // Guarantees Settings content cleanly fits and scrolls without overlapping FooterTop (440px).
     //

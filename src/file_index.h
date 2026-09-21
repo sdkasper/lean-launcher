@@ -340,7 +340,7 @@ public:
     // used instead - unless scanRootOverride is set, in which case no cache
     // path is resolved at all (see below).
     void Start(HWND notifyHwnd = nullptr, const std::wstring& scanRootOverride = L"",
-               const std::wstring& cachePathOverride = L"") {
+               const std::wstring& cachePathOverride = L"", const std::wstring& exclusionsPathOverride = L"") {
         if (running_.exchange(true)) return;
         // A prior cycle (e.g. a direct LoadIndexCache() call, or this same
         // singleton's previous Start()/Stop() pair) may have left ready_
@@ -360,6 +360,12 @@ public:
         cachePath_ = !cachePathOverride.empty() ? cachePathOverride
                    : scanRootOverride.empty()   ? DefaultCachePath()
                                                 : std::wstring{};
+        // Same reasoning as cachePath_ above, applied to the exclusions file:
+        // a scoped test scan must never depend on whatever the real user has
+        // configured in %LOCALAPPDATA%\LeanLauncher\file_search_excludes.txt.
+        exclusionsPath_ = !exclusionsPathOverride.empty() ? exclusionsPathOverride
+                         : scanRootOverride.empty()       ? DefaultExclusionsPath()
+                                                           : std::wstring{};
         stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         worker_ = std::thread([this]() { WorkerLoop(); });
     }
@@ -665,6 +671,7 @@ public:
     // cache load; also callable directly by a test.
     void IncrementalRescan() {
         phase_ = Phase::IncrementalRescan;
+        ReloadUserExclusions();
         // Discover roots that appeared since the first walk. Once a cache
         // exists BuildIndex() never runs again, so this is the only thing
         // that can ever notice a newly attached drive (or a known folder
@@ -766,7 +773,7 @@ public:
                 for (const auto& child : dit) {
                     bool isDir = child.is_directory(ec);
                     if (!ec && isDir) {
-                        if (ShouldSkipDirectory(child.path())) continue;
+                        if (ShouldSkipDirectory(child.path(), &userExclusions_)) continue;
                         if (isDriveC && _wcsicmp(child.path().filename().wstring().c_str(), L"Users") == 0) continue;
                         AddItem(child.path(), true, i, freshChildren, seen);
                         uint32_t childIdx = InternLocked(pool_, child.path().wstring(), Normalize(child.path().wstring()));
@@ -776,7 +783,7 @@ public:
                             // BuildIndex's shallower budget for the system drive).
                             ScanPath(child.path(), childIdx, pool_, seen, scannedDirs, isDriveC ? 4 : 8);
                         }
-                    } else if (!ec && child.is_regular_file(ec) && IsUserRelevantFile(child.path())) {
+                    } else if (!ec && child.is_regular_file(ec) && IsUserRelevantFile(child.path(), &userExclusions_)) {
                         AddItem(child.path(), false, i, freshChildren, seen);
                     }
                 }
@@ -1147,7 +1154,7 @@ private:
         }
         if (!isDir) {
             if (name[0] == L'.' || name[0] == L'~') return;
-            if (!IsUserRelevantFile(p)) return;
+            if (!IsUserRelevantFile(p, &userExclusions_)) return;
         }
         uint64_t pathHash = Fnv1a64(Normalize(p.wstring()));
         if (!seen.insert(pathHash).second) return;
@@ -1170,7 +1177,7 @@ private:
                   int maxDepth) {
         std::error_code ec;
         if (!fs::exists(root, ec)) return;
-        if (IsDriveRoot(root) || ShouldSkipDirectory(root)) return;
+        if (IsDriveRoot(root) || ShouldSkipDirectory(root, &userExclusions_)) return;
         if (!scannedDirs.insert(rootPoolIndex).second) return;
 
         // Set I/O priority hint on the root directory to avoid disrupting the system during full-disk walks.
@@ -1211,7 +1218,7 @@ private:
 
                 bool isDir = entry.is_directory(ec);
                 if (!ec && isDir) {
-                    if (depth >= maxDepth || ShouldSkipDirectory(entry.path())) {
+                    if (depth >= maxDepth || ShouldSkipDirectory(entry.path(), &userExclusions_)) {
                         it.disable_recursion_pending();
                     } else {
                         AddItem(entry.path(), true, parentIdx, childrenByDir[parentIdx], seen);
@@ -1237,7 +1244,7 @@ private:
                     continue;
                 }
 
-                if (!ec && entry.is_regular_file(ec) && IsUserRelevantFile(entry.path())) {
+                if (!ec && entry.is_regular_file(ec) && IsUserRelevantFile(entry.path(), &userExclusions_)) {
                     AddItem(entry.path(), false, parentIdx, childrenByDir[parentIdx], seen);
                 }
                 it.increment(ec);
@@ -1397,8 +1404,17 @@ private:
         return roots;
     }
 
+    // Re-reads the exclusions file fresh - called once at the top of every
+    // BuildIndex()/IncrementalRescan() pass (never on every
+    // ShouldSkipDirectory/IsUserRelevantFile call, and never via a
+    // filesystem watcher - see US-019's "re-read once per scan pass" AC).
+    void ReloadUserExclusions() {
+        userExclusions_ = exclusionsPath_.empty() ? UserExclusions{} : LoadUserExclusions(exclusionsPath_);
+    }
+
     void BuildIndex() {
         phase_ = Phase::FirstWalk;
+        ReloadUserExclusions();
         std::unordered_set<uint64_t> seen;
         // Tracks every directory already fully walked by ScanPath in this
         // call, across all phases - see ScanPath's comment on scannedDirs.
@@ -1461,7 +1477,7 @@ private:
                     if (!running_.load()) break;
                     if (entry.is_directory(ec)) {
                         std::wstring name = entry.path().filename().wstring();
-                        if (!ShouldSkipDirectory(entry.path()) &&
+                        if (!ShouldSkipDirectory(entry.path(), &userExclusions_) &&
                             _wcsicmp(name.c_str(), L"Desktop") != 0 &&
                             _wcsicmp(name.c_str(), L"Documents") != 0 &&
                             _wcsicmp(name.c_str(), L"Downloads") != 0 &&
@@ -1473,7 +1489,7 @@ private:
                             ScanPath(entry.path(), childIdx, pool_, seen, scannedDirs, 8);
                         }
                     } else if (entry.is_regular_file(ec)) {
-                        if (IsUserRelevantFile(entry.path())) {
+                        if (IsUserRelevantFile(entry.path(), &userExclusions_)) {
                             AddItem(entry.path(), false, profileIdx, profileItems, seen);
                         }
                     }
@@ -1506,14 +1522,14 @@ private:
                         if (isDriveC && _wcsicmp(dirName.c_str(), L"Users") == 0) {
                             continue;
                         }
-                        if (!ShouldSkipDirectory(entry.path())) {
+                        if (!ShouldSkipDirectory(entry.path(), &userExclusions_)) {
                             AddItem(entry.path(), true, driveIdx, driveItems, seen);
                             uint32_t childIdx = InternLocked(pool_, entry.path().wstring(), Normalize(entry.path().wstring()));
                             const int maxDepth = isDriveC ? 4 : 8;
                             ScanPath(entry.path(), childIdx, pool_, seen, scannedDirs, maxDepth);
                         }
                     } else if (entry.is_regular_file(ec)) {
-                        if (IsUserRelevantFile(entry.path())) {
+                        if (IsUserRelevantFile(entry.path(), &userExclusions_)) {
                             AddItem(entry.path(), false, driveIdx, driveItems, seen);
                         }
                     }
@@ -1635,6 +1651,17 @@ private:
     // The effective cache path for this Start() cycle - empty means "this
     // cycle has no cache" (a scoped scan without an explicit cache path).
     std::wstring cachePath_;
+    // The effective exclusions-file path for this Start() cycle - empty means
+    // "this cycle has no user exclusions" (a scoped scan without an explicit
+    // exclusions path; see ReloadUserExclusions()). Same safety rule as
+    // cachePath_ above - a scoped test scan must never read the real user's
+    // exclusions file.
+    std::wstring exclusionsPath_;
+    // Reloaded fresh at the top of every BuildIndex()/IncrementalRescan()
+    // pass by ReloadUserExclusions() - never mutated anywhere else, and only
+    // ever read by the worker thread, so it needs no mutex_ protection (same
+    // reasoning as scanRootOverride_/cachePath_).
+    UserExclusions userExclusions_;
 };
 
 } // namespace takeoff
