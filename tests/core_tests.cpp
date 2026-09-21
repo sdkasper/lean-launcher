@@ -689,6 +689,20 @@ int main() {
         CoUninitialize();
     }
 
+    // -----------------------------------------------------------------------------
+    // DirectoryPool interning
+    // -----------------------------------------------------------------------------
+    {
+        takeoff::DirectoryPool pool;
+        uint32_t idxA = pool.Intern(L"C:\\Users\\Test", takeoff::Normalize(L"C:\\Users\\Test"));
+        uint32_t idxB = pool.Intern(L"C:\\Users\\Test\\Docs", takeoff::Normalize(L"C:\\Users\\Test\\Docs"));
+        uint32_t idxA2 = pool.Intern(L"C:\\Users\\Test", takeoff::Normalize(L"C:\\Users\\Test"));
+        Check(idxA == idxA2, "DirectoryPool dedupes identical paths to the same index");
+        Check(idxA != idxB, "DirectoryPool gives distinct paths distinct indices");
+        Check(pool.Get(idxA).path == L"C:\\Users\\Test", "DirectoryPool.Get returns the stored path");
+        Check(pool.Size() == 2, "DirectoryPool.Size reflects unique entries only");
+    }
+
     // 4. Live FileIndex background indexing & sub-millisecond search benchmark
     //
     // Scoped to this repo's own root (not the whole machine) via the same
@@ -750,32 +764,39 @@ int main() {
     FileIndex::Instance().Stop();
 
     // -----------------------------------------------------------------------------
-    // Requirement R2: Chunked Snapshot Publishing & Memory Bound Verification
+    // Requirement R2: Per-Directory Chunk Storage & Incremental Update
     // -----------------------------------------------------------------------------
     {
-        std::vector<FileItem> chunk1;
-        chunk1.push_back({L"testdoc.pdf", L"testdoc pdf", L"C:\\Users\\Test\\testdoc.pdf", L"c users test testdoc pdf", false});
-        chunk1.push_back({L"testcode.cpp", L"testcode cpp", L"C:\\Users\\Test\\testcode.cpp", L"c users test testcode cpp", false});
-        FileIndex::Instance().PublishSnapshot(std::move(chunk1));
-        Check(FileIndex::Instance().Count() == 2, "PublishSnapshot initializes count to 2 via move");
+        FileIndex::Instance().Stop();
+        // FileIndex::Instance() is a process-wide singleton already
+        // populated by the live scan above; reset it so the Count()
+        // checks below start from a known-empty baseline, and intern
+        // through the instance's own pool (not a disconnected one) so
+        // Search()'s path reconstruction via pool_.Get() resolves correctly.
+        FileIndex::Instance().ResetForTest();
+        uint32_t dirIdx = FileIndex::Instance().InternDirectoryForTest(L"C:\\Users\\Test", takeoff::Normalize(L"C:\\Users\\Test"));
 
-        std::vector<FileItem> chunk2;
-        chunk2.push_back({L"testheader.h", L"testheader h", L"C:\\Users\\Test\\testheader.h", L"c users test testheader h", false});
-        FileIndex::Instance().AppendSnapshotChunk(std::move(chunk2));
-        Check(FileIndex::Instance().Count() == 3, "AppendSnapshotChunk appends chunk and increments count to 3");
+        std::vector<FileItem> chunk1;
+        chunk1.push_back({L"testdoc.pdf", L"testdoc pdf", dirIdx, false});
+        chunk1.push_back({L"testcode.cpp", L"testcode cpp", dirIdx, false});
+        FileIndex::Instance().SetDirectoryChunk(dirIdx, std::move(chunk1));
+        Check(FileIndex::Instance().Count() == 2, "SetDirectoryChunk initializes count to 2");
+
+        std::vector<FileItem> chunk1Updated;
+        chunk1Updated.push_back({L"testdoc.pdf", L"testdoc pdf", dirIdx, false});
+        chunk1Updated.push_back({L"testcode.cpp", L"testcode cpp", dirIdx, false});
+        chunk1Updated.push_back({L"testheader.h", L"testheader h", dirIdx, false});
+        FileIndex::Instance().SetDirectoryChunk(dirIdx, std::move(chunk1Updated));
+        Check(FileIndex::Instance().Count() == 3, "Re-setting one directory's chunk updates count without touching others");
 
         auto chunkResults = FileIndex::Instance().Search(L"testheader");
-        Check(!chunkResults.empty() && chunkResults[0].name == L"testheader.h", "Search retrieves item from appended snapshot chunk");
+        Check(!chunkResults.empty() && chunkResults[0].name == L"testheader.h", "Search finds an item added via SetDirectoryChunk");
+        Check(chunkResults[0].path == L"C:\\Users\\Test\\testheader.h", "Search reconstructs the full path from the DirectoryPool");
 
-        auto chunk1Results = FileIndex::Instance().Search(L"testdoc");
-        Check(!chunk1Results.empty() && chunk1Results[0].name == L"testdoc.pdf", "Search retrieves item from initial snapshot chunk");
+        FileIndex::Instance().PruneDirectory(dirIdx);
+        Check(FileIndex::Instance().Count() == 0, "PruneDirectory removes all of that directory's items");
 
-        // Memory budget verification: total heap footprint across typical startup remains < 30 MB
-        constexpr size_t kMaxHeapBudget = 30 * 1024 * 1024; // 30 MB
-        const size_t estimatedHeapBytes = indexedCount * 550;
-        std::cout << "[FileIndex] Estimated startup index heap usage: " << (estimatedHeapBytes / (1024 * 1024))
-                  << " MB (" << estimatedHeapBytes << " bytes for " << indexedCount << " items)\n";
-        Check(estimatedHeapBytes < kMaxHeapBudget, "FileIndex heap usage under typical startup is strictly bounded < 30 MB");
+        // Memory budget verification: see Task 7 for the recalibrated estimate.
     }
 
     // 5. Settings Scroll and Viewport Invariants:

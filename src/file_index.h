@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <windows.h>
@@ -22,11 +23,41 @@ namespace fs = std::filesystem;
 
 constexpr UINT kFilesReadyMessage = WM_APP + 8;
 
+struct DirectoryEntry {
+    std::wstring path;
+    std::wstring normPath;
+    fs::file_time_type lastKnownMtime{};
+};
+
+class DirectoryPool {
+public:
+    uint32_t Intern(const std::wstring& path, const std::wstring& normPath) {
+        auto it = index_.find(normPath);
+        if (it != index_.end()) return it->second;
+        uint32_t idx = static_cast<uint32_t>(entries_.size());
+        entries_.push_back({path, normPath, fs::file_time_type{}});
+        index_.emplace(normPath, idx);
+        return idx;
+    }
+
+    const DirectoryEntry& Get(uint32_t index) const { return entries_[index]; }
+    size_t Size() const { return entries_.size(); }
+
+    void SetMtime(uint32_t index, fs::file_time_type mtime) { entries_[index].lastKnownMtime = mtime; }
+    fs::file_time_type GetMtime(uint32_t index) const { return entries_[index].lastKnownMtime; }
+
+    // Test/serialization-only: iterate every interned directory.
+    const std::vector<DirectoryEntry>& Entries() const { return entries_; }
+
+private:
+    std::vector<DirectoryEntry> entries_;
+    std::unordered_map<std::wstring, uint32_t> index_;
+};
+
 struct FileItem {
     std::wstring name;
     std::wstring normName;
-    std::wstring path;
-    std::wstring normPath;
+    uint32_t parentDirIndex = 0;
     bool isDirectory = false;
 };
 
@@ -37,12 +68,10 @@ struct FileSearchResult {
     int score = 0;
 };
 
-struct IndexChunk {
-    std::vector<FileItem> items;
-};
-
+// One entry per DirectoryPool index: that directory's direct file/folder
+// children. A directory with no indexed children yet has a null entry.
 struct IndexSnapshot {
-    std::vector<std::shared_ptr<const IndexChunk>> chunks;
+    std::vector<std::shared_ptr<const std::vector<FileItem>>> chunksByDir;
     size_t totalCount = 0;
 };
 
@@ -97,37 +126,44 @@ public:
         return snapshot_ ? snapshot_->totalCount : 0;
     }
 
-    void PublishSnapshot(std::vector<FileItem>&& items) {
-        if (items.empty()) return;
-        auto chunk = std::make_shared<const IndexChunk>(IndexChunk{std::move(items)});
-        auto newSnapshot = std::make_shared<IndexSnapshot>();
-        newSnapshot->totalCount = chunk->items.size();
-        newSnapshot->chunks.push_back(std::move(chunk));
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            snapshot_ = std::move(newSnapshot);
-            ready_ = true;
-        }
+    // Test-only: interns a path into this instance's own DirectoryPool so
+    // a caller can obtain a poolIndex valid for SetDirectoryChunk /
+    // PruneDirectory without running a real scan. Production callers get
+    // their poolIndex from ScanPath/BuildIndex instead.
+    uint32_t InternDirectoryForTest(const std::wstring& path, const std::wstring& normPath) {
+        return InternLocked(pool_, path, normPath);
     }
 
-    void AppendSnapshotChunk(std::vector<FileItem>&& items) {
-        if (items.empty()) return;
-        auto chunk = std::make_shared<const IndexChunk>(IndexChunk{std::move(items)});
-        const size_t chunkSize = chunk->items.size();
+    // Test-only: clears all indexed data so Count()/Search() start from a
+    // known-empty state, independent of any earlier BuildIndex() run in
+    // this same process (FileIndex::Instance() is a process-wide singleton).
+    void ResetForTest() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pool_ = DirectoryPool{};
+        snapshot_.reset();
+        ready_ = false;
+    }
 
-        std::shared_ptr<IndexSnapshot> newSnapshot = std::make_shared<IndexSnapshot>();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (snapshot_) {
-                newSnapshot->chunks = snapshot_->chunks;
-                newSnapshot->totalCount = snapshot_->totalCount;
-            }
-            newSnapshot->totalCount += chunkSize;
-            newSnapshot->chunks.push_back(std::move(chunk));
-            snapshot_ = std::move(newSnapshot);
-            ready_ = true;
+    void SetDirectoryChunk(uint32_t poolIndex, std::vector<FileItem>&& children) {
+        auto newChunk = std::make_shared<const std::vector<FileItem>>(std::move(children));
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto newSnapshot = std::make_shared<IndexSnapshot>();
+        if (snapshot_) {
+            newSnapshot->chunksByDir = snapshot_->chunksByDir;
+            newSnapshot->totalCount = snapshot_->totalCount;
         }
+        if (poolIndex >= newSnapshot->chunksByDir.size()) {
+            newSnapshot->chunksByDir.resize(poolIndex + 1);
+        }
+        const size_t oldSize = newSnapshot->chunksByDir[poolIndex] ? newSnapshot->chunksByDir[poolIndex]->size() : 0;
+        newSnapshot->totalCount = newSnapshot->totalCount - oldSize + newChunk->size();
+        newSnapshot->chunksByDir[poolIndex] = std::move(newChunk);
+        snapshot_ = std::move(newSnapshot);
+        ready_ = true;
+    }
+
+    void PruneDirectory(uint32_t poolIndex) {
+        SetDirectoryChunk(poolIndex, {});
     }
 
     static bool IsDriveRoot(const fs::path& p) {
@@ -351,12 +387,13 @@ public:
     std::vector<FileSearchResult> Search(std::wstring_view query, size_t maxResults = 30) const {
         if (query.empty()) return {};
 
-        std::shared_ptr<const IndexSnapshot> snapshot;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            snapshot = snapshot_;
-        }
-        if (!snapshot || snapshot->chunks.empty()) return {};
+        // Coarse-locked for the whole call (matches Count()'s existing
+        // locking style): pool_ isn't independently thread-safe, and
+        // search is already sub-millisecond, so lock hold time here is
+        // negligible.
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_ptr<const IndexSnapshot> snapshot = snapshot_;
+        if (!snapshot || snapshot->chunksByDir.empty()) return {};
 
         const std::wstring normQuery = Normalize(query);
         if (normQuery.empty()) return {};
@@ -376,6 +413,7 @@ public:
         struct Candidate {
             int score;
             const FileItem* item;
+            uint32_t parentDirIndex;
         };
         std::vector<Candidate> candidates;
         candidates.reserve(128);
@@ -388,8 +426,9 @@ public:
                                  query.find(L':') != std::wstring_view::npos);
         const bool allowPathMatch = hasPathSep || (tokens.size() > 1) || (normQuery.size() >= 3);
 
-        for (const auto& chunk : snapshot->chunks) {
-            for (const auto& item : chunk->items) {
+        for (const auto& chunk : snapshot->chunksByDir) {
+            if (!chunk) continue;
+            for (const auto& item : *chunk) {
                 int s = -1;
 
                 // 1. Primary match: check if query matches the file/folder name directly
@@ -401,11 +440,12 @@ public:
 
                 // 2. Secondary match: path / parent directory match
                 if (s <= 0 && allowPathMatch) {
+                    const std::wstring normPath = pool_.Get(item.parentDirIndex).normPath + L"\\" + item.normName;
                     if (isSingleToken) {
                         // Contiguous substring in path (e.g. folder name in path)
-                        size_t pos = item.normPath.find(normQuery);
+                        size_t pos = normPath.find(normQuery);
                         if (pos != std::wstring::npos) {
-                            const size_t penalty = (std::min)(item.normPath.size() / 4, size_t{300});
+                            const size_t penalty = (std::min)(normPath.size() / 4, size_t{300});
                             int pathScore = 2600 - static_cast<int>(penalty);
                             if (item.isDirectory) pathScore += 40;
                             s = (std::max)(1000, pathScore);
@@ -414,14 +454,14 @@ public:
                         // Multi-token match: all tokens must appear in normPath
                         bool allFound = true;
                         for (const auto& token : tokens) {
-                            if (item.normPath.find(token) == std::wstring::npos) {
+                            if (normPath.find(token) == std::wstring::npos) {
                                 allFound = false;
                                 break;
                             }
                         }
                         if (allFound) {
                             const bool lastMatchesName = (item.normName.find(tokens.back()) != std::wstring::npos);
-                            const size_t penalty = (std::min)(item.normPath.size() / 4, size_t{300});
+                            const size_t penalty = (std::min)(normPath.size() / 4, size_t{300});
                             int tokenScore = 2400 + (lastMatchesName ? 600 : 0) - static_cast<int>(penalty);
                             if (item.isDirectory) tokenScore += 40;
                             s = (std::max)(1000, tokenScore);
@@ -430,7 +470,7 @@ public:
                 }
 
                 if (s > 0) {
-                    candidates.push_back({s, &item});
+                    candidates.push_back({s, &item, item.parentDirIndex});
                 }
             }
         }
@@ -446,11 +486,12 @@ public:
         std::vector<FileSearchResult> results;
         results.reserve(count);
         for (size_t i = 0; i < count; ++i) {
+            const auto& c = candidates[i];
             results.push_back({
-                candidates[i].item->name,
-                candidates[i].item->path,
-                candidates[i].item->isDirectory,
-                candidates[i].score
+                c.item->name,
+                pool_.Get(c.parentDirIndex).path + L"\\" + c.item->name,
+                c.item->isDirectory,
+                c.score
             });
         }
         return results;
@@ -459,7 +500,8 @@ public:
 private:
     FileIndex() = default;
 
-    void AddItem(const fs::path& p, bool isDir, std::vector<FileItem>& items, std::unordered_set<uint64_t>& seen) {
+    void AddItem(const fs::path& p, bool isDir, uint32_t parentDirIndex,
+                 std::vector<FileItem>& items, std::unordered_set<uint64_t>& seen) {
         std::wstring name = p.filename().wstring();
         if (name.empty()) {
             name = p.wstring();
@@ -469,66 +511,117 @@ private:
             if (name[0] == L'.' || name[0] == L'~') return;
             if (!IsUserRelevantFile(p)) return;
         }
-        std::wstring fullPath = p.wstring();
-        std::wstring normPath = Normalize(fullPath);
-        uint64_t pathHash = Fnv1a64(normPath);
-        if (!seen.insert(pathHash).second) {
-            return;
-        }
+        uint64_t pathHash = Fnv1a64(Normalize(p.wstring()));
+        if (!seen.insert(pathHash).second) return;
         std::wstring norm = Normalize(name);
-        items.push_back({std::move(name), std::move(norm), std::move(fullPath), std::move(normPath), isDir});
+        items.push_back({std::move(name), std::move(norm), parentDirIndex, isDir});
     }
 
-    void ScanPath(const fs::path& root, std::vector<FileItem>& items, std::unordered_set<uint64_t>& seen, int maxDepth, size_t maxCount, size_t totalCountSoFar = 0) {
+    void ScanPath(const fs::path& root, uint32_t rootPoolIndex, DirectoryPool& pool,
+                  std::unordered_set<uint64_t>& seen, int maxDepth) {
         std::error_code ec;
         if (!fs::exists(root, ec)) return;
         if (IsDriveRoot(root) || ShouldSkipDirectory(root)) return;
 
+        // childrenByDir[poolIndex] accumulates one directory's direct
+        // children until that directory's listing is complete, then gets
+        // published as a single chunk - this is what makes a later
+        // incremental rescan of just that directory O(its own children),
+        // not O(the whole index).
+        std::unordered_map<uint32_t, std::vector<FileItem>> childrenByDir;
+        childrenByDir[rootPoolIndex]; // ensure root has an entry even if empty
+
         try {
             fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
             const fs::recursive_directory_iterator end;
+            std::vector<uint32_t> dirIndexAtDepth{rootPoolIndex};
 
             while (it != end && !ec) {
-                if (!running_.load()) return;
-                if (totalCountSoFar + items.size() >= maxCount) return;
+                if (!running_.load()) break;
 
                 const auto& entry = *it;
+                const int depth = it.depth(); // 0 == direct child of root
+                const uint32_t parentIdx = dirIndexAtDepth[static_cast<size_t>(depth)];
+
                 bool isDir = entry.is_directory(ec);
                 if (!ec && isDir) {
-                    if (it.depth() >= maxDepth || ShouldSkipDirectory(entry.path())) {
+                    if (depth >= maxDepth || ShouldSkipDirectory(entry.path())) {
                         it.disable_recursion_pending();
                     } else {
-                        AddItem(entry.path(), true, items, seen);
+                        AddItem(entry.path(), true, parentIdx, childrenByDir[parentIdx], seen);
+                        uint32_t childIdx = InternLocked(pool, entry.path().wstring(), Normalize(entry.path().wstring()));
+                        childrenByDir[childIdx]; // ensure it exists even if it turns out empty
+                        if (static_cast<size_t>(depth) + 1 >= dirIndexAtDepth.size()) {
+                            dirIndexAtDepth.push_back(childIdx);
+                        } else {
+                            dirIndexAtDepth[static_cast<size_t>(depth) + 1] = childIdx;
+                        }
                     }
                     it.increment(ec);
                     continue;
                 }
 
-                if (!ec && entry.is_regular_file(ec)) {
-                    if (IsUserRelevantFile(entry.path())) {
-                        AddItem(entry.path(), false, items, seen);
-                    }
+                if (!ec && entry.is_regular_file(ec) && IsUserRelevantFile(entry.path())) {
+                    AddItem(entry.path(), false, parentIdx, childrenByDir[parentIdx], seen);
                 }
                 it.increment(ec);
             }
         } catch (...) {}
+
+        for (auto& [poolIdx, children] : childrenByDir) {
+            RefreshMtimeLocked(pool, poolIdx);
+            SetDirectoryChunk(poolIdx, std::move(children));
+        }
+    }
+
+    static fs::file_time_type CurrentMtime(const std::wstring& path) {
+        std::error_code ec;
+        auto t = fs::last_write_time(path, ec);
+        return ec ? fs::file_time_type{} : t;
+    }
+
+    // DirectoryPool has no internal locking of its own (see DirectoryPool
+    // above); pool_ is written by the single worker thread and read by
+    // Search() from callers on other threads, so every write to it must
+    // go through mutex_ - the same lock Search() holds for its whole call.
+    uint32_t InternLocked(DirectoryPool& pool, const std::wstring& path, const std::wstring& normPath) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pool.Intern(path, normPath);
+    }
+
+    void RefreshMtimeLocked(DirectoryPool& pool, uint32_t idx) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pool.SetMtime(idx, CurrentMtime(pool.Get(idx).path));
+    }
+
+    // Interns `root` and, when it has a distinct parent, also registers
+    // `root` itself as a searchable item in that parent's chunk - so a
+    // single anchor folder (the repo root, or a test's scan root) is
+    // findable by its own name/path, not just its descendants. Only safe
+    // to use for roots whose parent chunk isn't shared with other
+    // concurrently-registered siblings, since it replaces that chunk
+    // wholesale; ScanPath itself uses the accumulate-then-publish-once
+    // pattern below for roots with many siblings.
+    uint32_t InternRootWithSelfEntry(const fs::path& root, std::unordered_set<uint64_t>& seen) {
+        uint32_t rootIdx = InternLocked(pool_, root.wstring(), Normalize(root.wstring()));
+        if (root.has_parent_path()) {
+            fs::path parent = root.parent_path();
+            if (parent != root) {
+                uint32_t parentIdx = InternLocked(pool_, parent.wstring(), Normalize(parent.wstring()));
+                std::vector<FileItem> selfItem;
+                AddItem(root, true, parentIdx, selfItem, seen);
+                if (!selfItem.empty()) {
+                    SetDirectoryChunk(parentIdx, std::move(selfItem));
+                }
+            }
+        }
+        return rootIdx;
     }
 
     void BuildIndex() {
         constexpr size_t kMaxFiles = 50000;
         std::unordered_set<uint64_t> seen;
         seen.reserve(kMaxFiles);
-
-        bool isFirstChunk = true;
-        auto publishOrAppend = [this, &isFirstChunk](std::vector<FileItem>&& chunkItems) {
-            if (chunkItems.empty()) return;
-            if (isFirstChunk) {
-                PublishSnapshot(std::move(chunkItems));
-                isFirstChunk = false;
-            } else {
-                AppendSnapshotChunk(std::move(chunkItems));
-            }
-        };
 
         size_t totalIndexed = 0;
 
@@ -540,12 +633,8 @@ private:
             std::error_code overrideEc;
             fs::path overrideRoot(scanRootOverride_);
             if (fs::exists(overrideRoot, overrideEc)) {
-                std::vector<FileItem> overrideItems;
-                overrideItems.reserve(8192);
-                AddItem(overrideRoot, true, overrideItems, seen);
-                ScanPath(overrideRoot, overrideItems, seen, 8, kMaxFiles, totalIndexed);
-                totalIndexed += overrideItems.size();
-                publishOrAppend(std::move(overrideItems));
+                uint32_t rootIdx = InternRootWithSelfEntry(overrideRoot, seen);
+                ScanPath(overrideRoot, rootIdx, pool_, seen, 8);
             }
             ready_ = true;
             if (notifyHwnd_) {
@@ -560,12 +649,9 @@ private:
         if (!ec && !currentDir.empty()) {
             fs::path repoDir = FindVerifiedProjectRoot(currentDir);
             if (!repoDir.empty()) {
-                std::vector<FileItem> step0Items;
-                step0Items.reserve(2048);
-                AddItem(repoDir, true, step0Items, seen);
-                ScanPath(repoDir, step0Items, seen, 6, kMaxFiles, totalIndexed);
-                totalIndexed += step0Items.size();
-                publishOrAppend(std::move(step0Items));
+                uint32_t repoIdx = InternRootWithSelfEntry(repoDir, seen);
+                ScanPath(repoDir, repoIdx, pool_, seen, 6);
+                totalIndexed = Count();
             }
         }
 
@@ -579,30 +665,29 @@ private:
             FOLDERID_Videos,
         };
 
-        std::vector<FileItem> step1Items;
-        step1Items.reserve(8192);
         for (const auto& kfid : userFolders) {
-            if (!running_.load() || totalIndexed + step1Items.size() >= kMaxFiles) break;
+            if (!running_.load() || totalIndexed >= kMaxFiles) break;
             PWSTR folderPath = nullptr;
             if (SUCCEEDED(SHGetKnownFolderPath(kfid, KF_FLAG_DEFAULT, nullptr, &folderPath)) && folderPath) {
-                AddItem(folderPath, true, step1Items, seen);
-                ScanPath(folderPath, step1Items, seen, 8, kMaxFiles, totalIndexed);
+                fs::path folder(folderPath);
+                uint32_t folderIdx = InternLocked(pool_, folder.wstring(), Normalize(folder.wstring()));
+                ScanPath(folder, folderIdx, pool_, seen, 8);
                 CoTaskMemFree(folderPath);
+                totalIndexed = Count();
             }
         }
-        totalIndexed += step1Items.size();
-        publishOrAppend(std::move(step1Items));
 
         // 2. Scan %USERPROFILE% roots (e.g. source code directories, projects, etc.)
         PWSTR profilePath = nullptr;
         if (running_.load() && totalIndexed < kMaxFiles &&
             SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Profile, KF_FLAG_DEFAULT, nullptr, &profilePath)) && profilePath) {
-            std::vector<FileItem> step2Items;
-            step2Items.reserve(8192);
+            uint32_t profileIdx = InternLocked(pool_, profilePath, Normalize(std::wstring(profilePath)));
+            std::vector<FileItem> profileItems;
+            profileItems.reserve(256);
             fs::directory_iterator dit(profilePath, fs::directory_options::skip_permission_denied, ec);
             try {
                 for (const auto& entry : dit) {
-                    if (!running_.load() || totalIndexed + step2Items.size() >= kMaxFiles) break;
+                    if (!running_.load() || totalIndexed + profileItems.size() >= kMaxFiles) break;
                     if (entry.is_directory(ec)) {
                         std::wstring name = entry.path().filename().wstring();
                         if (!ShouldSkipDirectory(entry.path()) &&
@@ -612,19 +697,20 @@ private:
                             _wcsicmp(name.c_str(), L"Pictures") != 0 &&
                             _wcsicmp(name.c_str(), L"Music") != 0 &&
                             _wcsicmp(name.c_str(), L"Videos") != 0) {
-                            AddItem(entry.path(), true, step2Items, seen);
-                            ScanPath(entry.path(), step2Items, seen, 8, kMaxFiles, totalIndexed);
+                            AddItem(entry.path(), true, profileIdx, profileItems, seen);
+                            uint32_t childIdx = InternLocked(pool_, entry.path().wstring(), Normalize(entry.path().wstring()));
+                            ScanPath(entry.path(), childIdx, pool_, seen, 8);
                         }
                     } else if (entry.is_regular_file(ec)) {
                         if (IsUserRelevantFile(entry.path())) {
-                            AddItem(entry.path(), false, step2Items, seen);
+                            AddItem(entry.path(), false, profileIdx, profileItems, seen);
                         }
                     }
                 }
             } catch (...) {}
+            SetDirectoryChunk(profileIdx, std::move(profileItems));
             CoTaskMemFree(profilePath);
-            totalIndexed += step2Items.size();
-            publishOrAppend(std::move(step2Items));
+            totalIndexed = Count();
         }
 
         // 3. Scan all fixed and removable drives (e.g. C:\, D:\, X:\)
@@ -635,10 +721,11 @@ private:
             while (*drive && running_.load() && totalIndexed < kMaxFiles) {
                 const UINT driveType = GetDriveTypeW(drive);
                 if (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE) {
-                    std::vector<FileItem> driveItems;
-                    driveItems.reserve(8192);
                     const wchar_t driveLetter = towupper(drive[0]);
                     const bool isDriveC = (driveLetter == L'C');
+                    uint32_t driveIdx = InternLocked(pool_, drive, Normalize(std::wstring(drive)));
+                    std::vector<FileItem> driveItems;
+                    driveItems.reserve(8192);
                     fs::directory_iterator dit(drive, fs::directory_options::skip_permission_denied, ec);
                     try {
                         for (const auto& entry : dit) {
@@ -649,19 +736,20 @@ private:
                                     continue;
                                 }
                                 if (!ShouldSkipDirectory(entry.path())) {
-                                    AddItem(entry.path(), true, driveItems, seen);
+                                    AddItem(entry.path(), true, driveIdx, driveItems, seen);
+                                    uint32_t childIdx = InternLocked(pool_, entry.path().wstring(), Normalize(entry.path().wstring()));
                                     const int maxDepth = isDriveC ? 4 : 8;
-                                    ScanPath(entry.path(), driveItems, seen, maxDepth, kMaxFiles, totalIndexed);
+                                    ScanPath(entry.path(), childIdx, pool_, seen, maxDepth);
                                 }
                             } else if (entry.is_regular_file(ec)) {
                                 if (IsUserRelevantFile(entry.path())) {
-                                    AddItem(entry.path(), false, driveItems, seen);
+                                    AddItem(entry.path(), false, driveIdx, driveItems, seen);
                                 }
                             }
                         }
                     } catch (...) {}
-                    totalIndexed += driveItems.size();
-                    publishOrAppend(std::move(driveItems));
+                    SetDirectoryChunk(driveIdx, std::move(driveItems));
+                    totalIndexed = Count();
                 }
                 drive += wcslen(drive) + 1;
             }
@@ -742,6 +830,7 @@ private:
     std::atomic<bool> ready_{false};
     mutable std::mutex mutex_;
     std::shared_ptr<const IndexSnapshot> snapshot_;
+    DirectoryPool pool_;
     std::thread worker_;
     HANDLE stopEvent_ = nullptr;
     HWND notifyHwnd_ = nullptr;
