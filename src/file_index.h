@@ -109,6 +109,53 @@ inline uint64_t Fnv1a64(std::wstring_view sv) noexcept {
     return hash;
 }
 
+// Namespace-scope (not a function-local static inside IsUserRelevantFile)
+// so it's constructed at static-init time, before main() runs - and
+// therefore, by C++'s reverse-of-construction destruction order, torn
+// down *after* FileIndex::Instance()'s function-local-static singleton.
+// FileIndex::~FileIndex() joins its worker thread before returning, so
+// that ordering guarantees the worker thread can never be mid-call into
+// IsUserRelevantFile (e.g. from IncrementalRescan) against an
+// already-destroyed set during process exit. Getting this backwards
+// (as a function-local static, first constructed only when the worker
+// thread's initial scan first calls IsUserRelevantFile - after
+// FileIndex::s_instance already exists) previously meant this set was
+// destroyed *before* ~FileIndex()'s Stop()/join() ran, letting a
+// still-running worker thread dereference a freed unordered_set on
+// std::exit() - reproduced reliably by a Debug build under
+// core_tests.cpp's FileIndex scoped-scan test.
+inline const std::unordered_set<std::wstring_view> kAllowedExtensions = {
+    // Documents & Office
+    L".pdf", L".doc", L".docx", L".docm", L".dot", L".dotx", L".odt", L".rtf", L".wps",
+    L".xls", L".xlsx", L".xlsm", L".xlsb", L".xlt", L".xltx", L".ods", L".csv", L".tsv",
+    L".ppt", L".pptx", L".pptm", L".pot", L".potx", L".odp",
+    L".epub", L".mobi", L".azw", L".azw3", L".djvu",
+    L".txt", L".md", L".markdown", L".rst", L".tex",
+    // Media - Images
+    L".png", L".jpg", L".jpeg", L".gif", L".bmp", L".webp", L".svg", L".ico",
+    L".tiff", L".tif", L".psd", L".ai", L".raw", L".heic", L".avif",
+    // Media - Audio
+    L".mp3", L".wav", L".flac", L".m4a", L".aac", L".ogg", L".wma", L".mid", L".midi", L".opus",
+    // Media - Video
+    L".mp4", L".mkv", L".avi", L".mov", L".wmv", L".flv", L".webm", L".m4v", L".mpg", L".mpeg",
+    // Archives
+    L".zip", L".rar", L".7z", L".tar", L".gz", L".bz2", L".xz", L".iso", L".cab", L".tgz",
+    // Code & Development
+    L".c", L".cpp", L".cxx", L".cc", L".h", L".hpp", L".hxx", L".inl", L".rc",
+    L".cs", L".fs", L".vb", L".sln", L".vcxproj", L".csproj", L".fsproj", L".props", L".targets",
+    L".java", L".kt", L".kts", L".scala", L".gradle",
+    L".html", L".htm", L".css", L".scss", L".sass", L".less",
+    L".js", L".mjs", L".cjs", L".ts", L".tsx", L".jsx", L".vue", L".svelte",
+    L".py", L".pyw", L".rb", L".php", L".pl", L".pm",
+    L".rs", L".go", L".swift", L".dart", L".lua",
+    L".json", L".jsonc", L".xml", L".yaml", L".yml", L".toml", L".ini", L".cfg", L".conf",
+    L".env", L".sql", L".proto", L".cmake",
+    L".sh", L".bash", L".zsh", L".ps1", L".psm1", L".bat", L".cmd",
+    L".asm", L".s",
+    // Executables & Shortcuts
+    L".exe", L".lnk", L".url", L".appref-ms", L".msi"
+};
+
 class FileIndex {
 public:
     static FileIndex& Instance() {
@@ -190,6 +237,7 @@ public:
     void ResetForTest() {
         std::lock_guard<std::mutex> lock(mutex_);
         pool_ = DirectoryPool{};
+        savedPoolCache_ = DirectoryPool{}; // see SaveIndexCache's comment on this mirror
         snapshot_.reset();
         ready_ = false;
     }
@@ -199,20 +247,41 @@ public:
 
     bool SaveIndexCache(const std::wstring& path) const {
         std::shared_ptr<const IndexSnapshot> snapshot;
-        DirectoryPool poolCopy;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             snapshot = snapshot_;
-            poolCopy = pool_;
+            // Mirror pool_ into savedPoolCache_ incrementally instead of
+            // deep-copying the whole DirectoryPool under this lock every
+            // call. SaveIndexCache runs every ~5 minutes from the live
+            // worker thread (IncrementalRescan) while Search() can block
+            // on this same mutex_ concurrently, so an O(n) copy of tens
+            // of thousands of path/normPath wstrings here would stall
+            // those callers for a perceptible amount of time at full-disk
+            // scale. Refreshing an existing entry's mtime is a trivial
+            // scalar write (no allocation); only genuinely new entries
+            // (added since the previous save) pay the string-copy cost,
+            // and a rescan pass normally finds few of those.
+            // savedPoolCache_ is only ever touched here (and reset
+            // alongside pool_ in LoadIndexCache/ResetForTest), so it's
+            // safe to read below without the lock held.
+            const auto& liveEntries = pool_.Entries();
+            const size_t priorCount = (std::min)(savedPoolCache_.Size(), liveEntries.size());
+            for (size_t i = 0; i < priorCount; ++i) {
+                savedPoolCache_.SetMtime(static_cast<uint32_t>(i), liveEntries[i].lastKnownMtime);
+            }
+            for (size_t i = priorCount; i < liveEntries.size(); ++i) {
+                uint32_t idx = savedPoolCache_.Intern(liveEntries[i].path, liveEntries[i].normPath);
+                savedPoolCache_.SetMtime(idx, liveEntries[i].lastKnownMtime);
+            }
         }
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (!out) return false;
 
         WriteRaw(out, kCacheMagic);
         WriteRaw(out, kCacheFormatVersion);
-        const uint32_t dirCount = static_cast<uint32_t>(poolCopy.Entries().size());
+        const uint32_t dirCount = static_cast<uint32_t>(savedPoolCache_.Entries().size());
         WriteRaw(out, dirCount);
-        for (const auto& entry : poolCopy.Entries()) {
+        for (const auto& entry : savedPoolCache_.Entries()) {
             WriteWString(out, entry.path);
             WriteWString(out, entry.normPath);
             WriteRaw(out, entry.lastKnownMtime.time_since_epoch().count());
@@ -290,6 +359,12 @@ public:
 
             std::lock_guard<std::mutex> lock(mutex_);
             pool_ = std::move(newPool);
+            // savedPoolCache_ mirrors pool_ by index position (see
+            // SaveIndexCache); a wholesale pool_ replacement invalidates
+            // that mirror, so drop it and let the next SaveIndexCache
+            // call rebuild it from scratch (a one-time cost, not a
+            // recurring one).
+            savedPoolCache_ = DirectoryPool{};
             snapshot_ = std::move(newSnapshot);
             ready_ = true;
             return true;
@@ -340,6 +415,116 @@ public:
 
     void PruneDirectory(uint32_t poolIndex) {
         SetDirectoryChunk(poolIndex, {});
+    }
+
+    // Drops every indexed entry whose root drive no longer exists (e.g. an
+    // unplugged removable drive) - each distinct drive letter is stat'd at
+    // most once per call via driveExistsCache, not once per directory.
+    void PruneAbsentDrives() {
+        DirectoryPool poolCopy;
+        std::shared_ptr<const IndexSnapshot> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            poolCopy = pool_;
+            snapshot = snapshot_;
+        }
+        if (!snapshot) return;
+
+        std::unordered_map<std::wstring, bool> driveExistsCache;
+        for (uint32_t i = 0; i < poolCopy.Entries().size(); ++i) {
+            if (i >= snapshot->chunksByDir.size() || !snapshot->chunksByDir[i]) continue;
+            const auto& path = poolCopy.Entries()[i].path;
+            if (path.size() < 2 || path[1] != L':') continue;
+            const std::wstring driveRoot = path.substr(0, 2) + L"\\";
+            auto it = driveExistsCache.find(driveRoot);
+            bool exists;
+            if (it != driveExistsCache.end()) {
+                exists = it->second;
+            } else {
+                std::error_code ec;
+                exists = fs::exists(driveRoot, ec);
+                driveExistsCache[driveRoot] = exists;
+            }
+            if (!exists) PruneDirectory(i);
+        }
+    }
+
+    // Periodic maintenance pass: prunes anything under a now-absent drive,
+    // then re-lists (cheaply - immediate children only) every remaining
+    // directory whose mtime has changed since it was last scanned. A
+    // brand-new subdirectory discovered during a re-list gets a full
+    // ScanPath walk, same as a first-run scan of that one subtree. Called
+    // from WorkerLoop's periodic timer and once right after a successful
+    // cache load; also callable directly by a test.
+    void IncrementalRescan() {
+        phase_ = Phase::IncrementalRescan;
+        PruneAbsentDrives();
+
+        DirectoryPool poolSnapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            poolSnapshot = pool_;
+        }
+
+        // Fresh for this rescan pass only - never shared with BuildIndex's
+        // own seen/scannedDirs, and never persisted across passes (see
+        // ScanPath's comment on scannedDirs for why a stale/shared set is
+        // dangerous: it would make a ScanPath call below think a
+        // directory was already fully walked and skip it, silently
+        // emptying that directory's chunk).
+        std::unordered_set<uint64_t> seen;
+        std::unordered_set<uint32_t> scannedDirs;
+
+        for (uint32_t i = 0; i < poolSnapshot.Entries().size(); ++i) {
+            if (!running_.load()) break;
+            const auto& entry = poolSnapshot.Entries()[i];
+            std::error_code ec;
+            if (!fs::exists(entry.path, ec)) continue; // handled by PruneAbsentDrives / will be pruned next pass
+            fs::file_time_type currentMtime = fs::last_write_time(entry.path, ec);
+            if (ec || currentMtime == entry.lastKnownMtime) continue;
+
+            // This directory's own contents changed - re-list its immediate
+            // children only (cheap); brand-new subdirectories found here get
+            // fully walked (they have no prior pool entry / stored mtime).
+            std::vector<FileItem> freshChildren;
+            fs::directory_iterator dit(entry.path, fs::directory_options::skip_permission_denied, ec);
+            if (ec) continue;
+            seen.clear();
+            // Mirrors BuildIndex's own drive-root exclusion: C:\Users is
+            // deliberately never indexed as a whole (BuildIndex reaches
+            // each user's own profile directly via known-folder paths
+            // instead) - without repeating that exclusion here, a rare
+            // real change to C:\'s own mtime would re-list C:\, discover
+            // "Users" as a brand-new child (it was never interned), and
+            // fully walk every profile on the machine.
+            const bool isDriveRootEntry = IsDriveRoot(entry.path);
+            const bool isDriveC = isDriveRootEntry && !entry.path.empty() && towupper(entry.path[0]) == L'C';
+            try {
+                for (const auto& child : dit) {
+                    bool isDir = child.is_directory(ec);
+                    if (!ec && isDir) {
+                        if (ShouldSkipDirectory(child.path())) continue;
+                        if (isDriveC && _wcsicmp(child.path().filename().wstring().c_str(), L"Users") == 0) continue;
+                        AddItem(child.path(), true, i, freshChildren, seen);
+                        uint32_t childIdx = InternLocked(pool_, child.path().wstring(), Normalize(child.path().wstring()));
+                        if (childIdx >= poolSnapshot.Size()) {
+                            // Genuinely new subdirectory - fully walk it (bounded depth,
+                            // same as a first-run scan of that one subtree).
+                            ScanPath(child.path(), childIdx, pool_, seen, scannedDirs, 8);
+                        }
+                    } else if (!ec && child.is_regular_file(ec) && IsUserRelevantFile(child.path())) {
+                        AddItem(child.path(), false, i, freshChildren, seen);
+                    }
+                }
+            } catch (...) {}
+
+            SetMtimeLocked(pool_, i, currentMtime);
+            SetDirectoryChunk(i, std::move(freshChildren));
+        }
+
+        phase_ = Phase::Loaded;
+        if (notifyHwnd_) PostMessageW(notifyHwnd_, kFilesReadyMessage, 0, 0);
+        if (!cachePathOverride_.empty()) SaveIndexCache(cachePathOverride_);
     }
 
     static bool IsDriveRoot(const fs::path& p) {
@@ -523,38 +708,6 @@ public:
         std::wstring lowerExt;
         lowerExt.reserve(ext.size());
         for (wchar_t c : ext) lowerExt.push_back(static_cast<wchar_t>(towlower(c)));
-
-        static const std::unordered_set<std::wstring_view> kAllowedExtensions = {
-            // Documents & Office
-            L".pdf", L".doc", L".docx", L".docm", L".dot", L".dotx", L".odt", L".rtf", L".wps",
-            L".xls", L".xlsx", L".xlsm", L".xlsb", L".xlt", L".xltx", L".ods", L".csv", L".tsv",
-            L".ppt", L".pptx", L".pptm", L".pot", L".potx", L".odp",
-            L".epub", L".mobi", L".azw", L".azw3", L".djvu",
-            L".txt", L".md", L".markdown", L".rst", L".tex",
-            // Media - Images
-            L".png", L".jpg", L".jpeg", L".gif", L".bmp", L".webp", L".svg", L".ico",
-            L".tiff", L".tif", L".psd", L".ai", L".raw", L".heic", L".avif",
-            // Media - Audio
-            L".mp3", L".wav", L".flac", L".m4a", L".aac", L".ogg", L".wma", L".mid", L".midi", L".opus",
-            // Media - Video
-            L".mp4", L".mkv", L".avi", L".mov", L".wmv", L".flv", L".webm", L".m4v", L".mpg", L".mpeg",
-            // Archives
-            L".zip", L".rar", L".7z", L".tar", L".gz", L".bz2", L".xz", L".iso", L".cab", L".tgz",
-            // Code & Development
-            L".c", L".cpp", L".cxx", L".cc", L".h", L".hpp", L".hxx", L".inl", L".rc",
-            L".cs", L".fs", L".vb", L".sln", L".vcxproj", L".csproj", L".fsproj", L".props", L".targets",
-            L".java", L".kt", L".kts", L".scala", L".gradle",
-            L".html", L".htm", L".css", L".scss", L".sass", L".less",
-            L".js", L".mjs", L".cjs", L".ts", L".tsx", L".jsx", L".vue", L".svelte",
-            L".py", L".pyw", L".rb", L".php", L".pl", L".pm",
-            L".rs", L".go", L".swift", L".dart", L".lua",
-            L".json", L".jsonc", L".xml", L".yaml", L".yml", L".toml", L".ini", L".cfg", L".conf",
-            L".env", L".sql", L".proto", L".cmake",
-            L".sh", L".bash", L".zsh", L".ps1", L".psm1", L".bat", L".cmd",
-            L".asm", L".s",
-            // Executables & Shortcuts
-            L".exe", L".lnk", L".url", L".appref-ms", L".msi"
-        };
 
         return kAllowedExtensions.find(std::wstring_view(lowerExt)) != kAllowedExtensions.end();
     }
@@ -829,6 +982,14 @@ private:
         pool.SetMtime(idx, mtime);
     }
 
+    // Companion to RefreshMtimeLocked, for callers (IncrementalRescan) that
+    // already have a freshly stat'd mtime in hand and don't need this call
+    // to make its own last_write_time() stat under the lock.
+    void SetMtimeLocked(DirectoryPool& pool, uint32_t idx, fs::file_time_type mtime) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pool.SetMtime(idx, mtime);
+    }
+
     // Registers `root` as a searchable item in its own parent's chunk by
     // merging (read-modify-write) into whatever's already published
     // there, instead of replacing it - so it can never clobber (or need
@@ -842,6 +1003,12 @@ private:
         fs::path parent = root.parent_path();
         if (parent == root) return;
         uint32_t parentIdx = InternLocked(pool_, parent.wstring(), Normalize(parent.wstring()));
+        // Unlike a directory ScanPath actually walks, this parent is only
+        // ever touched here (to file one self-item) - without this, its
+        // lastKnownMtime stays default/epoch forever, so the very first
+        // IncrementalRescan pass would always see it as "changed" and
+        // re-list it in full, even when nothing on disk changed.
+        RefreshMtimeLocked(pool_, parentIdx);
         std::vector<FileItem> selfItem;
         AddItem(root, true, parentIdx, selfItem, seen);
         if (selfItem.empty()) return;
@@ -965,6 +1132,11 @@ private:
                 }
             } catch (...) {}
             SetDirectoryChunk(profileIdx, std::move(profileItems));
+            // Same reasoning as MergeSelfItem's comment: this directory is
+            // listed by hand here (not via ScanPath, which refreshes mtime
+            // itself), so without this its mtime would stay default/epoch
+            // and IncrementalRescan would always treat it as "changed".
+            RefreshMtimeLocked(pool_, profileIdx);
             CoTaskMemFree(profilePath);
         }
 
@@ -1004,6 +1176,11 @@ private:
                         }
                     } catch (...) {}
                     SetDirectoryChunk(driveIdx, std::move(driveItems));
+                    // Same reasoning as MergeSelfItem's/profileIdx's comment
+                    // above: listed by hand here, not via ScanPath, so its
+                    // mtime needs an explicit refresh or IncrementalRescan
+                    // would always treat every drive root as "changed".
+                    RefreshMtimeLocked(pool_, driveIdx);
                 }
                 drive += wcslen(drive) + 1;
             }
@@ -1040,6 +1217,7 @@ private:
         if (loadedFromCache) {
             phase_ = Phase::Loaded;
             if (notifyHwnd_) PostMessageW(notifyHwnd_, kFilesReadyMessage, 0, 0);
+            IncrementalRescan(); // correct a stale cache quickly on startup
         } else {
             BuildIndex();
             if (running_.load() && !cachePathOverride_.empty()) {
@@ -1090,7 +1268,7 @@ private:
             WaitForSingleObject(stopEvent_, 3000);
             if (!running_.load()) break;
 
-            BuildIndex();
+            IncrementalRescan(); // was: BuildIndex();
 
             // Refresh change notification handles
             if (hDesktop != INVALID_HANDLE_VALUE && hDesktop != nullptr) FindNextChangeNotification(hDesktop);
@@ -1109,6 +1287,10 @@ private:
     mutable std::mutex mutex_;
     std::shared_ptr<const IndexSnapshot> snapshot_;
     DirectoryPool pool_;
+    // Incremental mirror of pool_ used only by SaveIndexCache, so it can
+    // avoid a full O(n) deep copy under mutex_ on every call - see that
+    // method's comment. Reset alongside pool_ in LoadIndexCache/ResetForTest.
+    mutable DirectoryPool savedPoolCache_;
     std::thread worker_;
     HANDLE stopEvent_ = nullptr;
     HWND notifyHwnd_ = nullptr;

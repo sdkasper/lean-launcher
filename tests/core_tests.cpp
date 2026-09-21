@@ -895,6 +895,96 @@ int main() {
         DeleteFileW(testCachePath.c_str());
     }
 
+    // -----------------------------------------------------------------------------
+    // Incremental rescan: unchanged directories are left alone; drive-prune removes
+    // entries under a path that no longer exists.
+    // -----------------------------------------------------------------------------
+    {
+        FileIndex::Instance().Stop();
+        // Reset first: earlier blocks in this suite left pool_/snapshot_
+        // populated by real BuildIndex() runs, so the exact Count() checks
+        // below need a known-empty baseline (same reasoning as the
+        // "Per-Directory Chunk Storage" block above).
+        FileIndex::Instance().ResetForTest();
+        takeoff::DirectoryPool& pool = FileIndex::Instance().TestOnlyPool();
+        // Simulate a previously-indexed directory that is now gone (stands in for
+        // an unplugged removable drive without needing real removable hardware).
+        uint32_t goneIdx = pool.Intern(L"Z:\\WasHereOnce", takeoff::Normalize(L"Z:\\WasHereOnce"));
+        std::vector<FileItem> goneItems;
+        goneItems.push_back({L"ghost.txt", L"ghost txt", goneIdx, false});
+        FileIndex::Instance().SetDirectoryChunk(goneIdx, std::move(goneItems));
+        Check(FileIndex::Instance().Count() == 1, "Setup: ghost entry present before pruning");
+
+        FileIndex::Instance().PruneAbsentDrives();
+        Check(FileIndex::Instance().Count() == 0, "PruneAbsentDrives removes entries whose root no longer exists");
+    }
+
+    // -----------------------------------------------------------------------------
+    // Incremental rescan: an unchanged directory is left untouched, and a real
+    // file-system change (new file) is picked up on the next IncrementalRescan
+    // pass without a full BuildIndex() re-walk.
+    // -----------------------------------------------------------------------------
+    {
+        FileIndex::Instance().Stop();
+        FileIndex::Instance().ResetForTest();
+
+        // testRoot holds nothing but scanTarget. BuildIndex's scanRootOverride
+        // path self-registers scanTarget under its parent (testRoot) with a
+        // default/never-stat'd mtime, so the first IncrementalRescan pass
+        // below will always treat testRoot as "changed" and re-list it - by
+        // construction, that re-list finds only the already-known scanTarget
+        // (not some unrelated real subdirectory of the actual cwd), so it
+        // can't cascade into scanning unrelated real directories.
+        fs::path testRoot = fs::current_path() / L"llfi_incremental_test_root";
+        fs::path scanTarget = testRoot / L"scan_target";
+        std::error_code ec;
+        fs::remove_all(testRoot, ec);
+        fs::create_directories(scanTarget, ec);
+        {
+            std::ofstream seedFile((scanTarget / L"seed.txt").wstring());
+            seedFile << "seed";
+        }
+
+        const std::wstring incrementalCachePath = L"incremental_rescan_test_cache.bin";
+        DeleteFileW(incrementalCachePath.c_str()); // ensure a cold BuildIndex(), not a stale cache load
+
+        FileIndex::Instance().Start(nullptr, scanTarget.wstring(), incrementalCachePath);
+        for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        Check(FileIndex::Instance().Count() > 0, "Setup: scoped scan indexed the seed file");
+
+        // Settle pass: testRoot's self-registered entry starts with a
+        // default mtime (see comment above), so this first pass will
+        // correctly treat it as changed, re-list it (finding only the
+        // already-known scanTarget), and record its real mtime. Do this
+        // once before taking the steady-state baseline below.
+        FileIndex::Instance().IncrementalRescan();
+        const size_t countBeforeChange = FileIndex::Instance().Count();
+
+        // No filesystem change since the settle pass - every directory's
+        // recorded mtime should now be accurate, so this pass is a no-op.
+        FileIndex::Instance().IncrementalRescan();
+        Check(FileIndex::Instance().Count() == countBeforeChange,
+              "IncrementalRescan leaves unchanged directories' count untouched");
+
+        // Real change: add a new file, which bumps scanTarget's mtime.
+        {
+            std::ofstream newFile((scanTarget / L"added.txt").wstring());
+            newFile << "added";
+        }
+        FileIndex::Instance().IncrementalRescan();
+        auto addedResults = FileIndex::Instance().Search(L"added.txt");
+        Check(!addedResults.empty() && addedResults[0].name == L"added.txt",
+              "IncrementalRescan picks up a new file after its directory's mtime changes");
+        Check(FileIndex::Instance().Count() == countBeforeChange + 1,
+              "IncrementalRescan's count reflects exactly the one new file, nothing lost/duplicated");
+
+        FileIndex::Instance().Stop();
+        fs::remove_all(testRoot, ec);
+        DeleteFileW(incrementalCachePath.c_str());
+    }
+
     // 5. Settings Scroll and Viewport Invariants:
     // Guarantees Settings content cleanly fits and scrolls without overlapping FooterTop (440px).
     //
