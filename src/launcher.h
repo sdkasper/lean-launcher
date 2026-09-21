@@ -1191,17 +1191,18 @@ private:
 
     enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, Obsidian, About };
 
-    // Settings rows 0-3: keyboard shortcuts. 4-6: system. 7-12: search (7
+    // Settings rows 0-3: keyboard shortcuts. 4-6: system. 7-14: search (7
     // File search, 8 Web search, 9 Search engine picker - US-016; 10-12 add
-    // the File/Web/App search prefix fields - US-017). 13-37: Obsidian
-    // (only row 13 is active when settings_.obsidianEnabled is false - see
+    // the File/Web/App search prefix fields - US-017; 13-14 add Edit
+    // exclusions.../Help - US-019). 15-39: Obsidian (only row 15 is active
+    // when settings_.obsidianEnabled is false - see
     // IsRowInCategory/ObsidianRowCount). Each of the five *Summary rows is
     // always shown when Obsidian is enabled; its detail rows only appear
     // while obsidianExpandedSection_ names that section - see
-    // ObsidianVisibleRows(). 38 is the About tab's one row (not part of
-    // "All" - see IsRowInCategory). 39 is the Reset button, handled as a
+    // ObsidianVisibleRows(). 40 is the About tab's one row (not part of
+    // "All" - see IsRowInCategory). 41 is the Reset button, handled as a
     // sentinel row rather than a real settings row.
-    // Rows 9-12 are not part of the Obsidian block below - they live in the
+    // Rows 9-14 are not part of the Obsidian block below - they live in the
     // Search category alongside rows 7-8 - so every Obsidian row constant
     // shifts relative to the row it would otherwise have under a plain
     // contiguous 0.. numbering.
@@ -1209,34 +1210,36 @@ private:
     static constexpr int kRowFileSearchPrefix = 10;
     static constexpr int kRowWebSearchPrefix = 11;
     static constexpr int kRowAppSearchPrefix = 12;
-    static constexpr int kRowObsidianEnabled = 13;
-    static constexpr int kRowVaultPicker = 14;
-    static constexpr int kRowVaultSearchSummary = 15;
-    static constexpr int kRowVaultSearchEnabled = 16;
-    static constexpr int kRowVaultSearchPrefix = 17;
-    static constexpr int kRowVaultSearchPillLabel = 18;
-    static constexpr int kRowTaskSummary = 19;
-    static constexpr int kRowTaskAddEnabled = 20;
-    static constexpr int kRowTaskPrefix = 21;
-    static constexpr int kRowTaskPillLabel = 22;
-    static constexpr int kRowTaskPreviewPrefix = 23;
-    static constexpr int kRowNoteAddSummary = 24;
-    static constexpr int kRowNoteAddEnabled = 25;
-    static constexpr int kRowNoteAddPrefix = 26;
-    static constexpr int kRowNoteAddPillLabel = 27;
-    static constexpr int kRowNoteAddPreviewPrefix = 28;
-    static constexpr int kRowLogSummary = 29;
-    static constexpr int kRowLogEnabled = 30;
-    static constexpr int kRowLogPrefix = 31;
-    static constexpr int kRowLogPillLabel = 32;
-    static constexpr int kRowLogPreviewPrefix = 33;
-    static constexpr int kRowLogHeading = 34;
-    static constexpr int kRowOverridesSummary = 35;
-    static constexpr int kRowDailyNoteFolderOverride = 36;
-    static constexpr int kRowDailyNoteFormatOverride = 37;
-    static constexpr int kRowAboutGithubLink = 38;
-    static constexpr int kSettingsMaxRow = 38;
-    static constexpr int kRowResetToDefaults = 39;
+    static constexpr int kRowFileSearchEditExclusions = 13;
+    static constexpr int kRowFileSearchHelp = 14;
+    static constexpr int kRowObsidianEnabled = 15;
+    static constexpr int kRowVaultPicker = 16;
+    static constexpr int kRowVaultSearchSummary = 17;
+    static constexpr int kRowVaultSearchEnabled = 18;
+    static constexpr int kRowVaultSearchPrefix = 19;
+    static constexpr int kRowVaultSearchPillLabel = 20;
+    static constexpr int kRowTaskSummary = 21;
+    static constexpr int kRowTaskAddEnabled = 22;
+    static constexpr int kRowTaskPrefix = 23;
+    static constexpr int kRowTaskPillLabel = 24;
+    static constexpr int kRowTaskPreviewPrefix = 25;
+    static constexpr int kRowNoteAddSummary = 26;
+    static constexpr int kRowNoteAddEnabled = 27;
+    static constexpr int kRowNoteAddPrefix = 28;
+    static constexpr int kRowNoteAddPillLabel = 29;
+    static constexpr int kRowNoteAddPreviewPrefix = 30;
+    static constexpr int kRowLogSummary = 31;
+    static constexpr int kRowLogEnabled = 32;
+    static constexpr int kRowLogPrefix = 33;
+    static constexpr int kRowLogPillLabel = 34;
+    static constexpr int kRowLogPreviewPrefix = 35;
+    static constexpr int kRowLogHeading = 36;
+    static constexpr int kRowOverridesSummary = 37;
+    static constexpr int kRowDailyNoteFolderOverride = 38;
+    static constexpr int kRowDailyNoteFormatOverride = 39;
+    static constexpr int kRowAboutGithubLink = 40;
+    static constexpr int kSettingsMaxRow = 40;
+    static constexpr int kRowResetToDefaults = 41;
 
     // Which of the five Obsidian action blocks is currently expanded, or
     // -1 if all are collapsed. A single int gives accordion behavior for
@@ -1332,7 +1335,7 @@ private:
         }
         if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
-        if (cat == SettingsCategory::Search) return row >= 7 && row <= kRowAppSearchPrefix;
+        if (cat == SettingsCategory::Search) return row >= 7 && row <= kRowFileSearchHelp;
         if (cat == SettingsCategory::Obsidian) return ObsidianRowRank(row) >= 0;
         if (cat == SettingsCategory::About) return row == kRowAboutGithubLink;
         return false;
@@ -1350,7 +1353,7 @@ private:
     int LastRowInCategory(SettingsCategory cat) const {
         if (cat == SettingsCategory::Shortcuts) return 3;
         if (cat == SettingsCategory::System) return 6;
-        if (cat == SettingsCategory::Search) return kRowAppSearchPrefix;
+        if (cat == SettingsCategory::Search) return kRowFileSearchHelp;
         if (cat == SettingsCategory::About) return kRowAboutGithubLink;
         // Obsidian, and the fallback used for "All" (whose last row is
         // whatever the Obsidian section's current last row is).
@@ -1406,18 +1409,18 @@ private:
 
     float SettingsContentBottom() const {
         if (settingsCategory_ == SettingsCategory::All) {
-            // 761 = fixed header offset for the OBSIDIAN card in the All view
-            // (Search card start 441 + 6 rows * 47 + 38 gap, see the Search
+            // 855 = fixed header offset for the OBSIDIAN card in the All view
+            // (Search card start 441 + 8 rows * 47 + 38 gap, see the Search
             // branch below); +16 bottom padding.
-            return 761.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
+            return 855.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 240.0f;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 193.0f;
         } else if (settingsCategory_ == SettingsCategory::Search) {
-            // 6 rows (File search, Web search, Search engine - US-016; File/Web/App
-            // search prefix - US-017) + 16 bottom padding.
-            return 334.0f;
+            // 8 rows (File search, Web search, Search engine - US-016; File/Web/App
+            // search prefix - US-017; Edit exclusions, Help - US-019) + 16 bottom padding.
+            return 428.0f;
         } else if (settingsCategory_ == SettingsCategory::Obsidian) {
             // 36 header offset + N rows + 16 bottom padding.
             return 36.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
@@ -1445,8 +1448,8 @@ private:
             if (row < 4) return 36.0f + row * kSettingsRowHeight;
             if (row < 7) return 262.0f + (row - 4) * kSettingsRowHeight;
             if (row < kRowObsidianEnabled) return 441.0f + (row - 7) * kSettingsRowHeight;
-            // Obsidian section, All-view only: header@741, card@761.
-            return 761.0f + ObsidianRowRank(row) * kSettingsRowHeight;
+            // Obsidian section, All-view only: header@835, card@855.
+            return 855.0f + ObsidianRowRank(row) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 36.0f + row * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::System) {
@@ -1500,7 +1503,7 @@ private:
             if (row == 0) sectionHeaderTop = 16.0f;
             else if (row == 4) sectionHeaderTop = 242.0f;
             else if (row == 7) sectionHeaderTop = 421.0f;
-            else if (row == kRowObsidianEnabled) sectionHeaderTop = 741.0f;
+            else if (row == kRowObsidianEnabled) sectionHeaderTop = 835.0f;
         } else {
             if (row == 0 || row == 4 || row == 7 || row == kRowObsidianEnabled || row == kRowAboutGithubLink) sectionHeaderTop = 16.0f;
         }
@@ -2175,6 +2178,25 @@ private:
         }
         if (row == kRowAboutGithubLink) {
             ShellExecuteW(nullptr, L"open", takeoff::kRepoUrl, nullptr, nullptr, SW_SHOWNORMAL);
+            return;
+        }
+        if (row == kRowFileSearchEditExclusions) {
+            // File I/O + spawning the user's editor is a real side effect
+            // that a UI test run must not trigger - mirrors the existing
+            // if constexpr (!kUiTest) guard used for Obsidian's own
+            // Start()/Stop() side effect a few lines above kRowVaultPicker.
+            if constexpr (!kUiTest) {
+                const std::wstring exclusionsPath = takeoff::FileIndex::DefaultExclusionsPath();
+                if (takeoff::FileIndex::EnsureExclusionsFileWithHeader(exclusionsPath)) {
+                    ShellExecuteW(nullptr, L"open", exclusionsPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            }
+            return;
+        }
+        if (row == kRowFileSearchHelp) {
+            ShellExecuteW(nullptr, L"open",
+                L"https://github.com/sdkasper/lean-launcher/blob/master/docs/file-search.md",
+                nullptr, nullptr, SW_SHOWNORMAL);
             return;
         }
         if (row == kRowVaultSearchSummary) { ToggleObsidianSection(kSectionVaultSearch); return; }
@@ -4779,7 +4801,7 @@ private:
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Search) {
             const float hY = (settingsCategory_ == SettingsCategory::All) ? 421.0f : 16.0f;
             const float cY = (settingsCategory_ == SettingsCategory::All) ? 441.0f : 36.0f;
-            drawCard(L"SEARCH & FEATURES", hY, cY, 6);
+            drawCard(L"SEARCH & FEATURES", hY, cY, 8);
 
             DrawSettingsRow(7, cY + offsetY, L"File search",
                 L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
@@ -4799,11 +4821,17 @@ private:
             DrawSettingsRow(kRowAppSearchPrefix, cY + 5 * kSettingsRowHeight + offsetY, L"App search prefix",
                 L"Type this followed by a space to show only installed apps",
                 settings_.appSearchPrefix, false, false, false, true);
+            DrawSettingsRow(kRowFileSearchEditExclusions, cY + 6 * kSettingsRowHeight + offsetY, L"Edit exclusions...",
+                L"Add your own folder and file-type exclusions on top of the built-in list",
+                {}, false, false, true);
+            DrawSettingsRow(kRowFileSearchHelp, cY + 7 * kSettingsRowHeight + offsetY, L"Help",
+                L"Learn how file search exclusions work",
+                {}, false, false, true);
         }
 
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Obsidian) {
-            const float hY = (settingsCategory_ == SettingsCategory::All) ? 741.0f : 16.0f;
-            const float cY = (settingsCategory_ == SettingsCategory::All) ? 761.0f : 36.0f;
+            const float hY = (settingsCategory_ == SettingsCategory::All) ? 835.0f : 16.0f;
+            const float cY = (settingsCategory_ == SettingsCategory::All) ? 855.0f : 36.0f;
             const auto& visibleRows = ObsidianVisibleRows();
             drawCard(L"OBSIDIAN", hY, cY, static_cast<int>(visibleRows.size()));
             for (size_t i = 0; i < visibleRows.size(); ++i) {
