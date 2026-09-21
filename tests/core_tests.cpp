@@ -633,6 +633,75 @@ int main() {
     Check(FileIndex::IsUserRelevantFile(L"REPORT.PDF"), "allow uppercase .PDF");
 
     // -----------------------------------------------------------------------------
+    // UserExclusions: exclusions-file parsing (US-019)
+    // -----------------------------------------------------------------------------
+    {
+        wchar_t tempDirBuf[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf);
+        fs::path scratchDir = fs::path(tempDirBuf) / L"llfi_exclusions_parse_test";
+        std::error_code ec;
+        fs::create_directories(scratchDir, ec);
+
+        auto writeExclusionsFile = [&](const std::wstring& name, const std::string& utf8Content) {
+            const std::wstring path = (scratchDir / name).wstring();
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out << utf8Content;
+            out.close();
+            return path;
+        };
+
+        const std::wstring emptyPath = writeExclusionsFile(L"empty.txt", "");
+        auto emptyResult = takeoff::FileIndex::LoadUserExclusions(emptyPath);
+        Check(emptyResult.excludedFolders.empty() && emptyResult.excludedExtensions.empty(),
+              "LoadUserExclusions: empty file yields no exclusions");
+
+        Check(takeoff::FileIndex::LoadUserExclusions(L"").excludedFolders.empty(),
+              "LoadUserExclusions: empty path yields no exclusions, no crash");
+        Check(takeoff::FileIndex::LoadUserExclusions((scratchDir / L"does_not_exist.txt").wstring())
+                  .excludedFolders.empty(),
+              "LoadUserExclusions: missing file yields no exclusions, no crash");
+
+        const std::string mixedContent =
+            "# a comment line\r\n"
+            "\r\n"
+            "   \r\n"
+            "D:\\Personal Archive\r\n"
+            "d:\\already\\lower\\\r\n"
+            "\\\\NAS\\Backups\r\n"
+            "/mnt/data\r\n"
+            ".iso\r\n"
+            ".ISO\r\n"
+            "relative\\path\r\n"
+            "justaword\r\n"
+            ".\r\n"
+            "..hidden\r\n";
+        const std::wstring mixedPath = writeExclusionsFile(L"mixed.txt", mixedContent);
+        auto mixed = takeoff::FileIndex::LoadUserExclusions(mixedPath);
+        Check(mixed.excludedFolders.size() == 4,
+              "LoadUserExclusions: 4 folder-shaped lines recognized (drive letter x2, UNC, leading /)");
+        Check(std::find(mixed.excludedFolders.begin(), mixed.excludedFolders.end(),
+                  L"d:\\personal archive") != mixed.excludedFolders.end(),
+              "LoadUserExclusions: folder path normalized to lowercase, backslashes, no trailing slash");
+        Check(mixed.excludedExtensions.size() == 1 && mixed.excludedExtensions.count(L".iso") == 1,
+              "LoadUserExclusions: .iso and .ISO both fold into a single lowercase .iso entry");
+        Check(mixed.excludedExtensions.count(L".") == 0,
+              "LoadUserExclusions: a bare '.' line is ambiguous and silently ignored");
+
+        // Non-ASCII round-trip: UTF-8 bytes for "D:\Résumé" -> decoded wide path.
+        const std::string utf8Accented = "D:\\R\xC3\xA9sum\xC3\xA9\r\n";
+        const std::wstring accentedPath = writeExclusionsFile(L"accented.txt", utf8Accented);
+        auto accented = takeoff::FileIndex::LoadUserExclusions(accentedPath);
+        Check(accented.excludedFolders.size() == 1 &&
+                  accented.excludedFolders[0] == L"d:\\r\u00e9sum\u00e9",
+              "LoadUserExclusions: UTF-8 accented folder path decodes and normalizes correctly");
+
+        Check(takeoff::FileIndex::DefaultExclusionsPath().find(L"file_search_excludes.txt") != std::wstring::npos,
+              "DefaultExclusionsPath: points at file_search_excludes.txt");
+
+        fs::remove_all(scratchDir, ec);
+    }
+
+    // -----------------------------------------------------------------------------
     // Requirement R3: Shell Item String Allocation and Cleanup Handling
     // -----------------------------------------------------------------------------
     // 1. FormatAppsFolderPath canonicalization

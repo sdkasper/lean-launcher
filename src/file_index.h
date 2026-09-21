@@ -16,6 +16,7 @@
 #include <unordered_set>
 #include <vector>
 #include <fstream>
+#include <sstream>
 #include <windows.h>
 #include <shlobj.h>
 
@@ -157,6 +158,16 @@ inline const std::unordered_set<std::wstring_view> kAllowedExtensions = {
     L".exe", L".lnk", L".url", L".appref-ms", L".msi"
 };
 
+// Additive-only, user-supplied exclusions layered on top of the hardcoded
+// skip-list (ShouldSkipDirectory) and extension allowlist (IsUserRelevantFile)
+// - see UserExclusions (US-019). Never used to re-include anything the
+// hardcoded rules already exclude; every call site runs the hardcoded check
+// first and unconditionally.
+struct UserExclusions {
+    std::vector<std::wstring> excludedFolders;   // NormalizeForCompare'd: lowercase, '\' separators, no trailing '\'
+    std::unordered_set<std::wstring> excludedExtensions; // lowercase, includes leading '.'
+};
+
 class FileIndex {
 public:
     static FileIndex& Instance() {
@@ -179,6 +190,112 @@ public:
             return (dir / L"file_index.cache").wstring();
         }
         return L"";
+    }
+
+    static std::wstring DefaultExclusionsPath() {
+        wchar_t localAppData[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH) > 0 && localAppData[0]) {
+            std::filesystem::path dir = std::filesystem::path(localAppData) / L"LeanLauncher";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            return (dir / L"file_search_excludes.txt").wstring();
+        }
+        return L"";
+    }
+
+    // Lowercase, '/' -> '\', trailing '\' trimmed - the same comparison shape
+    // ShouldSkipDirectory's Windows-directory check already uses inline, made
+    // reusable here since both exclusions-file loading and folder-exclusion
+    // matching need it.
+    static std::wstring NormalizeForCompare(std::wstring s) {
+        std::transform(s.begin(), s.end(), s.begin(),
+            [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+        std::replace(s.begin(), s.end(), L'/', L'\\');
+        while (!s.empty() && s.back() == L'\\') s.pop_back();
+        return s;
+    }
+
+    // True if normalizedCandidate is normalizedBase itself or anywhere under it.
+    // Both arguments must already be NormalizeForCompare'd.
+    static bool IsPathUnderNormalizedFolder(const std::wstring& normalizedCandidate,
+                                             const std::wstring& normalizedBase) {
+        if (normalizedBase.empty()) return false;
+        if (normalizedCandidate == normalizedBase) return true;
+        return normalizedCandidate.size() > normalizedBase.size() &&
+            normalizedCandidate.compare(0, normalizedBase.size(), normalizedBase) == 0 &&
+            normalizedCandidate[normalizedBase.size()] == L'\\';
+    }
+
+    // file_index.h is deliberately self-contained (no include of
+    // obsidian_config.h, which has its own copy of this exact UTF-8<->UTF-16
+    // idiom) - duplicated locally rather than introducing a cross-header
+    // dependency for two small functions.
+    static std::wstring Utf8BytesToWide(const std::string& utf8) {
+        if (utf8.empty()) return L"";
+        const int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+        if (wlen <= 0) return L"";
+        std::wstring out(static_cast<size_t>(wlen), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), out.data(), wlen);
+        return out;
+    }
+
+    static std::string WideToUtf8Bytes(const std::wstring& wide) {
+        if (wide.empty()) return {};
+        const int len = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+            nullptr, 0, nullptr, nullptr);
+        if (len <= 0) return {};
+        std::string out(static_cast<size_t>(len), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), len, nullptr, nullptr);
+        return out;
+    }
+
+    // Parses one line per folder or extension exclusion. A line is a folder
+    // exclusion if it starts with a drive letter ("D:"), "\\" (UNC), or "/";
+    // an extension exclusion if it starts with "." and contains no path
+    // separator or whitespace after that. Blank lines, "#" comments, and
+    // anything else (relative paths, bare words) are silently ignored - this
+    // file is additive-only, so there is no "include" syntax to parse at all.
+    static UserExclusions LoadUserExclusions(const std::wstring& path) {
+        UserExclusions result;
+        if (path.empty()) return result;
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) return result;
+        std::ifstream file(path, std::ios::binary);
+        if (!file) return result;
+        std::ostringstream ss;
+        ss << file.rdbuf();
+        const std::wstring content = Utf8BytesToWide(ss.str());
+
+        size_t pos = 0;
+        while (pos <= content.size()) {
+            size_t nl = content.find(L'\n', pos);
+            std::wstring line = (nl == std::wstring::npos) ? content.substr(pos) : content.substr(pos, nl - pos);
+            pos = (nl == std::wstring::npos) ? content.size() + 1 : nl + 1;
+
+            size_t start = line.find_first_not_of(L" \t\r");
+            if (start == std::wstring::npos) continue;
+            size_t end = line.find_last_not_of(L" \t\r");
+            std::wstring trimmed = line.substr(start, end - start + 1);
+            if (trimmed.empty() || trimmed[0] == L'#') continue;
+
+            const bool looksLikeFolder =
+                (trimmed.size() >= 2 && iswalpha(trimmed[0]) && trimmed[1] == L':') ||
+                trimmed.rfind(L"\\\\", 0) == 0 ||
+                trimmed[0] == L'/';
+            if (looksLikeFolder) {
+                result.excludedFolders.push_back(NormalizeForCompare(trimmed));
+                continue;
+            }
+
+            if (trimmed[0] == L'.' && trimmed.size() > 1 && trimmed[1] != L'.' &&
+                trimmed.find_first_of(L"\\/ \t") == std::wstring::npos) {
+                std::wstring ext = trimmed;
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                    [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
+                result.excludedExtensions.insert(ext);
+            }
+        }
+        return result;
     }
 
     // scanRootOverride is test-only: when non-empty, BuildIndex() scans just
