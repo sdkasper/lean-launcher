@@ -145,19 +145,41 @@ public:
     }
 
     void SetDirectoryChunk(uint32_t poolIndex, std::vector<FileItem>&& children) {
-        auto newChunk = std::make_shared<const std::vector<FileItem>>(std::move(children));
+        std::vector<std::pair<uint32_t, std::vector<FileItem>>> batch;
+        batch.emplace_back(poolIndex, std::move(children));
+        SetDirectoryChunks(std::move(batch));
+    }
+
+    // Upserts many directories' chunks in a single chunksByDir copy,
+    // instead of one copy per directory - SetDirectoryChunk copies the
+    // *entire* chunksByDir vector on every call, so calling it once per
+    // directory across a walk of D directories is O(D^2). Callers that
+    // publish many directories from one walk (ScanPath) should batch
+    // them here instead.
+    void SetDirectoryChunks(std::vector<std::pair<uint32_t, std::vector<FileItem>>>&& batch) {
+        if (batch.empty()) return;
+        std::vector<std::pair<uint32_t, std::shared_ptr<const std::vector<FileItem>>>> chunks;
+        chunks.reserve(batch.size());
+        for (auto& [poolIdx, children] : batch) {
+            chunks.emplace_back(poolIdx, std::make_shared<const std::vector<FileItem>>(std::move(children)));
+        }
+
         std::lock_guard<std::mutex> lock(mutex_);
         auto newSnapshot = std::make_shared<IndexSnapshot>();
         if (snapshot_) {
             newSnapshot->chunksByDir = snapshot_->chunksByDir;
             newSnapshot->totalCount = snapshot_->totalCount;
         }
-        if (poolIndex >= newSnapshot->chunksByDir.size()) {
-            newSnapshot->chunksByDir.resize(poolIndex + 1);
+        uint32_t maxIdx = 0;
+        for (auto& [poolIdx, chunk] : chunks) maxIdx = (std::max)(maxIdx, poolIdx);
+        if (maxIdx >= newSnapshot->chunksByDir.size()) {
+            newSnapshot->chunksByDir.resize(maxIdx + 1);
         }
-        const size_t oldSize = newSnapshot->chunksByDir[poolIndex] ? newSnapshot->chunksByDir[poolIndex]->size() : 0;
-        newSnapshot->totalCount = newSnapshot->totalCount - oldSize + newChunk->size();
-        newSnapshot->chunksByDir[poolIndex] = std::move(newChunk);
+        for (auto& [poolIdx, chunk] : chunks) {
+            const size_t oldSize = newSnapshot->chunksByDir[poolIdx] ? newSnapshot->chunksByDir[poolIdx]->size() : 0;
+            newSnapshot->totalCount = newSnapshot->totalCount - oldSize + chunk->size();
+            newSnapshot->chunksByDir[poolIdx] = std::move(chunk);
+        }
         snapshot_ = std::move(newSnapshot);
         ready_ = true;
     }
@@ -517,11 +539,23 @@ private:
         items.push_back({std::move(name), std::move(norm), parentDirIndex, isDir});
     }
 
+    // scannedDirs tracks every pool index already fully walked by
+    // ScanPath in this BuildIndex() call, across every phase - it
+    // prevents a later phase (e.g. a %USERPROFILE% or drive walk)
+    // redundantly re-descending into a directory an earlier phase (e.g.
+    // the verified-project-root phase) already scanned. Without this
+    // guard, the redundant walk would find all of that subtree's items
+    // already in `seen` (deduped), publish an empty chunk for it, and
+    // silently wipe out the earlier phase's real content for that
+    // directory - a genuine cross-phase data-loss bug, not just a
+    // sibling-clobbering one.
     void ScanPath(const fs::path& root, uint32_t rootPoolIndex, DirectoryPool& pool,
-                  std::unordered_set<uint64_t>& seen, int maxDepth) {
+                  std::unordered_set<uint64_t>& seen, std::unordered_set<uint32_t>& scannedDirs,
+                  int maxDepth) {
         std::error_code ec;
         if (!fs::exists(root, ec)) return;
         if (IsDriveRoot(root) || ShouldSkipDirectory(root)) return;
+        if (!scannedDirs.insert(rootPoolIndex).second) return;
 
         // childrenByDir[poolIndex] accumulates one directory's direct
         // children until that directory's listing is complete, then gets
@@ -550,11 +584,21 @@ private:
                     } else {
                         AddItem(entry.path(), true, parentIdx, childrenByDir[parentIdx], seen);
                         uint32_t childIdx = InternLocked(pool, entry.path().wstring(), Normalize(entry.path().wstring()));
-                        childrenByDir[childIdx]; // ensure it exists even if it turns out empty
-                        if (static_cast<size_t>(depth) + 1 >= dirIndexAtDepth.size()) {
-                            dirIndexAtDepth.push_back(childIdx);
+                        if (!scannedDirs.insert(childIdx).second) {
+                            // Already scanned (as a root by an earlier
+                            // phase, or as another branch of this same
+                            // walk) - don't redundantly re-walk it, which
+                            // would publish an empty chunk over its real
+                            // content since all its items are already
+                            // in `seen`.
+                            it.disable_recursion_pending();
                         } else {
-                            dirIndexAtDepth[static_cast<size_t>(depth) + 1] = childIdx;
+                            childrenByDir[childIdx]; // ensure it exists even if it turns out empty
+                            if (static_cast<size_t>(depth) + 1 >= dirIndexAtDepth.size()) {
+                                dirIndexAtDepth.push_back(childIdx);
+                            } else {
+                                dirIndexAtDepth[static_cast<size_t>(depth) + 1] = childIdx;
+                            }
                         }
                     }
                     it.increment(ec);
@@ -568,10 +612,20 @@ private:
             }
         } catch (...) {}
 
+        // Batch every directory this one ScanPath call touched into a
+        // single SetDirectoryChunks call, instead of one SetDirectoryChunk
+        // call per directory - SetDirectoryChunk copies the whole
+        // chunksByDir vector per call, so one call per directory in a
+        // D-directory walk is O(D^2); one batched call per ScanPath
+        // invocation is O(D) per call (O(P*D) total across P phase-level
+        // ScanPath invocations, not O(D^2)).
+        std::vector<std::pair<uint32_t, std::vector<FileItem>>> batch;
+        batch.reserve(childrenByDir.size());
         for (auto& [poolIdx, children] : childrenByDir) {
             RefreshMtimeLocked(pool, poolIdx);
-            SetDirectoryChunk(poolIdx, std::move(children));
+            batch.emplace_back(poolIdx, std::move(children));
         }
+        SetDirectoryChunks(std::move(batch));
     }
 
     static fs::file_time_type CurrentMtime(const std::wstring& path) {
@@ -589,39 +643,67 @@ private:
         return pool.Intern(path, normPath);
     }
 
+    // Reads the path and stores the freshly-computed mtime as two short,
+    // separate critical sections, so the blocking last_write_time() stat
+    // call itself runs outside mutex_ - Search() holds that same mutex
+    // for its entire call, so a stat call held under the lock would
+    // stall concurrent searches for as long as the disk I/O takes.
     void RefreshMtimeLocked(DirectoryPool& pool, uint32_t idx) {
+        std::wstring path;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            path = pool.Get(idx).path;
+        }
+        fs::file_time_type mtime = CurrentMtime(path);
         std::lock_guard<std::mutex> lock(mutex_);
-        pool.SetMtime(idx, CurrentMtime(pool.Get(idx).path));
+        pool.SetMtime(idx, mtime);
     }
 
-    // Interns `root` and, when it has a distinct parent, also registers
-    // `root` itself as a searchable item in that parent's chunk - so a
-    // single anchor folder (the repo root, or a test's scan root) is
-    // findable by its own name/path, not just its descendants. Only safe
-    // to use for roots whose parent chunk isn't shared with other
-    // concurrently-registered siblings, since it replaces that chunk
-    // wholesale; ScanPath itself uses the accumulate-then-publish-once
-    // pattern below for roots with many siblings.
-    uint32_t InternRootWithSelfEntry(const fs::path& root, std::unordered_set<uint64_t>& seen) {
-        uint32_t rootIdx = InternLocked(pool_, root.wstring(), Normalize(root.wstring()));
-        if (root.has_parent_path()) {
-            fs::path parent = root.parent_path();
-            if (parent != root) {
-                uint32_t parentIdx = InternLocked(pool_, parent.wstring(), Normalize(parent.wstring()));
-                std::vector<FileItem> selfItem;
-                AddItem(root, true, parentIdx, selfItem, seen);
-                if (!selfItem.empty()) {
-                    SetDirectoryChunk(parentIdx, std::move(selfItem));
-                }
-            }
+    // Registers `root` as a searchable item in its own parent's chunk by
+    // merging (read-modify-write) into whatever's already published
+    // there, instead of replacing it - so it can never clobber (or need
+    // to run before) another phase's legitimate scan of that same parent
+    // directory, regardless of which phase happens to touch that parent
+    // first or last. A no-op if `root`'s own path is already in `seen`
+    // (i.e. some phase's ordinary scan already added it as a real child
+    // of its parent) - safe to call unconditionally after every phase.
+    void MergeSelfItem(const fs::path& root, std::unordered_set<uint64_t>& seen) {
+        if (!root.has_parent_path()) return;
+        fs::path parent = root.parent_path();
+        if (parent == root) return;
+        uint32_t parentIdx = InternLocked(pool_, parent.wstring(), Normalize(parent.wstring()));
+        std::vector<FileItem> selfItem;
+        AddItem(root, true, parentIdx, selfItem, seen);
+        if (selfItem.empty()) return;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto newSnapshot = std::make_shared<IndexSnapshot>();
+        if (snapshot_) {
+            newSnapshot->chunksByDir = snapshot_->chunksByDir;
+            newSnapshot->totalCount = snapshot_->totalCount;
         }
-        return rootIdx;
+        if (parentIdx >= newSnapshot->chunksByDir.size()) {
+            newSnapshot->chunksByDir.resize(parentIdx + 1);
+        }
+        std::vector<FileItem> merged;
+        if (newSnapshot->chunksByDir[parentIdx]) {
+            merged = *newSnapshot->chunksByDir[parentIdx];
+        }
+        const size_t oldSize = merged.size();
+        for (auto& item : selfItem) merged.push_back(std::move(item));
+        newSnapshot->totalCount = newSnapshot->totalCount - oldSize + merged.size();
+        newSnapshot->chunksByDir[parentIdx] = std::make_shared<const std::vector<FileItem>>(std::move(merged));
+        snapshot_ = std::move(newSnapshot);
+        ready_ = true;
     }
 
     void BuildIndex() {
         constexpr size_t kMaxFiles = 50000;
         std::unordered_set<uint64_t> seen;
         seen.reserve(kMaxFiles);
+        // Tracks every directory already fully walked by ScanPath in this
+        // call, across all phases - see ScanPath's comment on scannedDirs.
+        std::unordered_set<uint32_t> scannedDirs;
 
         size_t totalIndexed = 0;
 
@@ -633,8 +715,9 @@ private:
             std::error_code overrideEc;
             fs::path overrideRoot(scanRootOverride_);
             if (fs::exists(overrideRoot, overrideEc)) {
-                uint32_t rootIdx = InternRootWithSelfEntry(overrideRoot, seen);
-                ScanPath(overrideRoot, rootIdx, pool_, seen, 8);
+                uint32_t rootIdx = InternLocked(pool_, overrideRoot.wstring(), Normalize(overrideRoot.wstring()));
+                ScanPath(overrideRoot, rootIdx, pool_, seen, scannedDirs, 8);
+                MergeSelfItem(overrideRoot, seen);
             }
             ready_ = true;
             if (notifyHwnd_) {
@@ -643,19 +726,24 @@ private:
             return;
         }
 
-        // 0. Scan verified user project/repo root immediately (if any)
+        // 0. Scan verified user project/repo root immediately (if any).
+        // Self-registration (making repoDir findable by its own name) is
+        // deferred until after phases 1-3 - see the deferred block below.
         std::error_code ec;
         fs::path currentDir = fs::current_path(ec);
+        fs::path repoDir;
         if (!ec && !currentDir.empty()) {
-            fs::path repoDir = FindVerifiedProjectRoot(currentDir);
+            repoDir = FindVerifiedProjectRoot(currentDir);
             if (!repoDir.empty()) {
-                uint32_t repoIdx = InternRootWithSelfEntry(repoDir, seen);
-                ScanPath(repoDir, repoIdx, pool_, seen, 6);
+                uint32_t repoIdx = InternLocked(pool_, repoDir.wstring(), Normalize(repoDir.wstring()));
+                ScanPath(repoDir, repoIdx, pool_, seen, scannedDirs, 6);
                 totalIndexed = Count();
             }
         }
 
-        // 1. Scan primary user folders (Desktop, Documents, Downloads, Pictures, Music, Videos)
+        // 1. Scan primary user folders (Desktop, Documents, Downloads, Pictures, Music, Videos).
+        // Self-registration for each is deferred until after phase 3 -
+        // see the deferred block below.
         const KNOWNFOLDERID userFolders[] = {
             FOLDERID_Desktop,
             FOLDERID_Documents,
@@ -665,13 +753,15 @@ private:
             FOLDERID_Videos,
         };
 
+        std::vector<fs::path> knownFolders;
         for (const auto& kfid : userFolders) {
             if (!running_.load() || totalIndexed >= kMaxFiles) break;
             PWSTR folderPath = nullptr;
             if (SUCCEEDED(SHGetKnownFolderPath(kfid, KF_FLAG_DEFAULT, nullptr, &folderPath)) && folderPath) {
                 fs::path folder(folderPath);
+                knownFolders.push_back(folder);
                 uint32_t folderIdx = InternLocked(pool_, folder.wstring(), Normalize(folder.wstring()));
-                ScanPath(folder, folderIdx, pool_, seen, 8);
+                ScanPath(folder, folderIdx, pool_, seen, scannedDirs, 8);
                 CoTaskMemFree(folderPath);
                 totalIndexed = Count();
             }
@@ -699,7 +789,7 @@ private:
                             _wcsicmp(name.c_str(), L"Videos") != 0) {
                             AddItem(entry.path(), true, profileIdx, profileItems, seen);
                             uint32_t childIdx = InternLocked(pool_, entry.path().wstring(), Normalize(entry.path().wstring()));
-                            ScanPath(entry.path(), childIdx, pool_, seen, 8);
+                            ScanPath(entry.path(), childIdx, pool_, seen, scannedDirs, 8);
                         }
                     } else if (entry.is_regular_file(ec)) {
                         if (IsUserRelevantFile(entry.path())) {
@@ -739,7 +829,7 @@ private:
                                     AddItem(entry.path(), true, driveIdx, driveItems, seen);
                                     uint32_t childIdx = InternLocked(pool_, entry.path().wstring(), Normalize(entry.path().wstring()));
                                     const int maxDepth = isDriveC ? 4 : 8;
-                                    ScanPath(entry.path(), childIdx, pool_, seen, maxDepth);
+                                    ScanPath(entry.path(), childIdx, pool_, seen, scannedDirs, maxDepth);
                                 }
                             } else if (entry.is_regular_file(ec)) {
                                 if (IsUserRelevantFile(entry.path())) {
@@ -754,6 +844,17 @@ private:
                 drive += wcslen(drive) + 1;
             }
         }
+
+        // Deferred self-registration: runs after every phase so nothing
+        // published afterward can clobber it, and merges rather than
+        // replaces so it can't erase anything a phase already legitimately
+        // published for that parent. Each call is a no-op if the ordinary
+        // scan above already added that root as a real child of its
+        // parent (repoDir, if reachable from phase 2/3; known folders
+        // never are, since phase 2 explicitly excludes their names and
+        // phase 3 excludes "Users" on the C: drive).
+        if (!repoDir.empty()) MergeSelfItem(repoDir, seen);
+        for (auto& folder : knownFolders) MergeSelfItem(folder, seen);
 
         if (!running_.load()) return;
 
