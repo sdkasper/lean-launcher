@@ -93,6 +93,10 @@ public:
 
     ~FileIndex() { Stop(); }
 
+    enum class Phase { Idle, FirstWalk, Loaded, IncrementalRescan };
+
+    Phase GetPhase() const { return phase_.load(); }
+
     // scanRootOverride is test-only: when non-empty, BuildIndex() scans just
     // that one directory tree instead of the whole machine (known user
     // folders, %USERPROFILE%, all fixed/removable drives). Production
@@ -698,14 +702,11 @@ private:
     }
 
     void BuildIndex() {
-        constexpr size_t kMaxFiles = 50000;
+        phase_ = Phase::FirstWalk;
         std::unordered_set<uint64_t> seen;
-        seen.reserve(kMaxFiles);
         // Tracks every directory already fully walked by ScanPath in this
         // call, across all phases - see ScanPath's comment on scannedDirs.
         std::unordered_set<uint32_t> scannedDirs;
-
-        size_t totalIndexed = 0;
 
         if (!scanRootOverride_.empty()) {
             // Test-only path: scan just the given directory tree, skipping
@@ -719,6 +720,7 @@ private:
                 ScanPath(overrideRoot, rootIdx, pool_, seen, scannedDirs, 8);
                 MergeSelfItem(overrideRoot, seen);
             }
+            phase_ = Phase::Loaded;
             ready_ = true;
             if (notifyHwnd_) {
                 PostMessageW(notifyHwnd_, kFilesReadyMessage, 0, 0);
@@ -737,7 +739,6 @@ private:
             if (!repoDir.empty()) {
                 uint32_t repoIdx = InternLocked(pool_, repoDir.wstring(), Normalize(repoDir.wstring()));
                 ScanPath(repoDir, repoIdx, pool_, seen, scannedDirs, 6);
-                totalIndexed = Count();
             }
         }
 
@@ -755,7 +756,7 @@ private:
 
         std::vector<fs::path> knownFolders;
         for (const auto& kfid : userFolders) {
-            if (!running_.load() || totalIndexed >= kMaxFiles) break;
+            if (!running_.load()) break;
             PWSTR folderPath = nullptr;
             if (SUCCEEDED(SHGetKnownFolderPath(kfid, KF_FLAG_DEFAULT, nullptr, &folderPath)) && folderPath) {
                 fs::path folder(folderPath);
@@ -763,13 +764,12 @@ private:
                 uint32_t folderIdx = InternLocked(pool_, folder.wstring(), Normalize(folder.wstring()));
                 ScanPath(folder, folderIdx, pool_, seen, scannedDirs, 8);
                 CoTaskMemFree(folderPath);
-                totalIndexed = Count();
             }
         }
 
         // 2. Scan %USERPROFILE% roots (e.g. source code directories, projects, etc.)
         PWSTR profilePath = nullptr;
-        if (running_.load() && totalIndexed < kMaxFiles &&
+        if (running_.load() &&
             SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Profile, KF_FLAG_DEFAULT, nullptr, &profilePath)) && profilePath) {
             uint32_t profileIdx = InternLocked(pool_, profilePath, Normalize(std::wstring(profilePath)));
             std::vector<FileItem> profileItems;
@@ -777,7 +777,7 @@ private:
             fs::directory_iterator dit(profilePath, fs::directory_options::skip_permission_denied, ec);
             try {
                 for (const auto& entry : dit) {
-                    if (!running_.load() || totalIndexed + profileItems.size() >= kMaxFiles) break;
+                    if (!running_.load()) break;
                     if (entry.is_directory(ec)) {
                         std::wstring name = entry.path().filename().wstring();
                         if (!ShouldSkipDirectory(entry.path()) &&
@@ -800,15 +800,14 @@ private:
             } catch (...) {}
             SetDirectoryChunk(profileIdx, std::move(profileItems));
             CoTaskMemFree(profilePath);
-            totalIndexed = Count();
         }
 
         // 3. Scan all fixed and removable drives (e.g. C:\, D:\, X:\)
         wchar_t driveBuffer[512]{};
-        if (running_.load() && totalIndexed < kMaxFiles &&
+        if (running_.load() &&
             GetLogicalDriveStringsW(static_cast<DWORD>(std::size(driveBuffer)), driveBuffer)) {
             const wchar_t* drive = driveBuffer;
-            while (*drive && running_.load() && totalIndexed < kMaxFiles) {
+            while (*drive && running_.load()) {
                 const UINT driveType = GetDriveTypeW(drive);
                 if (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE) {
                     const wchar_t driveLetter = towupper(drive[0]);
@@ -819,7 +818,7 @@ private:
                     fs::directory_iterator dit(drive, fs::directory_options::skip_permission_denied, ec);
                     try {
                         for (const auto& entry : dit) {
-                            if (!running_.load() || totalIndexed + driveItems.size() >= kMaxFiles) break;
+                            if (!running_.load()) break;
                             if (entry.is_directory(ec)) {
                                 std::wstring dirName = entry.path().filename().wstring();
                                 if (isDriveC && _wcsicmp(dirName.c_str(), L"Users") == 0) {
@@ -839,7 +838,6 @@ private:
                         }
                     } catch (...) {}
                     SetDirectoryChunk(driveIdx, std::move(driveItems));
-                    totalIndexed = Count();
                 }
                 drive += wcslen(drive) + 1;
             }
@@ -858,6 +856,7 @@ private:
 
         if (!running_.load()) return;
 
+        phase_ = Phase::Loaded;
         ready_ = true;
 
         if (notifyHwnd_) {
@@ -929,6 +928,7 @@ private:
 
     std::atomic<bool> running_{false};
     std::atomic<bool> ready_{false};
+    std::atomic<Phase> phase_{Phase::Idle};
     mutable std::mutex mutex_;
     std::shared_ptr<const IndexSnapshot> snapshot_;
     DirectoryPool pool_;

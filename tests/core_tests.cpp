@@ -722,6 +722,8 @@ int main() {
     for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
+    Check(FileIndex::Instance().GetPhase() == takeoff::FileIndex::Phase::Loaded,
+          "GetPhase reports Loaded once IsReady() is true");
     const size_t indexedCount = FileIndex::Instance().Count();
     std::cout << "[FileIndex] Scoped index populated " << indexedCount << " files/folders under "
               << repoPath.string() << " (ready=" << FileIndex::Instance().IsReady() << ").\n";
