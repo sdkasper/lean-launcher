@@ -812,7 +812,7 @@ public:
         return false;
     }
 
-    static bool ShouldSkipDirectory(const fs::path& dirPath) {
+    static bool ShouldSkipDirectory(const fs::path& dirPath, const UserExclusions* userExclusions = nullptr) {
         if (dirPath.empty()) return false;
 
         wchar_t winDirBuf[MAX_PATH]{};
@@ -864,6 +864,12 @@ public:
                 lower == L"systemresources" || lower == L"rescache" || lower == L"config.msi" ||
                 lower == L"msapps" || lower == L"common files" || lower == L"inf") {
                 return true;
+            }
+        }
+        if (userExclusions && !userExclusions->excludedFolders.empty()) {
+            const std::wstring normalizedCandidate = NormalizeForCompare(dirPath.wstring());
+            for (const auto& excluded : userExclusions->excludedFolders) {
+                if (IsPathUnderNormalizedFolder(normalizedCandidate, excluded)) return true;
             }
         }
         return false;

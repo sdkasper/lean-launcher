@@ -560,6 +560,30 @@ int main() {
     Check(!FileIndex::ShouldSkipDirectory(L"src"), "src directory not excluded");
     Check(!FileIndex::ShouldSkipDirectory(L"C:\\Users\\Developer\\Projects\\MyGame"), "User project path not excluded");
 
+    // User-supplied folder exclusions, additive on top of the hardcoded list (US-019)
+    {
+        takeoff::UserExclusions excl;
+        excl.excludedFolders.push_back(L"d:\\personal archive");
+
+        Check(!takeoff::FileIndex::ShouldSkipDirectory(L"D:\\Personal Archive"),
+              "ShouldSkipDirectory with no userExclusions arg: unaffected by user exclusions (default nullptr)");
+        Check(takeoff::FileIndex::ShouldSkipDirectory(L"D:\\Personal Archive", &excl),
+              "ShouldSkipDirectory: exact-match user-excluded folder is skipped");
+        Check(takeoff::FileIndex::ShouldSkipDirectory(L"D:\\Personal Archive\\Sub\\Deeper", &excl),
+              "ShouldSkipDirectory: subtree of a user-excluded folder is skipped");
+        Check(takeoff::FileIndex::ShouldSkipDirectory(L"d:\\PERSONAL ARCHIVE", &excl),
+              "ShouldSkipDirectory: user-excluded folder match is case-insensitive");
+        Check(!takeoff::FileIndex::ShouldSkipDirectory(L"D:\\Personal Archive2", &excl),
+              "ShouldSkipDirectory: a folder that merely shares a prefix is NOT excluded (boundary check)");
+        Check(!takeoff::FileIndex::ShouldSkipDirectory(L"D:\\Other Folder", &excl),
+              "ShouldSkipDirectory: unrelated folder is unaffected by user exclusions");
+
+        // Additive-only: a user exclusion list cannot un-exclude a hardcoded one.
+        takeoff::UserExclusions emptyExcl;
+        Check(takeoff::FileIndex::ShouldSkipDirectory(L"C:\\Windows\\System32", &emptyExcl),
+              "ShouldSkipDirectory: hardcoded exclusion (system32) still applies with a UserExclusions* present");
+    }
+
     // 3. Step 0 working directory guard: ignores system paths and root drives
     Check(FileIndex::FindVerifiedProjectRoot(L"C:\\Windows\\System32").empty(), "System32 working directory ignored by Step 0");
     Check(FileIndex::FindVerifiedProjectRoot(L"C:\\Windows").empty(), "C:\\Windows working directory ignored by Step 0");
