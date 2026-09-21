@@ -921,8 +921,13 @@ int main() {
 
     // -----------------------------------------------------------------------------
     // Incremental rescan: an unchanged directory is left untouched, and a real
-    // file-system change (new file) is picked up on the next IncrementalRescan
-    // pass without a full BuildIndex() re-walk.
+    // file-system change (new file) is picked up on a warm Start()'s automatic
+    // post-cache-load IncrementalRescan pass, without a full BuildIndex()
+    // re-walk. Exercised only through Start()/Stop() - this thread never calls
+    // IncrementalRescan() directly, so it can never race the worker thread's
+    // own call to the same function (the worker is always the sole caller;
+    // Stop()'s join() only returns once WorkerLoop, and any rescan pass it
+    // kicked off, has fully finished).
     // -----------------------------------------------------------------------------
     {
         FileIndex::Instance().Stop();
@@ -930,11 +935,12 @@ int main() {
 
         // testRoot holds nothing but scanTarget. BuildIndex's scanRootOverride
         // path self-registers scanTarget under its parent (testRoot) with a
-        // default/never-stat'd mtime, so the first IncrementalRescan pass
-        // below will always treat testRoot as "changed" and re-list it - by
-        // construction, that re-list finds only the already-known scanTarget
-        // (not some unrelated real subdirectory of the actual cwd), so it
-        // can't cascade into scanning unrelated real directories.
+        // default/never-stat'd mtime, so the first post-cache-load
+        // IncrementalRescan pass below will always treat testRoot as
+        // "changed" and re-list it - by construction, that re-list finds
+        // only the already-known scanTarget (not some unrelated real
+        // subdirectory of the actual cwd), so it can't cascade into
+        // scanning unrelated real directories.
         fs::path testRoot = fs::current_path() / L"llfi_incremental_test_root";
         fs::path scanTarget = testRoot / L"scan_target";
         std::error_code ec;
@@ -948,24 +954,50 @@ int main() {
         const std::wstring incrementalCachePath = L"incremental_rescan_test_cache.bin";
         DeleteFileW(incrementalCachePath.c_str()); // ensure a cold BuildIndex(), not a stale cache load
 
+        // A warm Start() flips phase Loaded -> IncrementalRescan -> Loaded
+        // again as its automatic post-cache-load rescan runs; a single-shot
+        // IsReady() check can observe the first (pre-rescan) Loaded reading
+        // before that rescan has actually done anything, and calling Stop()
+        // at that instant would interrupt the rescan mid-pass (Stop() flips
+        // running_ false, which IncrementalRescan's loop cooperatively
+        // honors). Wait for several *consecutive* Loaded readings instead,
+        // so Stop() is only ever called once a pass has genuinely settled.
+        auto waitSettled = []() {
+            int stable = 0;
+            for (int w = 0; w < 60 && stable < 3; ++w) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                if (FileIndex::Instance().IsReady() &&
+                    FileIndex::Instance().GetPhase() == takeoff::FileIndex::Phase::Loaded) {
+                    ++stable;
+                } else {
+                    stable = 0;
+                }
+            }
+        };
+
+        // Cold start: BuildIndex() only - no cache yet, so no automatic rescan.
         FileIndex::Instance().Start(nullptr, scanTarget.wstring(), incrementalCachePath);
-        for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
+        waitSettled();
+        FileIndex::Instance().Stop();
         Check(FileIndex::Instance().Count() > 0, "Setup: scoped scan indexed the seed file");
 
-        // Settle pass: testRoot's self-registered entry starts with a
-        // default mtime (see comment above), so this first pass will
-        // correctly treat it as changed, re-list it (finding only the
-        // already-known scanTarget), and record its real mtime. Do this
-        // once before taking the steady-state baseline below.
-        FileIndex::Instance().IncrementalRescan();
-        const size_t countBeforeChange = FileIndex::Instance().Count();
+        // Warm start #1 (settle pass): LoadIndexCache() succeeds, then
+        // WorkerLoop's automatic post-cache-load IncrementalRescan corrects
+        // testRoot's default mtime (see comment above) by re-listing it -
+        // finding only the already-known scanTarget - and recording its
+        // real mtime.
+        FileIndex::Instance().Start(nullptr, scanTarget.wstring(), incrementalCachePath);
+        waitSettled();
+        FileIndex::Instance().Stop();
+        const size_t countAfterSettle = FileIndex::Instance().Count();
 
-        // No filesystem change since the settle pass - every directory's
-        // recorded mtime should now be accurate, so this pass is a no-op.
-        FileIndex::Instance().IncrementalRescan();
-        Check(FileIndex::Instance().Count() == countBeforeChange,
+        // Warm start #2: no filesystem change since the settle pass, so
+        // every directory's recorded mtime is now accurate and this
+        // automatic rescan is a no-op.
+        FileIndex::Instance().Start(nullptr, scanTarget.wstring(), incrementalCachePath);
+        waitSettled();
+        FileIndex::Instance().Stop();
+        Check(FileIndex::Instance().Count() == countAfterSettle,
               "IncrementalRescan leaves unchanged directories' count untouched");
 
         // Real change: add a new file, which bumps scanTarget's mtime.
@@ -973,14 +1005,15 @@ int main() {
             std::ofstream newFile((scanTarget / L"added.txt").wstring());
             newFile << "added";
         }
-        FileIndex::Instance().IncrementalRescan();
+        FileIndex::Instance().Start(nullptr, scanTarget.wstring(), incrementalCachePath);
+        waitSettled();
+        FileIndex::Instance().Stop();
         auto addedResults = FileIndex::Instance().Search(L"added.txt");
         Check(!addedResults.empty() && addedResults[0].name == L"added.txt",
               "IncrementalRescan picks up a new file after its directory's mtime changes");
-        Check(FileIndex::Instance().Count() == countBeforeChange + 1,
+        Check(FileIndex::Instance().Count() == countAfterSettle + 1,
               "IncrementalRescan's count reflects exactly the one new file, nothing lost/duplicated");
 
-        FileIndex::Instance().Stop();
         fs::remove_all(testRoot, ec);
         DeleteFileW(incrementalCachePath.c_str());
     }

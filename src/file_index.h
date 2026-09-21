@@ -420,20 +420,29 @@ public:
     // Drops every indexed entry whose root drive no longer exists (e.g. an
     // unplugged removable drive) - each distinct drive letter is stat'd at
     // most once per call via driveExistsCache, not once per directory.
+    // Reads pool_ one entry at a time under brief, separate locks (same
+    // pattern as RefreshMtimeLocked) instead of one DirectoryPool deep-copy
+    // held under mutex_ for the whole call - at full-disk scale that
+    // upfront copy alone would stall a concurrent Search() caller for as
+    // long as the copy of every path/normPath wstring takes.
     void PruneAbsentDrives() {
-        DirectoryPool poolCopy;
         std::shared_ptr<const IndexSnapshot> snapshot;
+        size_t poolSize;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            poolCopy = pool_;
             snapshot = snapshot_;
+            poolSize = pool_.Size();
         }
         if (!snapshot) return;
 
         std::unordered_map<std::wstring, bool> driveExistsCache;
-        for (uint32_t i = 0; i < poolCopy.Entries().size(); ++i) {
+        for (uint32_t i = 0; i < poolSize; ++i) {
             if (i >= snapshot->chunksByDir.size() || !snapshot->chunksByDir[i]) continue;
-            const auto& path = poolCopy.Entries()[i].path;
+            std::wstring path;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                path = pool_.Get(i).path;
+            }
             if (path.size() < 2 || path[1] != L':') continue;
             const std::wstring driveRoot = path.substr(0, 2) + L"\\";
             auto it = driveExistsCache.find(driveRoot);
@@ -460,10 +469,15 @@ public:
         phase_ = Phase::IncrementalRescan;
         PruneAbsentDrives();
 
-        DirectoryPool poolSnapshot;
+        // Bound the loop below by the pool's size *at this instant* rather
+        // than deep-copying the whole DirectoryPool under mutex_ (same
+        // reasoning as PruneAbsentDrives' comment) - any entry a nested
+        // ScanPath call below adds mid-pass just won't be revisited until
+        // the next pass, which is fine.
+        size_t poolSizeAtStart;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            poolSnapshot = pool_;
+            poolSizeAtStart = pool_.Size();
         }
 
         // Fresh for this rescan pass only - never shared with BuildIndex's
@@ -475,19 +489,25 @@ public:
         std::unordered_set<uint64_t> seen;
         std::unordered_set<uint32_t> scannedDirs;
 
-        for (uint32_t i = 0; i < poolSnapshot.Entries().size(); ++i) {
+        for (uint32_t i = 0; i < poolSizeAtStart; ++i) {
             if (!running_.load()) break;
-            const auto& entry = poolSnapshot.Entries()[i];
+            std::wstring path;
+            fs::file_time_type lastKnownMtime;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                path = pool_.Get(i).path;
+                lastKnownMtime = pool_.Get(i).lastKnownMtime;
+            }
             std::error_code ec;
-            if (!fs::exists(entry.path, ec)) continue; // handled by PruneAbsentDrives / will be pruned next pass
-            fs::file_time_type currentMtime = fs::last_write_time(entry.path, ec);
-            if (ec || currentMtime == entry.lastKnownMtime) continue;
+            if (!fs::exists(path, ec)) continue; // handled by PruneAbsentDrives / will be pruned next pass
+            fs::file_time_type currentMtime = fs::last_write_time(path, ec);
+            if (ec || currentMtime == lastKnownMtime) continue;
 
             // This directory's own contents changed - re-list its immediate
             // children only (cheap); brand-new subdirectories found here get
             // fully walked (they have no prior pool entry / stored mtime).
             std::vector<FileItem> freshChildren;
-            fs::directory_iterator dit(entry.path, fs::directory_options::skip_permission_denied, ec);
+            fs::directory_iterator dit(path, fs::directory_options::skip_permission_denied, ec);
             if (ec) continue;
             seen.clear();
             // Mirrors BuildIndex's own drive-root exclusion: C:\Users is
@@ -497,8 +517,8 @@ public:
             // real change to C:\'s own mtime would re-list C:\, discover
             // "Users" as a brand-new child (it was never interned), and
             // fully walk every profile on the machine.
-            const bool isDriveRootEntry = IsDriveRoot(entry.path);
-            const bool isDriveC = isDriveRootEntry && !entry.path.empty() && towupper(entry.path[0]) == L'C';
+            const bool isDriveRootEntry = IsDriveRoot(path);
+            const bool isDriveC = isDriveRootEntry && !path.empty() && towupper(path[0]) == L'C';
             try {
                 for (const auto& child : dit) {
                     bool isDir = child.is_directory(ec);
@@ -507,7 +527,7 @@ public:
                         if (isDriveC && _wcsicmp(child.path().filename().wstring().c_str(), L"Users") == 0) continue;
                         AddItem(child.path(), true, i, freshChildren, seen);
                         uint32_t childIdx = InternLocked(pool_, child.path().wstring(), Normalize(child.path().wstring()));
-                        if (childIdx >= poolSnapshot.Size()) {
+                        if (childIdx >= poolSizeAtStart) {
                             // Genuinely new subdirectory - fully walk it (bounded depth,
                             // same as a first-run scan of that one subtree).
                             ScanPath(child.path(), childIdx, pool_, seen, scannedDirs, 8);
