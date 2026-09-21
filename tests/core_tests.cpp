@@ -718,9 +718,21 @@ int main() {
     const std::wstring repoPathStr = repoPath.wstring();
     const std::wstring repoFolderName = repoPath.filename().wstring();
 
+    // Every cache file in this suite lives in the system temp directory,
+    // never the current working directory: cwd is *inside* the repo root
+    // the scoped scans below walk, so a cache file written there would
+    // silently become part of the index the moment its extension were
+    // added to kAllowedExtensions for some unrelated reason.
+    const fs::path testCacheDir = fs::temp_directory_path();
+
     // Throttling must not make a small scoped scan noticeably slow.
+    // The cache path is passed explicitly even though a scoped scan
+    // resolves no cache path of its own, so that "this test must never
+    // touch the user's real %LOCALAPPDATA% cache" is visible right here.
+    const std::wstring scopedScanCachePath = (testCacheDir / L"llfi_scoped_scan_test.bin").wstring();
+    DeleteFileW(scopedScanCachePath.c_str()); // force a cold walk, not a load of a previous run's cache
     const auto throttleStart = std::chrono::steady_clock::now();
-    FileIndex::Instance().Start(nullptr, repoPathStr);
+    FileIndex::Instance().Start(nullptr, repoPathStr, scopedScanCachePath);
     for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
@@ -770,6 +782,7 @@ int main() {
               << perQueryMs << "ms per query across " << indexedCount << " files!)\n";
     Check(perQueryMs < 20.0, "file search evaluation executes in under 20ms per query");
     FileIndex::Instance().Stop();
+    DeleteFileW(scopedScanCachePath.c_str());
 
     // -----------------------------------------------------------------------------
     // Requirement R2: Per-Directory Chunk Storage & Incremental Update
@@ -836,13 +849,40 @@ int main() {
         // string; two strings per DirectoryEntry.
         constexpr size_t kEstimatedBytesPerDir = sizeof(DirectoryEntry) + 2 * 128; // ~328
 
+        // DirectoryPool::index_ holds a *second* full copy of every
+        // normPath as its key, so it is not free: per node, the map's
+        // list links + the key wstring's inline part + the value + the
+        // allocation header (~72 bytes), plus that key's own heap buffer
+        // (~128 bytes, same as DirectoryEntry's path strings above).
+        constexpr size_t kEstimatedBytesPerPoolIndexEntry = 72 + 128; // ~200
+        // Plus the bucket array: MSVC's unordered_map keeps max_load_factor
+        // 1.0 and stores two pointers per bucket.
+        constexpr size_t kEstimatedBytesPerPoolIndexBucket = 16;
+
+        // Per published chunk: the make_shared control block fused with the
+        // vector object plus its allocation header (~64 bytes), plus the
+        // shared_ptr slot the snapshot's chunksByDir vector holds for it
+        // (16 bytes).
+        constexpr size_t kEstimatedBytesPerChunk = 64 + 16; // ~80
+
         constexpr size_t kRealisticScale = 500000;
         const size_t estimatedDirs = kRealisticScale / 8;
+        // Chunk vectors are grown with push_back and keep whatever capacity
+        // that left them with when they are moved into the snapshot, so the
+        // inline FileItem storage carries real slack over the item count.
+        const size_t estimatedChunkSlackBytes = (kRealisticScale * sizeof(FileItem)) / 8; // ~12.5%
         const size_t estimatedTotalBytes = kRealisticScale * kEstimatedBytesPerItem +
-                                            estimatedDirs * kEstimatedBytesPerDir;
+                                            estimatedDirs * kEstimatedBytesPerDir +
+                                            estimatedDirs * kEstimatedBytesPerPoolIndexEntry +
+                                            estimatedDirs * kEstimatedBytesPerPoolIndexBucket +
+                                            estimatedDirs * kEstimatedBytesPerChunk +
+                                            estimatedChunkSlackBytes;
         constexpr size_t kMaxHeapBudgetAtScale = 150 * 1024 * 1024; // 150 MB at 500K items
         std::cout << "[FileIndex] Estimated heap usage at " << kRealisticScale << " items: "
-                  << (estimatedTotalBytes / (1024 * 1024)) << " MB\n";
+                  << (estimatedTotalBytes / (1024 * 1024)) << " MB (of which "
+                  << ((estimatedDirs * (kEstimatedBytesPerPoolIndexEntry + kEstimatedBytesPerPoolIndexBucket +
+                                        kEstimatedBytesPerChunk) + estimatedChunkSlackBytes) / (1024 * 1024))
+                  << " MB is interning/chunk machinery)\n";
         Check(estimatedTotalBytes < kMaxHeapBudgetAtScale,
               "FileIndex heap usage stays bounded at a realistic 500K-item disk scale");
 
@@ -851,6 +891,92 @@ int main() {
         // count happens to be - keep that as a sanity floor, not the scale
         // claim itself, since it's only ever a few thousand files.
         Check(indexedCount > 0, "Live scoped index still populated (sanity check, not a scale claim)");
+    }
+
+    // -----------------------------------------------------------------------------
+    // Search latency at realistic disk scale (synthetic 500K items)
+    //
+    // The live scoped index above is only a few thousand items - two orders of
+    // magnitude below the 500K the feature targets - so it cannot detect a
+    // per-item cost in Search()'s inner loop. Removing the old 50K file cap
+    // made that loop unbounded, and Search() runs under the global mutex_ on
+    // the UI thread's call path, so this dimension needs a scale test of its
+    // own exactly like the memory dimension has one.
+    // -----------------------------------------------------------------------------
+    {
+        FileIndex::Instance().Stop();
+        FileIndex::Instance().ResetForTest();
+
+        constexpr size_t kBenchDirs = 62500;
+        constexpr size_t kItemsPerDir = 8; // 62500 * 8 == 500,000 items
+
+        std::vector<std::pair<uint32_t, std::vector<FileItem>>> benchBatch;
+        benchBatch.reserve(kBenchDirs);
+        for (size_t d = 0; d < kBenchDirs; ++d) {
+            const std::wstring dirPath = L"C:\\synthetic\\project" + std::to_wstring(d) + L"\\src";
+            const uint32_t dirIdx = FileIndex::Instance().InternDirectoryForTest(dirPath, takeoff::Normalize(dirPath));
+            std::vector<FileItem> items;
+            items.reserve(kItemsPerDir);
+            for (size_t f = 0; f < kItemsPerDir; ++f) {
+                std::wstring name = L"module" + std::to_wstring(d) + L"_" + std::to_wstring(f) + L".cpp";
+                std::wstring norm = takeoff::Normalize(name);
+                items.push_back({std::move(name), std::move(norm), dirIdx, false});
+            }
+            benchBatch.emplace_back(dirIdx, std::move(items));
+        }
+        FileIndex::Instance().SetDirectoryChunks(std::move(benchBatch));
+        Check(FileIndex::Instance().Count() == kBenchDirs * kItemsPerDir,
+              "Synthetic 500K-item index populated for the search-latency benchmark");
+
+        constexpr int kBenchQueries = 20;
+        auto timeQuery = [](const std::wstring& q) {
+            const auto start = std::chrono::high_resolution_clock::now();
+            for (int i = 0; i < kBenchQueries; ++i) {
+                auto r = FileIndex::Instance().Search(q, 10);
+            }
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::high_resolution_clock::now() - start).count();
+            return (elapsed / static_cast<double>(kBenchQueries)) / 1000.0;
+        };
+
+        // Two dimensions, measured separately because they have two
+        // separate causes and two separate owners.
+        //
+        // (a) The path-match branch: a 3+ character query whose first
+        //     character appears in no indexed name, so the name scorer is
+        //     never entered and what is timed is purely the path work this
+        //     loop does for every one of the 500K items.
+        const double pathMatchMs = timeQuery(L"zzqqxx");
+        std::cout << "[FileIndex] path-match query across " << (kBenchDirs * kItemsPerDir)
+                  << " synthetic items: " << pathMatchMs << "ms per query\n";
+        Check(pathMatchMs < 20.0,
+              "file search's path matching stays within the 20ms/query budget at a realistic 500K-item scale");
+
+        // (b) The fuzzy name scorer (ScoreFile/MatchScore in search.h),
+        //     entered whenever a name merely contains the query's first
+        //     character - which, for a common letter, is most of the index.
+        //     This is the dominant cost at scale and it is NOT inside the
+        //     20ms budget: it measures ~70ms here, roughly 3.5x over.
+        //     Removing the old 50K file cap made this branch unbounded in
+        //     exactly the way it made the path branch unbounded; only the
+        //     path branch has been addressed. The ceiling below is a
+        //     regression guard on today's measured behaviour, deliberately
+        //     not a claim that the budget is met - closing that gap means
+        //     changing how candidates are rejected before MatchScore runs,
+        //     which is a search.h design change, not a FileIndex one.
+        const double nameMatchMs = timeQuery(L"module4242");
+        std::cout << "[FileIndex] name-match query across " << (kBenchDirs * kItemsPerDir)
+                  << " synthetic items: " << nameMatchMs << "ms per query (over the 20ms budget - see comment)\n";
+        Check(nameMatchMs < 150.0,
+              "file search's name scoring does not regress further at a realistic 500K-item scale");
+
+        auto scaleResults = FileIndex::Instance().Search(L"project4242", 10);
+        Check(!scaleResults.empty(),
+              "Synthetic-scale search still matches through the parent directory's path");
+        Check(scaleResults[0].path.find(L"project4242") != std::wstring::npos,
+              "Synthetic-scale path match reconstructs the right path");
+
+        FileIndex::Instance().ResetForTest(); // release ~130MB before the blocks below
     }
 
     // -----------------------------------------------------------------------------
@@ -865,7 +991,9 @@ int main() {
         items.push_back({L"sub", L"sub", dirIdx, true});
         FileIndex::Instance().SetDirectoryChunk(dirIdx, std::move(items));
 
-        const std::wstring cachePath = L"cache_roundtrip_test.bin";
+        const std::wstring cachePath = (testCacheDir / L"cache_roundtrip_test.bin").wstring();
+        const std::wstring corruptCachePath = (testCacheDir / L"cache_corrupt_test.bin").wstring();
+        const std::wstring garbledCachePath = (testCacheDir / L"cache_garbled_len_test.bin").wstring();
         Check(FileIndex::Instance().SaveIndexCache(cachePath), "SaveIndexCache writes successfully");
 
         FileIndex::Instance().Stop(); // stops the background thread; LoadIndexCache below unconditionally
@@ -875,17 +1003,17 @@ int main() {
         Check(!results.empty() && results[0].path == L"D:\\Cache\\Test\\a.txt",
               "LoadIndexCache reconstructs items with correct interned paths");
 
-        std::ofstream corrupt(L"cache_corrupt_test.bin", std::ios::binary);
+        std::ofstream corrupt(corruptCachePath, std::ios::binary);
         corrupt << "not a real cache file";
         corrupt.close();
-        Check(!FileIndex::Instance().LoadIndexCache(L"cache_corrupt_test.bin"),
+        Check(!FileIndex::Instance().LoadIndexCache(corruptCachePath),
               "LoadIndexCache rejects a corrupt/wrong-format file");
 
         // Plausible header (correct magic/version) but a garbled dirCount
         // that would drive std::vector<DirectoryEntry> to try to allocate
         // ~4 billion entries - must return false, not throw/crash.
         {
-            std::ofstream garbled(L"cache_garbled_len_test.bin", std::ios::binary);
+            std::ofstream garbled(garbledCachePath, std::ios::binary);
             uint32_t magic = takeoff::kCacheMagic;
             uint32_t version = takeoff::kCacheFormatVersion;
             uint32_t hugeDirCount = 0xFFFFFFFFu;
@@ -894,12 +1022,46 @@ int main() {
             garbled.write(reinterpret_cast<const char*>(&hugeDirCount), sizeof(hugeDirCount));
             garbled.close();
         }
-        Check(!FileIndex::Instance().LoadIndexCache(L"cache_garbled_len_test.bin"),
+        Check(!FileIndex::Instance().LoadIndexCache(garbledCachePath),
               "LoadIndexCache rejects a garbled length field instead of throwing/crashing");
 
+        // A structurally valid header and directory table, but an item whose
+        // parentDirIndex points past the end of that table. Nothing throws on
+        // this one - Search() would index the pool's entry vector out of
+        // bounds on the UI thread - so it has to be rejected explicitly.
+        const std::wstring oobCachePath = (testCacheDir / L"cache_oob_index_test.bin").wstring();
+        {
+            std::ofstream oob(oobCachePath, std::ios::binary);
+            auto put32 = [&oob](uint32_t v) { oob.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
+            put32(takeoff::kCacheMagic);
+            put32(takeoff::kCacheFormatVersion);
+            put32(1); // dirCount: one directory, so index 0 is the only valid parentDirIndex
+            const std::wstring dir = L"D:\\Cache\\Test";
+            put32(static_cast<uint32_t>(dir.size()));
+            oob.write(reinterpret_cast<const char*>(dir.data()), dir.size() * sizeof(wchar_t));
+            put32(static_cast<uint32_t>(dir.size()));
+            oob.write(reinterpret_cast<const char*>(dir.data()), dir.size() * sizeof(wchar_t));
+            fs::file_time_type::rep mtimeRep = 0;
+            oob.write(reinterpret_cast<const char*>(&mtimeRep), sizeof(mtimeRep));
+            put32(1); // chunkCount
+            put32(1); // itemCount
+            const std::wstring name = L"a.txt";
+            put32(static_cast<uint32_t>(name.size()));
+            oob.write(reinterpret_cast<const char*>(name.data()), name.size() * sizeof(wchar_t));
+            put32(static_cast<uint32_t>(name.size()));
+            oob.write(reinterpret_cast<const char*>(name.data()), name.size() * sizeof(wchar_t));
+            put32(9999); // parentDirIndex: out of bounds
+            const bool isDir = false;
+            oob.write(reinterpret_cast<const char*>(&isDir), sizeof(isDir));
+            oob.close();
+        }
+        Check(!FileIndex::Instance().LoadIndexCache(oobCachePath),
+              "LoadIndexCache rejects an out-of-range parentDirIndex instead of leaving a crash in Search()");
+
         DeleteFileW(cachePath.c_str());
-        DeleteFileW(L"cache_corrupt_test.bin");
-        DeleteFileW(L"cache_garbled_len_test.bin");
+        DeleteFileW(corruptCachePath.c_str());
+        DeleteFileW(garbledCachePath.c_str());
+        DeleteFileW(oobCachePath.c_str());
     }
 
     // -----------------------------------------------------------------------------
@@ -907,7 +1069,13 @@ int main() {
     // -----------------------------------------------------------------------------
     {
         FileIndex::Instance().Stop();
-        const std::wstring testCachePath = L"startup_cache_test.bin";
+        // The block above left a synthetic D:\Cache\Test entry (and its
+        // items) in the process-wide pool. It does not exist on disk, so
+        // the warm start's IncrementalRescan would correctly prune it
+        // mid-test and move the item count out from under the comparison
+        // below - start from an empty index instead.
+        FileIndex::Instance().ResetForTest();
+        const std::wstring testCachePath = (testCacheDir / L"startup_cache_test.bin").wstring();
         DeleteFileW(testCachePath.c_str()); // ensure a clean cold start
 
         fs::path currentPath = fs::current_path();
@@ -942,6 +1110,52 @@ int main() {
     }
 
     // -----------------------------------------------------------------------------
+    // A cache file that exists but cannot be loaded falls back to a real walk
+    //
+    // This is the one branch in WorkerLoop where a wrong answer is silent: it
+    // decides *which index the user gets*, and both outcomes look successful
+    // from the outside. An unloadable cache (here: a correct magic with a
+    // format version from a different build, i.e. what every future format
+    // change produces) must not leave the index empty.
+    // -----------------------------------------------------------------------------
+    {
+        FileIndex::Instance().Stop();
+        FileIndex::Instance().ResetForTest();
+
+        const std::wstring staleCachePath = (testCacheDir / L"unloadable_cache_test.bin").wstring();
+        {
+            std::ofstream stale(staleCachePath, std::ios::binary);
+            uint32_t magic = takeoff::kCacheMagic;
+            uint32_t wrongVersion = takeoff::kCacheFormatVersion + 1;
+            stale.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+            stale.write(reinterpret_cast<const char*>(&wrongVersion), sizeof(wrongVersion));
+        }
+        std::error_code staleEc;
+        Check(fs::exists(staleCachePath, staleEc), "Setup: an unloadable cache file exists before Start()");
+        Check(!FileIndex::Instance().LoadIndexCache(staleCachePath),
+              "Setup: that cache file really is unloadable");
+        Check(FileIndex::Instance().Count() == 0, "Setup: the failed load left the index empty");
+
+        fs::path fallbackCwd = fs::current_path();
+        fs::path fallbackRepo = FileIndex::FindVerifiedProjectRoot(fallbackCwd);
+        if (fallbackRepo.empty()) fallbackRepo = fallbackCwd;
+
+        FileIndex::Instance().Start(nullptr, fallbackRepo.wstring(), staleCachePath);
+        for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        Check(FileIndex::Instance().Count() > 0,
+              "An unloadable cache falls back to a real walk instead of leaving the index empty");
+        Check(FileIndex::Instance().GetPhase() == takeoff::FileIndex::Phase::Loaded,
+              "The fallback walk reaches Loaded phase");
+        FileIndex::Instance().Stop();
+
+        Check(FileIndex::Instance().LoadIndexCache(staleCachePath),
+              "The fallback walk replaced the unloadable cache with one in the current format");
+        DeleteFileW(staleCachePath.c_str());
+    }
+
+    // -----------------------------------------------------------------------------
     // Incremental rescan: unchanged directories are left alone; drive-prune removes
     // entries under a path that no longer exists.
     // -----------------------------------------------------------------------------
@@ -961,8 +1175,15 @@ int main() {
         FileIndex::Instance().SetDirectoryChunk(goneIdx, std::move(goneItems));
         Check(FileIndex::Instance().Count() == 1, "Setup: ghost entry present before pruning");
 
+        // A stored mtime from before the drive went away would still compare
+        // equal once it is plugged back in, so the next rescan would skip the
+        // entry and leave the chunk emptied above empty forever. Pruning has
+        // to reset it too, which is what makes the entry look changed again.
+        pool.SetMtime(goneIdx, std::filesystem::file_time_type::clock::now());
         FileIndex::Instance().PruneAbsentDrives();
         Check(FileIndex::Instance().Count() == 0, "PruneAbsentDrives removes entries whose root no longer exists");
+        Check(pool.GetMtime(goneIdx) == std::filesystem::file_time_type{},
+              "PruneAbsentDrives resets the pruned entry's mtime so a replugged drive is re-listed");
     }
 
     // -----------------------------------------------------------------------------
@@ -997,7 +1218,7 @@ int main() {
             seedFile << "seed";
         }
 
-        const std::wstring incrementalCachePath = L"incremental_rescan_test_cache.bin";
+        const std::wstring incrementalCachePath = (testCacheDir / L"incremental_rescan_test_cache.bin").wstring();
         DeleteFileW(incrementalCachePath.c_str()); // ensure a cold BuildIndex(), not a stale cache load
 
         // A warm Start() flips phase Loaded -> IncrementalRescan -> Loaded
@@ -1059,6 +1280,30 @@ int main() {
               "IncrementalRescan picks up a new file after its directory's mtime changes");
         Check(FileIndex::Instance().Count() == countAfterSettle + 1,
               "IncrementalRescan's count reflects exactly the one new file, nothing lost/duplicated");
+
+        // A brand-new subdirectory is discovered and walked...
+        fs::path deletedSubdir = scanTarget / L"doomed_subdir";
+        fs::create_directories(deletedSubdir, ec);
+        {
+            std::ofstream innerFile((deletedSubdir / L"inner.txt").wstring());
+            innerFile << "inner";
+        }
+        FileIndex::Instance().Start(nullptr, scanTarget.wstring(), incrementalCachePath);
+        waitSettled();
+        FileIndex::Instance().Stop();
+        Check(!FileIndex::Instance().Search(L"inner.txt").empty(),
+              "IncrementalRescan walks a brand-new subdirectory discovered during a re-list");
+
+        // ...and when that directory is deleted, its own chunk goes with it.
+        // Nothing else prunes an ordinary deleted directory (PruneAbsentDrives
+        // only prunes by drive-letter absence), so without that its files
+        // would keep surfacing forever under paths that no longer exist.
+        fs::remove_all(deletedSubdir, ec);
+        FileIndex::Instance().Start(nullptr, scanTarget.wstring(), incrementalCachePath);
+        waitSettled();
+        FileIndex::Instance().Stop();
+        Check(FileIndex::Instance().Search(L"inner.txt").empty(),
+              "IncrementalRescan prunes a deleted directory's own chunk, not just its parent's listing");
 
         fs::remove_all(testRoot, ec);
         DeleteFileW(incrementalCachePath.c_str());

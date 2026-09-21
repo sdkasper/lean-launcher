@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cwctype>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -186,7 +187,8 @@ public:
     // callers must leave it empty.
     // cachePathOverride is test-only, exactly like scanRootOverride: when
     // empty, the real %LOCALAPPDATA%\LeanLauncher\file_index.cache path is
-    // used instead.
+    // used instead - unless scanRootOverride is set, in which case no cache
+    // path is resolved at all (see below).
     void Start(HWND notifyHwnd = nullptr, const std::wstring& scanRootOverride = L"",
                const std::wstring& cachePathOverride = L"") {
         if (running_.exchange(true)) return;
@@ -197,7 +199,17 @@ public:
         ready_ = false;
         notifyHwnd_ = notifyHwnd;
         scanRootOverride_ = scanRootOverride;
-        cachePathOverride_ = cachePathOverride.empty() ? DefaultCachePath() : cachePathOverride;
+        // A scoped (test) scan must never read or write the production
+        // cache: reading it would silently replace the scoped index with
+        // the machine-wide one, and writing it would replace the user's
+        // real index with a single directory tree - permanently, since a
+        // successful cache load means BuildIndex() never runs again. So
+        // when a scan root is overridden and no explicit cache path is
+        // given, this cycle simply has no cache (every use site already
+        // guards on the path being empty).
+        cachePath_ = !cachePathOverride.empty() ? cachePathOverride
+                   : scanRootOverride.empty()   ? DefaultCachePath()
+                                                : std::wstring{};
         stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         worker_ = std::thread([this]() { WorkerLoop(); });
     }
@@ -237,54 +249,56 @@ public:
     void ResetForTest() {
         std::lock_guard<std::mutex> lock(mutex_);
         pool_ = DirectoryPool{};
-        savedPoolCache_ = DirectoryPool{}; // see SaveIndexCache's comment on this mirror
         snapshot_.reset();
         ready_ = false;
+        // Without this, a Loaded left over from a previous Start()/Stop()
+        // block can satisfy a test's "wait until the phase settles on
+        // Loaded" poll before the next worker has done any work at all.
+        phase_ = Phase::Idle;
     }
 
     // Test-only accessor - real callers never touch the pool directly.
     DirectoryPool& TestOnlyPool() { return pool_; }
 
+    // Serializes the pool one entry at a time under brief, separate locks
+    // (the same pattern RefreshMtimeLocked / PruneAbsentDrives /
+    // IncrementalRescan use), and does the actual file I/O with no lock
+    // held at all. SaveIndexCache runs every ~5 minutes from the live
+    // worker thread while Search() can block on this same mutex_
+    // concurrently, so neither a deep copy of every path/normPath wstring
+    // nor a multi-megabyte blocking write may happen under the lock.
+    // Pool indices below poolSize stay valid for the whole call: entries
+    // are only ever appended (Intern), never removed or reordered, and the
+    // only wholesale replacements (LoadIndexCache, ResetForTest) cannot run
+    // concurrently with this - the worker thread is the sole caller of both.
     bool SaveIndexCache(const std::wstring& path) const {
         std::shared_ptr<const IndexSnapshot> snapshot;
+        size_t poolSize = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             snapshot = snapshot_;
-            // Mirror pool_ into savedPoolCache_ incrementally instead of
-            // deep-copying the whole DirectoryPool under this lock every
-            // call. SaveIndexCache runs every ~5 minutes from the live
-            // worker thread (IncrementalRescan) while Search() can block
-            // on this same mutex_ concurrently, so an O(n) copy of tens
-            // of thousands of path/normPath wstrings here would stall
-            // those callers for a perceptible amount of time at full-disk
-            // scale. Refreshing an existing entry's mtime is a trivial
-            // scalar write (no allocation); only genuinely new entries
-            // (added since the previous save) pay the string-copy cost,
-            // and a rescan pass normally finds few of those.
-            // savedPoolCache_ is only ever touched here (and reset
-            // alongside pool_ in LoadIndexCache/ResetForTest), so it's
-            // safe to read below without the lock held.
-            const auto& liveEntries = pool_.Entries();
-            const size_t priorCount = (std::min)(savedPoolCache_.Size(), liveEntries.size());
-            for (size_t i = 0; i < priorCount; ++i) {
-                savedPoolCache_.SetMtime(static_cast<uint32_t>(i), liveEntries[i].lastKnownMtime);
-            }
-            for (size_t i = priorCount; i < liveEntries.size(); ++i) {
-                uint32_t idx = savedPoolCache_.Intern(liveEntries[i].path, liveEntries[i].normPath);
-                savedPoolCache_.SetMtime(idx, liveEntries[i].lastKnownMtime);
-            }
+            poolSize = pool_.Size();
         }
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (!out) return false;
 
         WriteRaw(out, kCacheMagic);
         WriteRaw(out, kCacheFormatVersion);
-        const uint32_t dirCount = static_cast<uint32_t>(savedPoolCache_.Entries().size());
+        const uint32_t dirCount = static_cast<uint32_t>(poolSize);
         WriteRaw(out, dirCount);
-        for (const auto& entry : savedPoolCache_.Entries()) {
-            WriteWString(out, entry.path);
-            WriteWString(out, entry.normPath);
-            WriteRaw(out, entry.lastKnownMtime.time_since_epoch().count());
+        for (uint32_t i = 0; i < dirCount; ++i) {
+            std::wstring entryPath, entryNormPath;
+            fs::file_time_type mtime;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const DirectoryEntry& entry = pool_.Get(i);
+                entryPath = entry.path;
+                entryNormPath = entry.normPath;
+                mtime = entry.lastKnownMtime;
+            }
+            WriteWString(out, entryPath);
+            WriteWString(out, entryNormPath);
+            WriteRaw(out, mtime.time_since_epoch().count());
         }
 
         if (!snapshot) { WriteRaw(out, uint32_t{0}); return static_cast<bool>(out); }
@@ -338,6 +352,10 @@ public:
             auto newSnapshot = std::make_shared<IndexSnapshot>();
             uint32_t chunkCount = 0;
             if (!ReadRaw(in, chunkCount)) return false;
+            // Every chunk index is a pool index, so a file claiming more
+            // chunks than directories is corrupt. Rejecting it here also
+            // keeps chunksByDir's size within the pool's range.
+            if (chunkCount > dirCount) return false;
             newSnapshot->chunksByDir.resize(chunkCount);
             for (uint32_t i = 0; i < chunkCount; ++i) {
                 uint32_t itemCount = 0;
@@ -350,6 +368,12 @@ public:
                     if (!ReadWString(in, item.name)) return false;
                     if (!ReadWString(in, item.normName)) return false;
                     if (!ReadRaw(in, item.parentDirIndex)) return false;
+                    // Search() indexes the pool with this value directly
+                    // (pool_.Get(item.parentDirIndex)), which is an
+                    // unchecked vector read - a garbled index would be an
+                    // out-of-bounds access on the UI thread's hot path, and
+                    // nothing else in this function would catch it.
+                    if (item.parentDirIndex >= dirCount) return false;
                     if (!ReadRaw(in, item.isDirectory)) return false;
                     items->push_back(std::move(item));
                 }
@@ -359,14 +383,9 @@ public:
 
             std::lock_guard<std::mutex> lock(mutex_);
             pool_ = std::move(newPool);
-            // savedPoolCache_ mirrors pool_ by index position (see
-            // SaveIndexCache); a wholesale pool_ replacement invalidates
-            // that mirror, so drop it and let the next SaveIndexCache
-            // call rebuild it from scratch (a one-time cost, not a
-            // recurring one).
-            savedPoolCache_ = DirectoryPool{};
             snapshot_ = std::move(newSnapshot);
             ready_ = true;
+            phase_ = Phase::Loaded;
             return true;
         } catch (const std::exception&) {
             return false;
@@ -436,8 +455,25 @@ public:
         if (!snapshot) return;
 
         std::unordered_map<std::wstring, bool> driveExistsCache;
+        std::vector<std::pair<uint32_t, std::vector<FileItem>>> batch;
+        size_t entriesVisited = 0;
         for (uint32_t i = 0; i < poolSize; ++i) {
-            if (i >= snapshot->chunksByDir.size() || !snapshot->chunksByDir[i]) continue;
+            // Same periodic yield ScanPath uses on the first walk - this
+            // pass runs on the recurring path, so it owes the rest of the
+            // system the same courtesy. It is dropped once the worker is
+            // shutting down, so Stop()'s join() never waits on sleeps; the
+            // pass itself is cheap enough to just finish.
+            if (++entriesVisited % 64 == 0 && running_.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            // Nothing to prune if this directory has no published content -
+            // including one already emptied by a previous pass, which would
+            // otherwise be re-pruned (and re-published) every five minutes
+            // for as long as the drive stays unplugged.
+            if (i >= snapshot->chunksByDir.size() || !snapshot->chunksByDir[i] ||
+                snapshot->chunksByDir[i]->empty()) {
+                continue;
+            }
             std::wstring path;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -454,8 +490,20 @@ public:
                 exists = fs::exists(driveRoot, ec);
                 driveExistsCache[driveRoot] = exists;
             }
-            if (!exists) PruneDirectory(i);
+            if (!exists) {
+                // Reset the stored mtime alongside emptying the chunk:
+                // an unplugged drive's directories keep the mtimes they
+                // had, so without this the next pass after a replug would
+                // compare equal, skip every entry, and leave the emptied
+                // chunks empty forever. A default (epoch) mtime makes that
+                // pass see them as changed and re-list them instead.
+                SetMtimeLocked(pool_, i, fs::file_time_type{});
+                batch.emplace_back(i, std::vector<FileItem>{});
+            }
         }
+        // One publish for the whole pass - PruneDirectory per entry would
+        // copy the entire chunksByDir vector per absent directory (O(D^2)).
+        SetDirectoryChunks(std::move(batch));
     }
 
     // Periodic maintenance pass: prunes anything under a now-absent drive,
@@ -467,6 +515,13 @@ public:
     // cache load; also callable directly by a test.
     void IncrementalRescan() {
         phase_ = Phase::IncrementalRescan;
+        // Discover roots that appeared since the first walk. Once a cache
+        // exists BuildIndex() never runs again, so this is the only thing
+        // that can ever notice a newly attached drive (or a known folder
+        // that did not resolve before) - without it, such a root has no
+        // pool entry, the loop below only visits existing entries, and the
+        // drive stays invisible to search for the life of the cache.
+        EnsureRootsInterned();
         PruneAbsentDrives();
 
         // Bound the loop below by the pool's size *at this instant* rather
@@ -475,9 +530,11 @@ public:
         // ScanPath call below adds mid-pass just won't be revisited until
         // the next pass, which is fine.
         size_t poolSizeAtStart;
+        std::shared_ptr<const IndexSnapshot> snapshotAtStart;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             poolSizeAtStart = pool_.Size();
+            snapshotAtStart = snapshot_;
         }
 
         // Fresh for this rescan pass only - never shared with BuildIndex's
@@ -489,8 +546,23 @@ public:
         std::unordered_set<uint64_t> seen;
         std::unordered_set<uint32_t> scannedDirs;
 
+        // Accumulated and published in one SetDirectoryChunks call at the
+        // end of the pass: SetDirectoryChunk copies the whole chunksByDir
+        // vector (and bumps every element's atomic refcount) per call, so
+        // one call per changed directory is O(D^2).
+        std::vector<std::pair<uint32_t, std::vector<FileItem>>> batch;
+        size_t entriesVisited = 0;
+
         for (uint32_t i = 0; i < poolSizeAtStart; ++i) {
             if (!running_.load()) break;
+            // Same periodic yield ScanPath uses on the first walk. This
+            // loop stats every interned directory and runs every 5 minutes
+            // *and* on every watched-folder change, so it is the feature's
+            // dominant steady-state I/O load - it needs the throttle more
+            // than the one-shot first walk does.
+            if (++entriesVisited % 64 == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
             std::wstring path;
             fs::file_time_type lastKnownMtime;
             {
@@ -499,7 +571,20 @@ public:
                 lastKnownMtime = pool_.Get(i).lastKnownMtime;
             }
             std::error_code ec;
-            if (!fs::exists(path, ec)) continue; // handled by PruneAbsentDrives / will be pruned next pass
+            if (!fs::exists(path, ec)) {
+                // The directory itself is gone (deleted, or under a
+                // deleted tree). Nothing else prunes this - PruneAbsentDrives
+                // only prunes by drive-letter absence - so without this its
+                // files would keep surfacing in search results forever, with
+                // reconstructed paths that no longer exist. Skipped once the
+                // chunk is already empty, so a long-gone directory does not
+                // get re-published as empty on every pass.
+                const bool hasContent = snapshotAtStart && i < snapshotAtStart->chunksByDir.size() &&
+                                        snapshotAtStart->chunksByDir[i] &&
+                                        !snapshotAtStart->chunksByDir[i]->empty();
+                if (hasContent) batch.emplace_back(i, std::vector<FileItem>{});
+                continue;
+            }
             fs::file_time_type currentMtime = fs::last_write_time(path, ec);
             if (ec || currentMtime == lastKnownMtime) continue;
 
@@ -529,8 +614,9 @@ public:
                         uint32_t childIdx = InternLocked(pool_, child.path().wstring(), Normalize(child.path().wstring()));
                         if (childIdx >= poolSizeAtStart) {
                             // Genuinely new subdirectory - fully walk it (bounded depth,
-                            // same as a first-run scan of that one subtree).
-                            ScanPath(child.path(), childIdx, pool_, seen, scannedDirs, 8);
+                            // same as a first-run scan of that one subtree, including
+                            // BuildIndex's shallower budget for the system drive).
+                            ScanPath(child.path(), childIdx, pool_, seen, scannedDirs, isDriveC ? 4 : 8);
                         }
                     } else if (!ec && child.is_regular_file(ec) && IsUserRelevantFile(child.path())) {
                         AddItem(child.path(), false, i, freshChildren, seen);
@@ -539,12 +625,20 @@ public:
             } catch (...) {}
 
             SetMtimeLocked(pool_, i, currentMtime);
-            SetDirectoryChunk(i, std::move(freshChildren));
+            batch.emplace_back(i, std::move(freshChildren));
         }
+
+        SetDirectoryChunks(std::move(batch));
+
+        // An interrupted pass has not finished its work, so it must neither
+        // claim Loaded nor write a cache - the same shape BuildIndex() uses,
+        // and the same reason: Stop() joins this thread from WM_DESTROY, so
+        // a full-disk-scale cache write here would block application exit.
+        if (!running_.load()) return;
 
         phase_ = Phase::Loaded;
         if (notifyHwnd_) PostMessageW(notifyHwnd_, kFilesReadyMessage, 0, 0);
-        if (!cachePathOverride_.empty()) SaveIndexCache(cachePathOverride_);
+        if (!cachePath_.empty()) SaveIndexCache(cachePath_);
     }
 
     static bool IsDriveRoot(const fs::path& p) {
@@ -775,6 +869,25 @@ public:
                                  query.find(L':') != std::wstring_view::npos);
         const bool allowPathMatch = hasPathSep || (tokens.size() > 1) || (normQuery.size() >= 3);
 
+        // The path match below is evaluated against the parent directory's
+        // normPath and the item's normName separately, rather than building
+        // (and heap-allocating) the concatenated path per item. That is
+        // exactly equivalent: Normalize() never emits a backslash, so no
+        // query or token can contain one, so no match can straddle the
+        // separator between the two halves - every match lies wholly within
+        // one of them.
+        //
+        // The saved allocation is the smaller half of the win. The parent is
+        // the *long* half of the path and is identical for every item in a
+        // chunk, so scanning it once per directory instead of once per item
+        // is what actually makes this loop affordable: with the file-count
+        // cap gone the loop is unbounded, and it runs under mutex_ on the UI
+        // thread's call path.
+        uint32_t cachedParentIdx = (std::numeric_limits<uint32_t>::max)();
+        size_t cachedParentLen = 0;
+        bool parentHasQuery = false;
+        std::vector<char> parentHasToken(tokens.size(), 0);
+
         for (const auto& chunk : snapshot->chunksByDir) {
             if (!chunk) continue;
             for (const auto& item : *chunk) {
@@ -789,28 +902,38 @@ public:
 
                 // 2. Secondary match: path / parent directory match
                 if (s <= 0 && allowPathMatch) {
-                    const std::wstring normPath = pool_.Get(item.parentDirIndex).normPath + L"\\" + item.normName;
+                    if (item.parentDirIndex != cachedParentIdx) {
+                        const std::wstring& dirNorm = pool_.Get(item.parentDirIndex).normPath;
+                        cachedParentLen = dirNorm.size();
+                        parentHasQuery = dirNorm.find(normQuery) != std::wstring::npos;
+                        for (size_t t = 0; t < tokens.size(); ++t) {
+                            parentHasToken[t] = dirNorm.find(tokens[t]) != std::wstring::npos ? 1 : 0;
+                        }
+                        cachedParentIdx = item.parentDirIndex;
+                    }
+                    // Length of the path this would have reconstructed:
+                    // parent + separator + name.
+                    const size_t pathLen = cachedParentLen + 1 + item.normName.size();
                     if (isSingleToken) {
                         // Contiguous substring in path (e.g. folder name in path)
-                        size_t pos = normPath.find(normQuery);
-                        if (pos != std::wstring::npos) {
-                            const size_t penalty = (std::min)(normPath.size() / 4, size_t{300});
+                        if (parentHasQuery || item.normName.find(normQuery) != std::wstring::npos) {
+                            const size_t penalty = (std::min)(pathLen / 4, size_t{300});
                             int pathScore = 2600 - static_cast<int>(penalty);
                             if (item.isDirectory) pathScore += 40;
                             s = (std::max)(1000, pathScore);
                         }
                     } else {
-                        // Multi-token match: all tokens must appear in normPath
+                        // Multi-token match: all tokens must appear in the path
                         bool allFound = true;
-                        for (const auto& token : tokens) {
-                            if (normPath.find(token) == std::wstring::npos) {
+                        for (size_t t = 0; t < tokens.size(); ++t) {
+                            if (!parentHasToken[t] && item.normName.find(tokens[t]) == std::wstring::npos) {
                                 allFound = false;
                                 break;
                             }
                         }
                         if (allFound) {
                             const bool lastMatchesName = (item.normName.find(tokens.back()) != std::wstring::npos);
-                            const size_t penalty = (std::min)(normPath.size() / 4, size_t{300});
+                            const size_t penalty = (std::min)(pathLen / 4, size_t{300});
                             int tokenScore = 2400 + (lastMatchesName ? 600 : 0) - static_cast<int>(penalty);
                             if (item.isDirectory) tokenScore += 40;
                             s = (std::max)(1000, tokenScore);
@@ -1054,6 +1177,60 @@ private:
         ready_ = true;
     }
 
+    struct ScanRoots {
+        std::vector<fs::path> knownFolders;
+        std::vector<fs::path> drives;
+    };
+
+    // Enumerates the machine's top-level scan roots - the six known user
+    // folders and every fixed/removable drive root - and interns each one
+    // into pool_, returning them for BuildIndex()'s first walk.
+    // IncrementalRescan() calls it purely for the interning side effect: a
+    // root with no pool entry yet gets one with DirectoryEntry's default
+    // (epoch) mtime, so the very next mtime comparison in the same rescan
+    // pass sees it as changed and re-lists it, merging a newly attached
+    // drive back in like any other changed directory.
+    ScanRoots EnsureRootsInterned() {
+        ScanRoots roots;
+        // A scoped (test) scan stays inside its override root - it must
+        // never enumerate, intern, or later walk the real machine.
+        if (!scanRootOverride_.empty()) return roots;
+
+        const KNOWNFOLDERID userFolders[] = {
+            FOLDERID_Desktop,
+            FOLDERID_Documents,
+            FOLDERID_Downloads,
+            FOLDERID_Pictures,
+            FOLDERID_Music,
+            FOLDERID_Videos,
+        };
+        for (const auto& kfid : userFolders) {
+            if (!running_.load()) return roots;
+            PWSTR folderPath = nullptr;
+            if (SUCCEEDED(SHGetKnownFolderPath(kfid, KF_FLAG_DEFAULT, nullptr, &folderPath)) && folderPath) {
+                fs::path folder(folderPath);
+                CoTaskMemFree(folderPath);
+                InternLocked(pool_, folder.wstring(), Normalize(folder.wstring()));
+                roots.knownFolders.push_back(std::move(folder));
+            }
+        }
+
+        wchar_t driveBuffer[512]{};
+        if (running_.load() &&
+            GetLogicalDriveStringsW(static_cast<DWORD>(std::size(driveBuffer)), driveBuffer)) {
+            const wchar_t* drive = driveBuffer;
+            while (*drive && running_.load()) {
+                const UINT driveType = GetDriveTypeW(drive);
+                if (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE) {
+                    InternLocked(pool_, drive, Normalize(std::wstring(drive)));
+                    roots.drives.emplace_back(drive);
+                }
+                drive += wcslen(drive) + 1;
+            }
+        }
+        return roots;
+    }
+
     void BuildIndex() {
         phase_ = Phase::FirstWalk;
         std::unordered_set<uint64_t> seen;
@@ -1098,26 +1275,11 @@ private:
         // 1. Scan primary user folders (Desktop, Documents, Downloads, Pictures, Music, Videos).
         // Self-registration for each is deferred until after phase 3 -
         // see the deferred block below.
-        const KNOWNFOLDERID userFolders[] = {
-            FOLDERID_Desktop,
-            FOLDERID_Documents,
-            FOLDERID_Downloads,
-            FOLDERID_Pictures,
-            FOLDERID_Music,
-            FOLDERID_Videos,
-        };
-
-        std::vector<fs::path> knownFolders;
-        for (const auto& kfid : userFolders) {
+        const ScanRoots roots = EnsureRootsInterned();
+        for (const auto& folder : roots.knownFolders) {
             if (!running_.load()) break;
-            PWSTR folderPath = nullptr;
-            if (SUCCEEDED(SHGetKnownFolderPath(kfid, KF_FLAG_DEFAULT, nullptr, &folderPath)) && folderPath) {
-                fs::path folder(folderPath);
-                knownFolders.push_back(folder);
-                uint32_t folderIdx = InternLocked(pool_, folder.wstring(), Normalize(folder.wstring()));
-                ScanPath(folder, folderIdx, pool_, seen, scannedDirs, 8);
-                CoTaskMemFree(folderPath);
-            }
+            uint32_t folderIdx = InternLocked(pool_, folder.wstring(), Normalize(folder.wstring()));
+            ScanPath(folder, folderIdx, pool_, seen, scannedDirs, 8);
         }
 
         // 2. Scan %USERPROFILE% roots (e.g. source code directories, projects, etc.)
@@ -1161,49 +1323,42 @@ private:
         }
 
         // 3. Scan all fixed and removable drives (e.g. C:\, D:\, X:\)
-        wchar_t driveBuffer[512]{};
-        if (running_.load() &&
-            GetLogicalDriveStringsW(static_cast<DWORD>(std::size(driveBuffer)), driveBuffer)) {
-            const wchar_t* drive = driveBuffer;
-            while (*drive && running_.load()) {
-                const UINT driveType = GetDriveTypeW(drive);
-                if (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE) {
-                    const wchar_t driveLetter = towupper(drive[0]);
-                    const bool isDriveC = (driveLetter == L'C');
-                    uint32_t driveIdx = InternLocked(pool_, drive, Normalize(std::wstring(drive)));
-                    std::vector<FileItem> driveItems;
-                    driveItems.reserve(8192);
-                    fs::directory_iterator dit(drive, fs::directory_options::skip_permission_denied, ec);
-                    try {
-                        for (const auto& entry : dit) {
-                            if (!running_.load()) break;
-                            if (entry.is_directory(ec)) {
-                                std::wstring dirName = entry.path().filename().wstring();
-                                if (isDriveC && _wcsicmp(dirName.c_str(), L"Users") == 0) {
-                                    continue;
-                                }
-                                if (!ShouldSkipDirectory(entry.path())) {
-                                    AddItem(entry.path(), true, driveIdx, driveItems, seen);
-                                    uint32_t childIdx = InternLocked(pool_, entry.path().wstring(), Normalize(entry.path().wstring()));
-                                    const int maxDepth = isDriveC ? 4 : 8;
-                                    ScanPath(entry.path(), childIdx, pool_, seen, scannedDirs, maxDepth);
-                                }
-                            } else if (entry.is_regular_file(ec)) {
-                                if (IsUserRelevantFile(entry.path())) {
-                                    AddItem(entry.path(), false, driveIdx, driveItems, seen);
-                                }
-                            }
+        for (const auto& driveRoot : roots.drives) {
+            if (!running_.load()) break;
+            const std::wstring drive = driveRoot.wstring();
+            if (drive.empty()) continue;
+            const bool isDriveC = (towupper(drive[0]) == L'C');
+            uint32_t driveIdx = InternLocked(pool_, drive, Normalize(drive));
+            std::vector<FileItem> driveItems;
+            driveItems.reserve(8192);
+            fs::directory_iterator dit(drive, fs::directory_options::skip_permission_denied, ec);
+            try {
+                for (const auto& entry : dit) {
+                    if (!running_.load()) break;
+                    if (entry.is_directory(ec)) {
+                        std::wstring dirName = entry.path().filename().wstring();
+                        if (isDriveC && _wcsicmp(dirName.c_str(), L"Users") == 0) {
+                            continue;
                         }
-                    } catch (...) {}
-                    SetDirectoryChunk(driveIdx, std::move(driveItems));
-                    // Same reasoning as MergeSelfItem's/profileIdx's comment
-                    // above: listed by hand here, not via ScanPath, so its
-                    // mtime needs an explicit refresh or IncrementalRescan
-                    // would always treat every drive root as "changed".
-                    RefreshMtimeLocked(pool_, driveIdx);
+                        if (!ShouldSkipDirectory(entry.path())) {
+                            AddItem(entry.path(), true, driveIdx, driveItems, seen);
+                            uint32_t childIdx = InternLocked(pool_, entry.path().wstring(), Normalize(entry.path().wstring()));
+                            const int maxDepth = isDriveC ? 4 : 8;
+                            ScanPath(entry.path(), childIdx, pool_, seen, scannedDirs, maxDepth);
+                        }
+                    } else if (entry.is_regular_file(ec)) {
+                        if (IsUserRelevantFile(entry.path())) {
+                            AddItem(entry.path(), false, driveIdx, driveItems, seen);
+                        }
+                    }
                 }
-                drive += wcslen(drive) + 1;
-            }
+            } catch (...) {}
+            SetDirectoryChunk(driveIdx, std::move(driveItems));
+            // Same reasoning as MergeSelfItem's/profileIdx's comment
+            // above: listed by hand here, not via ScanPath, so its
+            // mtime needs an explicit refresh or IncrementalRescan
+            // would always treat every drive root as "changed".
+            RefreshMtimeLocked(pool_, driveIdx);
         }
 
         // Deferred self-registration: runs after every phase so nothing
@@ -1215,7 +1370,7 @@ private:
         // never are, since phase 2 explicitly excludes their names and
         // phase 3 excludes "Users" on the C: drive).
         if (!repoDir.empty()) MergeSelfItem(repoDir, seen);
-        for (auto& folder : knownFolders) MergeSelfItem(folder, seen);
+        for (const auto& folder : roots.knownFolders) MergeSelfItem(folder, seen);
 
         if (!running_.load()) return;
 
@@ -1233,15 +1388,15 @@ private:
         // Initial background index: try loading a persisted cache first so a
         // warm start doesn't pay for a full disk walk; fall back to a real
         // walk (and persist its result) if there's no usable cache.
-        bool loadedFromCache = !cachePathOverride_.empty() && LoadIndexCache(cachePathOverride_);
+        bool loadedFromCache = !cachePath_.empty() && LoadIndexCache(cachePath_);
         if (loadedFromCache) {
             phase_ = Phase::Loaded;
             if (notifyHwnd_) PostMessageW(notifyHwnd_, kFilesReadyMessage, 0, 0);
             IncrementalRescan(); // correct a stale cache quickly on startup
         } else {
             BuildIndex();
-            if (running_.load() && !cachePathOverride_.empty()) {
-                SaveIndexCache(cachePathOverride_);
+            if (running_.load() && !cachePath_.empty()) {
+                SaveIndexCache(cachePath_);
             }
         }
 
@@ -1307,15 +1462,13 @@ private:
     mutable std::mutex mutex_;
     std::shared_ptr<const IndexSnapshot> snapshot_;
     DirectoryPool pool_;
-    // Incremental mirror of pool_ used only by SaveIndexCache, so it can
-    // avoid a full O(n) deep copy under mutex_ on every call - see that
-    // method's comment. Reset alongside pool_ in LoadIndexCache/ResetForTest.
-    mutable DirectoryPool savedPoolCache_;
     std::thread worker_;
     HANDLE stopEvent_ = nullptr;
     HWND notifyHwnd_ = nullptr;
     std::wstring scanRootOverride_;
-    std::wstring cachePathOverride_;
+    // The effective cache path for this Start() cycle - empty means "this
+    // cycle has no cache" (a scoped scan without an explicit cache path).
+    std::wstring cachePath_;
 };
 
 } // namespace takeoff
