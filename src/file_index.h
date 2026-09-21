@@ -223,47 +223,58 @@ public:
         if (!ReadRaw(in, magic) || magic != kCacheMagic) return false;
         if (!ReadRaw(in, version) || version != kCacheFormatVersion) return false;
 
-        DirectoryPool newPool;
-        uint32_t dirCount = 0;
-        if (!ReadRaw(in, dirCount)) return false;
-        std::vector<DirectoryEntry> entries(dirCount);
-        for (uint32_t i = 0; i < dirCount; ++i) {
-            if (!ReadWString(in, entries[i].path)) return false;
-            if (!ReadWString(in, entries[i].normPath)) return false;
-            fs::file_time_type::rep rep{};
-            if (!ReadRaw(in, rep)) return false;
-            entries[i].lastKnownMtime = fs::file_time_type(fs::file_time_type::duration(rep));
-        }
-        for (auto& e : entries) newPool.Intern(e.path, e.normPath); // rebuild index map in original order
-        for (uint32_t i = 0; i < dirCount; ++i) newPool.SetMtime(i, entries[i].lastKnownMtime);
-
-        auto newSnapshot = std::make_shared<IndexSnapshot>();
-        uint32_t chunkCount = 0;
-        if (!ReadRaw(in, chunkCount)) return false;
-        newSnapshot->chunksByDir.resize(chunkCount);
-        for (uint32_t i = 0; i < chunkCount; ++i) {
-            uint32_t itemCount = 0;
-            if (!ReadRaw(in, itemCount)) return false;
-            if (itemCount == 0) continue;
-            auto items = std::make_shared<std::vector<FileItem>>();
-            items->reserve(itemCount);
-            for (uint32_t j = 0; j < itemCount; ++j) {
-                FileItem item;
-                if (!ReadWString(in, item.name)) return false;
-                if (!ReadWString(in, item.normName)) return false;
-                if (!ReadRaw(in, item.parentDirIndex)) return false;
-                if (!ReadRaw(in, item.isDirectory)) return false;
-                items->push_back(std::move(item));
+        // A corrupt file can carry a garbled length field (e.g. a bit-flip
+        // producing len ~= 0xFFFFFFFF) for dirCount/chunkCount/itemCount or
+        // any wstring's length prefix - those feed directly into
+        // allocation-driving calls below (vector(n), resize(n), reserve(n))
+        // and can throw length_error/bad_alloc. Catch that here so this
+        // function's documented contract (false on any corrupt file) holds
+        // instead of letting the exception escape and crash the app.
+        try {
+            DirectoryPool newPool;
+            uint32_t dirCount = 0;
+            if (!ReadRaw(in, dirCount)) return false;
+            std::vector<DirectoryEntry> entries(dirCount);
+            for (uint32_t i = 0; i < dirCount; ++i) {
+                if (!ReadWString(in, entries[i].path)) return false;
+                if (!ReadWString(in, entries[i].normPath)) return false;
+                fs::file_time_type::rep rep{};
+                if (!ReadRaw(in, rep)) return false;
+                entries[i].lastKnownMtime = fs::file_time_type(fs::file_time_type::duration(rep));
             }
-            newSnapshot->totalCount += items->size();
-            newSnapshot->chunksByDir[i] = std::move(items);
-        }
+            for (auto& e : entries) newPool.Intern(e.path, e.normPath); // rebuild index map in original order
+            for (uint32_t i = 0; i < dirCount; ++i) newPool.SetMtime(i, entries[i].lastKnownMtime);
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        pool_ = std::move(newPool);
-        snapshot_ = std::move(newSnapshot);
-        ready_ = true;
-        return true;
+            auto newSnapshot = std::make_shared<IndexSnapshot>();
+            uint32_t chunkCount = 0;
+            if (!ReadRaw(in, chunkCount)) return false;
+            newSnapshot->chunksByDir.resize(chunkCount);
+            for (uint32_t i = 0; i < chunkCount; ++i) {
+                uint32_t itemCount = 0;
+                if (!ReadRaw(in, itemCount)) return false;
+                if (itemCount == 0) continue;
+                auto items = std::make_shared<std::vector<FileItem>>();
+                items->reserve(itemCount);
+                for (uint32_t j = 0; j < itemCount; ++j) {
+                    FileItem item;
+                    if (!ReadWString(in, item.name)) return false;
+                    if (!ReadWString(in, item.normName)) return false;
+                    if (!ReadRaw(in, item.parentDirIndex)) return false;
+                    if (!ReadRaw(in, item.isDirectory)) return false;
+                    items->push_back(std::move(item));
+                }
+                newSnapshot->totalCount += items->size();
+                newSnapshot->chunksByDir[i] = std::move(items);
+            }
+
+            std::lock_guard<std::mutex> lock(mutex_);
+            pool_ = std::move(newPool);
+            snapshot_ = std::move(newSnapshot);
+            ready_ = true;
+            return true;
+        } catch (const std::exception&) {
+            return false;
+        }
     }
 
     void SetDirectoryChunk(uint32_t poolIndex, std::vector<FileItem>&& children) {

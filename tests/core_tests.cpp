@@ -835,8 +835,25 @@ int main() {
         Check(!FileIndex::Instance().LoadIndexCache(L"cache_corrupt_test.bin"),
               "LoadIndexCache rejects a corrupt/wrong-format file");
 
+        // Plausible header (correct magic/version) but a garbled dirCount
+        // that would drive std::vector<DirectoryEntry> to try to allocate
+        // ~4 billion entries - must return false, not throw/crash.
+        {
+            std::ofstream garbled(L"cache_garbled_len_test.bin", std::ios::binary);
+            uint32_t magic = takeoff::kCacheMagic;
+            uint32_t version = takeoff::kCacheFormatVersion;
+            uint32_t hugeDirCount = 0xFFFFFFFFu;
+            garbled.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+            garbled.write(reinterpret_cast<const char*>(&version), sizeof(version));
+            garbled.write(reinterpret_cast<const char*>(&hugeDirCount), sizeof(hugeDirCount));
+            garbled.close();
+        }
+        Check(!FileIndex::Instance().LoadIndexCache(L"cache_garbled_len_test.bin"),
+              "LoadIndexCache rejects a garbled length field instead of throwing/crashing");
+
         DeleteFileW(cachePath.c_str());
         DeleteFileW(L"cache_corrupt_test.bin");
+        DeleteFileW(L"cache_garbled_len_test.bin");
     }
 
     // 5. Settings Scroll and Viewport Invariants:
