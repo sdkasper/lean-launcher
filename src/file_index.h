@@ -576,9 +576,17 @@ public:
                 // deleted tree). Nothing else prunes this - PruneAbsentDrives
                 // only prunes by drive-letter absence - so without this its
                 // files would keep surfacing in search results forever, with
-                // reconstructed paths that no longer exist. Skipped once the
-                // chunk is already empty, so a long-gone directory does not
-                // get re-published as empty on every pass.
+                // reconstructed paths that no longer exist. Reset the mtime
+                // (outside the hasContent check below, so it always happens)
+                // so that if this exact path is later restored by an
+                // mtime-preserving tool (backup/archive restore), the
+                // restored mtime won't equal the stale recorded one and the
+                // directory gets re-listed instead of staying permanently
+                // empty - the same self-healing guarantee PruneAbsentDrives
+                // gives unplugged/replugged drives.
+                SetMtimeLocked(pool_, i, fs::file_time_type{});
+                // Skipped once the chunk is already empty, so a long-gone
+                // directory does not get re-published as empty on every pass.
                 const bool hasContent = snapshotAtStart && i < snapshotAtStart->chunksByDir.size() &&
                                         snapshotAtStart->chunksByDir[i] &&
                                         !snapshotAtStart->chunksByDir[i]->empty();

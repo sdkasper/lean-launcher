@@ -1305,6 +1305,18 @@ int main() {
         Check(FileIndex::Instance().Search(L"inner.txt").empty(),
               "IncrementalRescan prunes a deleted directory's own chunk, not just its parent's listing");
 
+        // A stored mtime from before deletion would still compare equal if the
+        // exact path were ever recreated by an mtime-preserving restore (a
+        // backup/archive extraction), leaving the chunk empty forever - the
+        // same self-healing gap PruneAbsentDrives closes for unplugged drives.
+        // Pruning on deletion has to reset the mtime too, mirroring that fix.
+        {
+            takeoff::DirectoryPool& pool = FileIndex::Instance().TestOnlyPool();
+            uint32_t deletedIdx = pool.Intern(deletedSubdir.wstring(), takeoff::Normalize(deletedSubdir.wstring()));
+            Check(pool.GetMtime(deletedIdx) == std::filesystem::file_time_type{},
+                  "IncrementalRescan resets a deleted directory's mtime so a same-path restore is re-listed");
+        }
+
         fs::remove_all(testRoot, ec);
         DeleteFileW(incrementalCachePath.c_str());
     }
