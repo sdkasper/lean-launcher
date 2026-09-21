@@ -122,14 +122,35 @@ public:
 
     Phase GetPhase() const { return phase_.load(); }
 
+    static std::wstring DefaultCachePath() {
+        wchar_t localAppData[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH) > 0 && localAppData[0]) {
+            std::filesystem::path dir = std::filesystem::path(localAppData) / L"LeanLauncher";
+            std::error_code ec;
+            std::filesystem::create_directories(dir, ec);
+            return (dir / L"file_index.cache").wstring();
+        }
+        return L"";
+    }
+
     // scanRootOverride is test-only: when non-empty, BuildIndex() scans just
     // that one directory tree instead of the whole machine (known user
     // folders, %USERPROFILE%, all fixed/removable drives). Production
     // callers must leave it empty.
-    void Start(HWND notifyHwnd = nullptr, const std::wstring& scanRootOverride = L"") {
+    // cachePathOverride is test-only, exactly like scanRootOverride: when
+    // empty, the real %LOCALAPPDATA%\LeanLauncher\file_index.cache path is
+    // used instead.
+    void Start(HWND notifyHwnd = nullptr, const std::wstring& scanRootOverride = L"",
+               const std::wstring& cachePathOverride = L"") {
         if (running_.exchange(true)) return;
+        // A prior cycle (e.g. a direct LoadIndexCache() call, or this same
+        // singleton's previous Start()/Stop() pair) may have left ready_
+        // set to true; reset it so IsReady() reflects this cycle's worker
+        // progress, not leftover state from before this Start() call.
+        ready_ = false;
         notifyHwnd_ = notifyHwnd;
         scanRootOverride_ = scanRootOverride;
+        cachePathOverride_ = cachePathOverride.empty() ? DefaultCachePath() : cachePathOverride;
         stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         worker_ = std::thread([this]() { WorkerLoop(); });
     }
@@ -1012,8 +1033,19 @@ private:
     void WorkerLoop() {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 
-        // Initial background index
-        BuildIndex();
+        // Initial background index: try loading a persisted cache first so a
+        // warm start doesn't pay for a full disk walk; fall back to a real
+        // walk (and persist its result) if there's no usable cache.
+        bool loadedFromCache = !cachePathOverride_.empty() && LoadIndexCache(cachePathOverride_);
+        if (loadedFromCache) {
+            phase_ = Phase::Loaded;
+            if (notifyHwnd_) PostMessageW(notifyHwnd_, kFilesReadyMessage, 0, 0);
+        } else {
+            BuildIndex();
+            if (running_.load() && !cachePathOverride_.empty()) {
+                SaveIndexCache(cachePathOverride_);
+            }
+        }
 
         // Setup change monitors for active user directories
         PWSTR desktopPath = nullptr, docPath = nullptr, downPath = nullptr;
@@ -1081,6 +1113,7 @@ private:
     HANDLE stopEvent_ = nullptr;
     HWND notifyHwnd_ = nullptr;
     std::wstring scanRootOverride_;
+    std::wstring cachePathOverride_;
 };
 
 } // namespace takeoff

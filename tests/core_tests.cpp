@@ -856,6 +856,45 @@ int main() {
         DeleteFileW(L"cache_garbled_len_test.bin");
     }
 
+    // -----------------------------------------------------------------------------
+    // Cache-aware startup: cold start writes a cache; a second Start() loads it
+    // -----------------------------------------------------------------------------
+    {
+        FileIndex::Instance().Stop();
+        const std::wstring testCachePath = L"startup_cache_test.bin";
+        DeleteFileW(testCachePath.c_str()); // ensure a clean cold start
+
+        fs::path currentPath = fs::current_path();
+        fs::path repoPath = FileIndex::FindVerifiedProjectRoot(currentPath);
+        if (repoPath.empty()) repoPath = currentPath;
+
+        FileIndex::Instance().Start(nullptr, repoPath.wstring(), testCachePath);
+        for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        Check(FileIndex::Instance().GetPhase() == takeoff::FileIndex::Phase::Loaded,
+              "Cold start reaches Loaded phase after the first walk");
+        const size_t firstRunCount = FileIndex::Instance().Count();
+        Check(firstRunCount > 0, "Cold start indexed something");
+        FileIndex::Instance().Stop();
+
+        std::error_code cacheEc;
+        Check(fs::exists(testCachePath, cacheEc), "Cold start wrote a cache file to disk");
+
+        const auto reloadStart = std::chrono::steady_clock::now();
+        FileIndex::Instance().Start(nullptr, repoPath.wstring(), testCachePath);
+        for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        const auto reloadElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - reloadStart).count();
+        Check(FileIndex::Instance().Count() == firstRunCount,
+              "Second Start() with an existing cache loads the same item count");
+        Check(reloadElapsed < 2000, "Loading from an existing cache is fast, not a full re-walk");
+        FileIndex::Instance().Stop();
+        DeleteFileW(testCachePath.c_str());
+    }
+
     // 5. Settings Scroll and Viewport Invariants:
     // Guarantees Settings content cleanly fits and scrolls without overlapping FooterTop (440px).
     //
