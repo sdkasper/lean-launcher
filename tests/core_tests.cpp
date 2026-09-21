@@ -729,6 +729,12 @@ int main() {
               << repoPath.string() << " (ready=" << FileIndex::Instance().IsReady() << ").\n";
     Check(indexedCount > 0, "FileIndex populated files from disk");
 
+    // Throttling must not make a small scoped scan noticeably slow.
+    const auto throttleStart = std::chrono::steady_clock::now();
+    const auto throttleElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - throttleStart).count();
+    Check(throttleElapsed < 15000, "Scoped repo scan with I/O throttling still completes in under 15s");
+
     // Verify broad file & folder search finds repo folder and its files
     auto takeoffLauncherResults = FileIndex::Instance().Search(repoFolderName, 10);
     Check(!takeoffLauncherResults.empty(), "repo folder query returns results");

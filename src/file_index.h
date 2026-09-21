@@ -561,6 +561,17 @@ private:
         if (IsDriveRoot(root) || ShouldSkipDirectory(root)) return;
         if (!scannedDirs.insert(rootPoolIndex).second) return;
 
+        // Set I/O priority hint on the root directory to avoid disrupting the system during full-disk walks.
+        HANDLE dirHandle = CreateFileW(root.c_str(), FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (dirHandle != INVALID_HANDLE_VALUE) {
+            FILE_IO_PRIORITY_HINT_INFO hint{};
+            hint.PriorityHint = IoPriorityHintLow;
+            SetFileInformationByHandle(dirHandle, FileIoPriorityHintInfo, &hint, sizeof(hint));
+            CloseHandle(dirHandle);
+        }
+
         // childrenByDir[poolIndex] accumulates one directory's direct
         // children until that directory's listing is complete, then gets
         // published as a single chunk - this is what makes a later
@@ -573,9 +584,14 @@ private:
             fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
             const fs::recursive_directory_iterator end;
             std::vector<uint32_t> dirIndexAtDepth{rootPoolIndex};
+            size_t dirsVisitedThisCall = 0;
 
             while (it != end && !ec) {
                 if (!running_.load()) break;
+
+                if (++dirsVisitedThisCall % 64 == 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
 
                 const auto& entry = *it;
                 const int depth = it.depth(); // 0 == direct child of root
