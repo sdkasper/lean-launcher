@@ -26,7 +26,10 @@ namespace fs = std::filesystem;
 
 constexpr UINT kFilesReadyMessage = WM_APP + 8;
 constexpr uint32_t kCacheMagic = 0x4C4C4649; // "LLFI"
-constexpr uint32_t kCacheFormatVersion = 1;
+// Bumped to 2 (US-019): the cache now carries the exclusions file's mtime so a
+// cache written before an exclusions edit can be rejected instead of silently
+// keeping now-excluded content searchable forever.
+constexpr uint32_t kCacheFormatVersion = 2;
 
 template <typename T>
 void WriteRaw(std::ofstream& out, const T& value) {
@@ -203,10 +206,11 @@ public:
         return L"";
     }
 
-    // Lowercase, '/' -> '\', trailing '\' trimmed - the same comparison shape
-    // ShouldSkipDirectory's Windows-directory check already uses inline, made
-    // reusable here since both exclusions-file loading and folder-exclusion
-    // matching need it.
+    // Lowercase, '/' -> '\', trailing '\' trimmed - the same *kind* of
+    // normalization ShouldSkipDirectory's Windows-directory check performs
+    // inline. That inline block is deliberately left as-is rather than
+    // refactored to call this; this exists because both exclusions-file
+    // loading and folder-exclusion matching need the normalization too.
     static std::wstring NormalizeForCompare(std::wstring s) {
         std::transform(s.begin(), s.end(), s.begin(),
             [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
@@ -264,7 +268,11 @@ public:
         if (!file) return result;
         std::ostringstream ss;
         ss << file.rdbuf();
-        const std::wstring content = Utf8BytesToWide(ss.str());
+        std::wstring content = Utf8BytesToWide(ss.str());
+        // A UTF-8 BOM (EF BB BF) decodes to a leading U+FEFF, which would make
+        // line 1 match no entry shape and be dropped silently - several Windows
+        // editors write one by default when saving this file.
+        if (!content.empty() && content[0] == static_cast<wchar_t>(0xFEFF)) content.erase(0, 1);
 
         size_t pos = 0;
         while (pos <= content.size()) {
@@ -366,6 +374,12 @@ public:
         exclusionsPath_ = !exclusionsPathOverride.empty() ? exclusionsPathOverride
                          : scanRootOverride.empty()       ? DefaultExclusionsPath()
                                                            : std::wstring{};
+        // Exclusions-change tracking is per-cycle: exclusionsPath_ may differ
+        // from the previous cycle's (tests reuse this singleton), and a
+        // different file's mtime would otherwise read as an edit and force a
+        // needless full re-walk on this cycle's first rescan pass.
+        exclusionsMtimeKnown_ = false;
+        exclusionsChangedSinceLastPass_ = false;
         stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         worker_ = std::thread([this]() { WorkerLoop(); });
     }
@@ -416,6 +430,22 @@ public:
     // Test-only accessor - real callers never touch the pool directly.
     DirectoryPool& TestOnlyPool() { return pool_; }
 
+    // Test-only: the exclusions-file path resolved for the current Start()
+    // cycle. Empty means "this cycle has no user exclusions" - see Start().
+    const std::wstring& TestOnlyExclusionsPath() const { return exclusionsPath_; }
+
+    // Test-only: runs exactly one IncrementalRescan() pass synchronously on the
+    // calling thread, with running_ held true so the pass isn't treated as
+    // interrupted. The worker must already be stopped (Stop() joins it), so
+    // this can never race the worker's own calls. Exists because the
+    // in-process "exclusions file changed since the last pass" path otherwise
+    // only ever fires from the worker's five-minute timer.
+    void RunRescanPassForTest() {
+        const bool wasRunning = running_.exchange(true);
+        IncrementalRescan();
+        running_.store(wasRunning);
+    }
+
     // Serializes the pool one entry at a time under brief, separate locks
     // (the same pattern RefreshMtimeLocked / PruneAbsentDrives /
     // IncrementalRescan use), and does the actual file I/O with no lock
@@ -440,6 +470,14 @@ public:
 
         WriteRaw(out, kCacheMagic);
         WriteRaw(out, kCacheFormatVersion);
+        // Staleness field for the user exclusions (US-019). An exclusions edit
+        // changes no *directory's* mtime, so IncrementalRescan's per-directory
+        // mtime diff can never notice one - and a successful cache load means
+        // BuildIndex() never runs again for the life of the process. Recording
+        // the exclusions file's mtime here lets LoadIndexCache reject a cache
+        // written under different exclusions and fall through to a fresh walk.
+        // Serialized exactly like DirectoryEntry::lastKnownMtime below.
+        WriteRaw(out, CurrentExclusionsMtime().time_since_epoch().count());
         const uint32_t dirCount = static_cast<uint32_t>(poolSize);
         WriteRaw(out, dirCount);
         for (uint32_t i = 0; i < dirCount; ++i) {
@@ -482,6 +520,18 @@ public:
         uint32_t magic = 0, version = 0;
         if (!ReadRaw(in, magic) || magic != kCacheMagic) return false;
         if (!ReadRaw(in, version) || version != kCacheFormatVersion) return false;
+
+        // Reject a cache saved under a different exclusions file than the one
+        // in effect now (see SaveIndexCache). Both sides go through
+        // CurrentExclusionsMtime(), so "no exclusions file" can only ever mean
+        // the one thing ReloadUserExclusions() also means by it. A rejected
+        // cache falls through to a fresh BuildIndex(), exactly like a
+        // missing/corrupt one.
+        fs::file_time_type::rep exclusionsRep{};
+        if (!ReadRaw(in, exclusionsRep)) return false;
+        if (fs::file_time_type(fs::file_time_type::duration(exclusionsRep)) != CurrentExclusionsMtime()) {
+            return false;
+        }
 
         // A corrupt file can carry a garbled length field (e.g. a bit-flip
         // producing len ~= 0xFFFFFFFF) for dirCount/chunkCount/itemCount or
@@ -672,6 +722,27 @@ public:
     void IncrementalRescan() {
         phase_ = Phase::IncrementalRescan;
         ReloadUserExclusions();
+        // The exclusions file changed since the last pass in this process, so
+        // this pass cannot be an incremental one. Editing that file changes no
+        // directory's mtime, so the per-directory diff below would re-list
+        // nothing; and even where a parent does get re-listed, a
+        // newly-excluded directory's *own* chunk still holds its own files and
+        // is never revisited (its mtime is unchanged), so its contents would
+        // stay searchable indefinitely.
+        //
+        // A plain BuildIndex() is not enough either: it only ever republishes
+        // the chunks of directories it walks, and it deliberately does not walk
+        // an excluded one - so that directory's stale chunk would survive the
+        // re-walk. Dropping the index first makes this pass identical to the
+        // cold-start path (empty index + full walk), which is the same result a
+        // restart now produces via the cache's exclusions-mtime check. One full
+        // rescan per exclusions edit is the cost the spec already tolerates.
+        if (exclusionsChangedSinceLastPass_) {
+            ClearIndex();
+            BuildIndex(); // re-runs ReloadUserExclusions() at its top; idempotent
+            if (running_.load() && !cachePath_.empty()) SaveIndexCache(cachePath_);
+            return;
+        }
         // Discover roots that appeared since the first walk. Once a cache
         // exists BuildIndex() never runs again, so this is the only thing
         // that can ever notice a newly attached drive (or a known folder
@@ -1315,6 +1386,10 @@ private:
     // (i.e. some phase's ordinary scan already added it as a real child
     // of its parent) - safe to call unconditionally after every phase.
     void MergeSelfItem(const fs::path& root, std::unordered_set<uint64_t>& seen) {
+        // Without this, excluding a folder correctly hides everything under it
+        // but leaves the folder itself findable as a stray, empty-looking hit -
+        // AC #2 covers "that folder (and everything under it)".
+        if (ShouldSkipDirectory(root, &userExclusions_)) return;
         if (!root.has_parent_path()) return;
         fs::path parent = root.parent_path();
         if (parent == root) return;
@@ -1410,6 +1485,39 @@ private:
     // filesystem watcher - see US-019's "re-read once per scan pass" AC).
     void ReloadUserExclusions() {
         userExclusions_ = exclusionsPath_.empty() ? UserExclusions{} : LoadUserExclusions(exclusionsPath_);
+        const fs::file_time_type mtime = CurrentExclusionsMtime();
+        // "Changed" strictly means "changed since an earlier pass in this same
+        // Start() cycle". The first pass of a cycle has nothing to compare
+        // against and must report no change - otherwise every startup would
+        // force a redundant second full walk on top of the one it is already
+        // doing, and cross-restart edits are already covered by the cache's own
+        // exclusions-mtime check in LoadIndexCache().
+        exclusionsChangedSinceLastPass_ = exclusionsMtimeKnown_ && mtime != lastExclusionsMtime_;
+        lastExclusionsMtime_ = mtime;
+        exclusionsMtimeKnown_ = true;
+    }
+
+    // The exclusions file's current mtime, or a default (epoch) value when
+    // there is no exclusions file for this cycle. Deliberately routed through
+    // the same two conditions ReloadUserExclusions()/LoadUserExclusions() treat
+    // as "no exclusions" - an empty exclusionsPath_, or a path that doesn't
+    // resolve - so the cache's staleness check can never disagree with the
+    // runtime one about whether exclusions exist. CurrentMtime() already
+    // returns {} for a path that cannot be stat'd, including a missing one.
+    fs::file_time_type CurrentExclusionsMtime() const {
+        return exclusionsPath_.empty() ? fs::file_time_type{} : CurrentMtime(exclusionsPath_);
+    }
+
+    // Returns the index to the state a cold start begins in. Only used when
+    // the exclusions file changes mid-process - see IncrementalRescan() for
+    // why a re-walk alone cannot undo a newly added exclusion. ready_/phase_
+    // are left alone: BuildIndex() republishes content as it walks, so the
+    // gap is transient and callers keep seeing a (shrinking, then growing)
+    // index rather than an "indexing..." flicker.
+    void ClearIndex() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pool_ = DirectoryPool{};
+        snapshot_.reset();
     }
 
     void BuildIndex() {
@@ -1662,6 +1770,13 @@ private:
     // ever read by the worker thread, so it needs no mutex_ protection (same
     // reasoning as scanRootOverride_/cachePath_).
     UserExclusions userExclusions_;
+    // The exclusions file's mtime as observed by the most recent
+    // ReloadUserExclusions() call, and whether any call has been made yet this
+    // Start() cycle. Same threading reasoning as userExclusions_ above (worker
+    // thread only), reset per cycle by Start().
+    fs::file_time_type lastExclusionsMtime_{};
+    bool exclusionsMtimeKnown_ = false;
+    bool exclusionsChangedSinceLastPass_ = false;
 };
 
 } // namespace takeoff

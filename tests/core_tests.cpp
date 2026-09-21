@@ -741,6 +741,17 @@ int main() {
                   accented.excludedFolders[0] == L"d:\\r\u00e9sum\u00e9",
               "LoadUserExclusions: UTF-8 accented folder path decodes and normalizes correctly");
 
+        // A UTF-8 BOM decodes to a leading U+FEFF that matches no entry shape,
+        // so without stripping it the file's *first* line is silently dropped -
+        // and several Windows editors write a BOM by default.
+        const std::string utf8Bom = "\xEF\xBB\xBF" "D:\\FirstLine\r\n.iso\r\n";
+        const std::wstring bomPath = writeExclusionsFile(L"bom.txt", utf8Bom);
+        auto bom = takeoff::FileIndex::LoadUserExclusions(bomPath);
+        Check(bom.excludedFolders.size() == 1 && bom.excludedFolders[0] == L"d:\\firstline",
+              "LoadUserExclusions: a leading UTF-8 BOM does not swallow line 1");
+        Check(bom.excludedExtensions.count(L".iso") == 1,
+              "LoadUserExclusions: later lines still parse after a BOM");
+
         Check(takeoff::FileIndex::DefaultExclusionsPath().find(L"file_search_excludes.txt") != std::wstring::npos,
               "DefaultExclusionsPath: points at file_search_excludes.txt");
 
@@ -1552,18 +1563,247 @@ int main() {
         fs::remove_all(scratchDir, ec);
     }
 
+    // -----------------------------------------------------------------------------
+    // US-019 regression (a): adding an exclusion removes already-indexed content
+    // across a restart, because the cache records the exclusions file's mtime.
+    //
+    // The end-to-end block above deletes the cache first, so it only ever
+    // exercises a cold BuildIndex() - the one path where exclusions always
+    // worked. From the second launch onward a cache loads instead and
+    // BuildIndex() never runs again for the life of the process, and an
+    // exclusions edit changes no *directory's* mtime for IncrementalRescan's
+    // per-directory diff to notice. Before the fix, that meant a newly excluded
+    // folder's own chunk stayed searchable indefinitely.
+    // -----------------------------------------------------------------------------
+    {
+        FileIndex::Instance().Stop();
+        FileIndex::Instance().ResetForTest();
+
+        // scanRoot (not testRoot) is the scan override, so the parent that
+        // BuildIndex self-registers it under contains nothing else - the same
+        // containment the "Incremental rescan" block above relies on to keep a
+        // re-list from cascading into unrelated real directories.
+        fs::path testRoot = fs::current_path() / L"llfi_warmexcl_root";
+        fs::path scanRoot = testRoot / L"scanroot";
+        fs::path hiddenDir = scanRoot / L"hiddenfolder";
+        std::error_code ec;
+        fs::remove_all(testRoot, ec);
+        fs::create_directories(hiddenDir, ec);
+        {
+            std::ofstream keep((scanRoot / L"warmkeep.txt").wstring());
+            keep << "keep";
+        }
+        {
+            std::ofstream buried((hiddenDir / L"warmburied.txt").wstring());
+            buried << "buried";
+        }
+
+        wchar_t tempDirBuf[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf);
+        fs::path scratchDir = fs::path(tempDirBuf) / L"llfi_warmexcl_scratch";
+        fs::remove_all(scratchDir, ec);
+        fs::create_directories(scratchDir, ec);
+        const std::wstring exclusionsPath = (scratchDir / L"warm_exclusions.txt").wstring();
+        const std::wstring cachePath = (scratchDir / L"warm_exclusions_cache.bin").wstring();
+
+        auto waitSettled = []() {
+            int stable = 0;
+            for (int w = 0; w < 60 && stable < 3; ++w) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                if (FileIndex::Instance().IsReady() &&
+                    FileIndex::Instance().GetPhase() == takeoff::FileIndex::Phase::Loaded) {
+                    ++stable;
+                } else {
+                    stable = 0;
+                }
+            }
+        };
+
+        // Deferred from Task 5: a scoped scan given no explicit exclusions path
+        // must resolve to "no exclusions at all", never fall back to
+        // DefaultExclusionsPath() - a test scan silently reading whatever the
+        // developer has excluded on their own machine would be non-deterministic.
+        FileIndex::Instance().Start(nullptr, scanRoot.wstring(), cachePath);
+        Check(FileIndex::Instance().TestOnlyExclusionsPath().empty(),
+              "A scoped scan without an explicit exclusions path resolves to no exclusions file");
+        waitSettled();
+        FileIndex::Instance().Stop();
+        FileIndex::Instance().ResetForTest();
+        DeleteFileW(cachePath.c_str());
+
+        // Cold build with no exclusions file at all: everything is indexed, and
+        // the cache records "there was no exclusions file".
+        Check(!fs::exists(exclusionsPath, ec), "Setup: no exclusions file exists yet");
+        FileIndex::Instance().Start(nullptr, scanRoot.wstring(), cachePath, exclusionsPath);
+        waitSettled();
+        FileIndex::Instance().Stop();
+        Check(!FileIndex::Instance().Search(L"warmburied.txt").empty(),
+              "Setup: the soon-to-be-excluded file is indexed by the cold build");
+        Check(!FileIndex::Instance().Search(L"hiddenfolder").empty(),
+              "Setup: the soon-to-be-excluded folder itself is indexed by the cold build");
+        Check(fs::exists(cachePath, ec), "Setup: the cold build wrote a cache");
+
+        // The normal case: nothing about the exclusions file changed, so the
+        // warm cache must still load. An invalidation check that rejected every
+        // cache would force a full disk walk on every single startup.
+        Check(FileIndex::Instance().LoadIndexCache(cachePath),
+              "An unchanged exclusions file still loads the warm cache normally");
+
+        {
+            std::ofstream out(exclusionsPath, std::ios::binary | std::ios::trunc);
+            out << takeoff::FileIndex::WideToUtf8Bytes(hiddenDir.wstring()) << "\r\n";
+        }
+        Check(!FileIndex::Instance().LoadIndexCache(cachePath),
+              "A cache saved before the exclusions file changed is rejected");
+
+        // Rejected cache -> fresh BuildIndex(), which applies the new exclusion.
+        FileIndex::Instance().ResetForTest();
+        FileIndex::Instance().Start(nullptr, scanRoot.wstring(), cachePath, exclusionsPath);
+        waitSettled();
+        FileIndex::Instance().Stop();
+        Check(FileIndex::Instance().Search(L"warmburied.txt").empty(),
+              "A restart after adding an exclusion drops content that was already indexed");
+        Check(FileIndex::Instance().Search(L"hiddenfolder").empty(),
+              "...including the excluded folder's own entry, not just its contents");
+        Check(!FileIndex::Instance().Search(L"warmkeep.txt").empty(),
+              "...while non-excluded content survives that restart");
+
+        // The rebuild rewrote the cache under the current exclusions, so the
+        // *next* restart is a cheap warm load again - one rescan per edit, not
+        // a permanent full-rescan-on-every-launch regression.
+        Check(FileIndex::Instance().LoadIndexCache(cachePath),
+              "The post-edit rebuild rewrote a cache that loads warm on the next start");
+
+        FileIndex::Instance().ResetForTest();
+        fs::remove_all(testRoot, ec);
+        fs::remove_all(scratchDir, ec);
+    }
+
+    // -----------------------------------------------------------------------------
+    // US-019 regression (b): a *running* app picks up an exclusions edit on its
+    // next rescan pass - the common case, since most users don't restart after
+    // editing the file. Passes are driven synchronously here rather than waiting
+    // out the worker's five-minute timer.
+    // -----------------------------------------------------------------------------
+    {
+        FileIndex::Instance().Stop();
+        FileIndex::Instance().ResetForTest();
+
+        fs::path testRoot = fs::current_path() / L"llfi_liveexcl_root";
+        fs::path scanRoot = testRoot / L"scanroot";
+        fs::path hiddenDir = scanRoot / L"hiddenfolder";
+        fs::path stableDir = scanRoot / L"stabledir";
+        std::error_code ec;
+        fs::remove_all(testRoot, ec);
+        fs::create_directories(hiddenDir, ec);
+        fs::create_directories(stableDir, ec);
+        {
+            std::ofstream keep((scanRoot / L"warmkeep.txt").wstring());
+            keep << "keep";
+        }
+        {
+            std::ofstream buried((hiddenDir / L"warmburied.txt").wstring());
+            buried << "buried";
+        }
+
+        wchar_t tempDirBuf[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf);
+        fs::path scratchDir = fs::path(tempDirBuf) / L"llfi_liveexcl_scratch";
+        fs::remove_all(scratchDir, ec);
+        fs::create_directories(scratchDir, ec);
+        const std::wstring exclusionsPath = (scratchDir / L"live_exclusions.txt").wstring();
+        const std::wstring cachePath = (scratchDir / L"live_exclusions_cache.bin").wstring();
+
+        auto waitSettled = []() {
+            int stable = 0;
+            for (int w = 0; w < 60 && stable < 3; ++w) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                if (FileIndex::Instance().IsReady() &&
+                    FileIndex::Instance().GetPhase() == takeoff::FileIndex::Phase::Loaded) {
+                    ++stable;
+                } else {
+                    stable = 0;
+                }
+            }
+        };
+
+        FileIndex::Instance().Start(nullptr, scanRoot.wstring(), cachePath, exclusionsPath);
+        waitSettled();
+        FileIndex::Instance().Stop();
+        Check(!FileIndex::Instance().Search(L"warmburied.txt").empty(),
+              "Setup: the soon-to-be-excluded file is indexed before any exclusion exists");
+
+        // A marker planted in a directory whose recorded mtime is already
+        // accurate and that nothing writes to afterwards. An ordinary
+        // incremental pass skips such a directory outright, so the marker
+        // survives; only a full re-walk (which republishes every directory it
+        // visits) can clear it. That makes the marker a direct read-out of
+        // which of the two paths a given rescan pass took.
+        auto plantMarker = [&]() {
+            takeoff::DirectoryPool& pool = FileIndex::Instance().TestOnlyPool();
+            uint32_t markerIdx = pool.Intern(stableDir.wstring(), takeoff::Normalize(stableDir.wstring()));
+            std::vector<FileItem> markerItems;
+            markerItems.push_back({L"rescanmarker.txt", takeoff::Normalize(L"rescanmarker.txt"), markerIdx, false});
+            FileIndex::Instance().SetDirectoryChunk(markerIdx, std::move(markerItems));
+            return markerIdx;
+        };
+        const uint32_t markerIdx = plantMarker();
+        Check(FileIndex::Instance().TestOnlyPool().GetMtime(markerIdx) != std::filesystem::file_time_type{},
+              "Setup: the marker directory has a real recorded mtime, so an incremental pass skips it");
+        Check(!FileIndex::Instance().Search(L"rescanmarker.txt").empty(), "Setup: marker is present");
+
+        // No exclusions change yet: this pass must stay incremental.
+        FileIndex::Instance().RunRescanPassForTest();
+        Check(!FileIndex::Instance().Search(L"rescanmarker.txt").empty(),
+              "A rescan pass with no exclusions change stays incremental (no full re-walk)");
+        Check(!FileIndex::Instance().Search(L"warmburied.txt").empty(),
+              "...and leaves the not-yet-excluded content alone");
+
+        // Now edit the exclusions file while the index is live.
+        {
+            std::ofstream out(exclusionsPath, std::ios::binary | std::ios::trunc);
+            out << takeoff::FileIndex::WideToUtf8Bytes(hiddenDir.wstring()) << "\r\n";
+        }
+        FileIndex::Instance().RunRescanPassForTest();
+        Check(FileIndex::Instance().Search(L"warmburied.txt").empty(),
+              "The next rescan pass after an exclusions edit drops already-indexed excluded content");
+        Check(FileIndex::Instance().Search(L"hiddenfolder").empty(),
+              "...including the excluded folder's own entry");
+        Check(!FileIndex::Instance().Search(L"warmkeep.txt").empty(),
+              "...while non-excluded content stays indexed");
+        Check(FileIndex::Instance().Search(L"rescanmarker.txt").empty(),
+              "...and that pass really was a full re-walk, not the incremental loop");
+
+        // The edit is consumed once: later passes go back to being incremental
+        // instead of re-walking the whole disk on every pass forever.
+        plantMarker();
+        FileIndex::Instance().RunRescanPassForTest();
+        Check(!FileIndex::Instance().Search(L"rescanmarker.txt").empty(),
+              "A later pass with no further exclusions change is incremental again");
+
+        FileIndex::Instance().ResetForTest();
+        fs::remove_all(testRoot, ec);
+        fs::remove_all(scratchDir, ec);
+    }
+
     // 5. Settings Scroll and Viewport Invariants:
     // Guarantees Settings content cleanly fits and scrolls without overlapping FooterTop (440px).
     //
     // This is an independent hand-derived sanity check, not a call into the real
     // SettingsContentBottom() (that's a private member of a class defined in
     // main.cpp's anonymous namespace, unreachable from this test binary). As of
-    // the Search category's 6-row layout (File search / Web search / Search
+    // the Search category's 8-row layout (File search / Web search / Search
     // engine - US-016; File/Web/App search prefix - US-017 added three more
-    // rows) and Obsidian being the last section in the All view, the real
-    // All-category SettingsContentBottom() with Obsidian disabled (1 visible
-    // row) is 824.0f; this block's constants are kept in sync with that
-    // value by hand.
+    // rows; Edit exclusions / Help - US-019 added two more) and Obsidian being
+    // the last section in the All view, the real All-category
+    // SettingsContentBottom() with Obsidian disabled (1 visible row) is 918.0f;
+    // this block's constants are kept in sync with that value by hand.
+    //
+    // EVERY constant below must be rechecked against src/launcher.h whenever a
+    // Settings row is added or removed. Because each assertion compares this
+    // block's own derived constant against its own literal, a stale mirror
+    // still passes while verifying nothing about the product - US-016, US-017
+    // and US-019 all added Search rows, and the mirror silently drifted.
     constexpr float kWindowHeight = 482.0f;
     constexpr float kFooterH = 42.0f;
     constexpr float kSettingsHeaderH = 46.0f;
@@ -1573,15 +1813,15 @@ int main() {
     // the repeating row grid, so its top is taken directly from source
     // (header@741, card@761) rather than derived from a generalTop + N*rowH
     // formula. With Obsidian disabled (the default), it's a single row.
-    constexpr float obsidianRowTop = 761.0f;
-    constexpr float obsidianRowBottom = obsidianRowTop + kSettingsRowH;  // 808.0f
-    constexpr float contentBottom = obsidianRowBottom + 16.0f;           // 824.0f (16px bottom padding)
-    constexpr float maxScroll = contentBottom - footerTop;               // 384.0f
+    constexpr float obsidianRowTop = 855.0f;
+    constexpr float obsidianRowBottom = obsidianRowTop + kSettingsRowH;  // 902.0f
+    constexpr float contentBottom = obsidianRowBottom + 16.0f;           // 918.0f (16px bottom padding)
+    constexpr float maxScroll = contentBottom - footerTop;               // 478.0f
 
     Check(footerTop == 440.0f, "footer top is exactly 440px");
     Check(obsidianRowBottom > footerTop,
         "unscrolled Obsidian row (the last row with Obsidian disabled) exceeds footer top, proving scroll is required");
-    Check(maxScroll == 384.0f, "settings max scroll is 384px");
+    Check(maxScroll == 478.0f, "settings max scroll is 478px");
 
     // When scrolled to maxScroll:
     const float scrolledObsidianRowBottom = obsidianRowBottom - maxScroll;
@@ -1595,13 +1835,33 @@ int main() {
     // In individual categories, content height is well under viewportHeight (394px)
     constexpr float kCategoryShortcutsContentH = 36.0f + 2 * kSettingsRowH + 12.0f; // 142px
     constexpr float kCategorySystemContentH = 36.0f + 5 * kSettingsRowH + 12.0f;    // 283px
-    // US-017 added File/Web/App search prefix rows (was 3 rows after US-016).
-    constexpr float kCategorySearchContentH = 36.0f + 6 * kSettingsRowH + 12.0f;    // 330px
     constexpr float kCategoryVaultContentH = 36.0f + 1 * kSettingsRowH + 16.0f;     // 99px
     Check(kCategoryShortcutsContentH < viewportHeight, "Shortcuts category has zero overflow in viewport");
     Check(kCategorySystemContentH < viewportHeight, "System category has zero overflow in viewport");
-    Check(kCategorySearchContentH < viewportHeight, "Search category has zero overflow in viewport");
     Check(kCategoryVaultContentH < viewportHeight, "Vault category has zero overflow in viewport");
+
+    // Search: US-019's two extra rows (Edit exclusions, Help) push it past the
+    // viewport, so unlike its siblings above it genuinely overflows now. That is
+    // expected, not a defect - what must hold is that scrolling can still bring
+    // the last row fully into view. Mirrored from src/launcher.h: content bottom
+    // is 36 header + 8 rows + 16 padding (this one uses the real 16px padding
+    // rather than the 12px approximation used above, because Search now sits
+    // right on the overflow boundary where the 4px decides the answer), row tops
+    // are 36 + (row - 7) * 47, and EnsureSettingsVisible targets the row bottom
+    // plus an 8px margin against a 2px viewport inset.
+    constexpr float kCategorySearchContentH = 36.0f + 8 * kSettingsRowH + 16.0f;    // 428px
+    constexpr float searchMaxScroll = kCategorySearchContentH - viewportHeight;     // 34px
+    constexpr float helpRowTop = 36.0f + 7 * kSettingsRowH;                         // 365px (kRowFileSearchHelp)
+    constexpr float helpRowBottom = helpRowTop + kSettingsRowH;                     // 412px
+    constexpr float helpScrollNeeded = (helpRowBottom + 8.0f) - (viewportHeight - 2.0f); // 28px
+    Check(kCategorySearchContentH == 428.0f, "Search category content bottom is 428px (8 rows)");
+    Check(kCategorySearchContentH > viewportHeight,
+        "Search category overflows its viewport, so its last row requires scrolling");
+    Check(searchMaxScroll == 34.0f, "Search category max scroll is 34px");
+    Check(helpScrollNeeded > 0.0f && helpScrollNeeded <= searchMaxScroll,
+        "the scroll EnsureSettingsVisible needs for the Help row is within Search's max scroll");
+    Check(helpRowBottom - helpScrollNeeded < viewportHeight,
+        "scrolled Help row bottom is inside the Settings viewport");
 
     // --- Calculator Tests ---
     // AppCategory::Calculator distinction

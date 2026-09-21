@@ -2194,9 +2194,8 @@ private:
             return;
         }
         if (row == kRowFileSearchHelp) {
-            ShellExecuteW(nullptr, L"open",
-                L"https://github.com/sdkasper/lean-launcher/blob/master/docs/file-search.md",
-                nullptr, nullptr, SW_SHOWNORMAL);
+            const std::wstring helpUrl = std::wstring(takeoff::kRepoUrl) + L"/blob/master/docs/file-search.md";
+            ShellExecuteW(nullptr, L"open", helpUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             return;
         }
         if (row == kRowVaultSearchSummary) { ToggleObsidianSection(kSectionVaultSearch); return; }
