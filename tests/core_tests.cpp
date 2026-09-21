@@ -656,6 +656,28 @@ int main() {
     Check(FileIndex::IsUserRelevantFile(L"MAIN.CPP"), "allow uppercase .CPP");
     Check(FileIndex::IsUserRelevantFile(L"REPORT.PDF"), "allow uppercase .PDF");
 
+    // User-supplied extension exclusions, additive on top of the allowlist (US-019)
+    {
+        takeoff::UserExclusions excl;
+        excl.excludedExtensions.insert(L".iso");
+
+        Check(takeoff::FileIndex::IsUserRelevantFile(L"disk.iso"),
+              "IsUserRelevantFile with no userExclusions arg: .iso still allowed (default nullptr)");
+        Check(!takeoff::FileIndex::IsUserRelevantFile(L"disk.iso", &excl),
+              "IsUserRelevantFile: user-excluded extension is rejected");
+        Check(!takeoff::FileIndex::IsUserRelevantFile(L"DISK.ISO", &excl),
+              "IsUserRelevantFile: user-excluded extension match is case-insensitive");
+        Check(takeoff::FileIndex::IsUserRelevantFile(L"document.pdf", &excl),
+              "IsUserRelevantFile: an unrelated allowed extension is unaffected");
+
+        // Additive-only: a user exclusion list cannot widen the allowlist -
+        // an extension not already in kAllowedExtensions stays rejected
+        // regardless of what's in (or absent from) userExclusions.
+        takeoff::UserExclusions emptyExcl;
+        Check(!takeoff::FileIndex::IsUserRelevantFile(L"driver.inf", &emptyExcl),
+              "IsUserRelevantFile: hardcoded allowlist rejection (.inf) still applies with a UserExclusions* present");
+    }
+
     // -----------------------------------------------------------------------------
     // UserExclusions: exclusions-file parsing (US-019)
     // -----------------------------------------------------------------------------

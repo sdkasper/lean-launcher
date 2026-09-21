@@ -972,7 +972,7 @@ public:
         return {};
     }
 
-    static bool IsUserRelevantFile(const fs::path& filePath) {
+    static bool IsUserRelevantFile(const fs::path& filePath, const UserExclusions* userExclusions = nullptr) {
         const std::wstring ext = filePath.extension().wstring();
         if (ext.empty()) {
             const std::wstring filename = filePath.filename().wstring();
@@ -987,7 +987,9 @@ public:
         lowerExt.reserve(ext.size());
         for (wchar_t c : ext) lowerExt.push_back(static_cast<wchar_t>(towlower(c)));
 
-        return kAllowedExtensions.find(std::wstring_view(lowerExt)) != kAllowedExtensions.end();
+        if (kAllowedExtensions.find(std::wstring_view(lowerExt)) == kAllowedExtensions.end()) return false;
+        if (userExclusions && userExclusions->excludedExtensions.count(lowerExt)) return false;
+        return true;
     }
 
     // Ultra-fast in-memory search across filenames and directory paths
