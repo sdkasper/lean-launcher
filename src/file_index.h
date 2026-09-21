@@ -298,6 +298,39 @@ public:
         return result;
     }
 
+    static constexpr const wchar_t* kExclusionsFileHeader =
+        L"# Lean Launcher file search exclusions\r\n"
+        L"# One entry per line, on top of the app's built-in system/build-folder\r\n"
+        L"# exclusions. This file is additive only - it cannot un-exclude anything\r\n"
+        L"# the app already skips (e.g. system32).\r\n"
+        L"#\r\n"
+        L"# Folder exclusion: a full path starting with a drive letter, \\\\ (UNC), or /\r\n"
+        L"#   D:\\Personal Archive\r\n"
+        L"#   \\\\NAS\\Backups\r\n"
+        L"#\r\n"
+        L"# Extension exclusion: a dot followed by the extension, nothing else\r\n"
+        L"#   .iso\r\n"
+        L"#\r\n"
+        L"# Blank lines, lines starting with #, and anything else are ignored.\r\n"
+        L"# Changes take effect on the next scan pass - no restart needed.\r\n"
+        L"\r\n";
+
+    // Creates path (and its parent directory) with the header template above
+    // if it doesn't already exist. Never touches an existing file - called
+    // every time the user clicks "Edit exclusions..." in Settings, so a
+    // second/third click must be a pure no-op against their saved edits.
+    static bool EnsureExclusionsFileWithHeader(const std::wstring& path) {
+        if (path.empty()) return false;
+        std::error_code ec;
+        if (std::filesystem::exists(path, ec)) return true;
+        std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        const std::string utf8Header = WideToUtf8Bytes(kExclusionsFileHeader);
+        out << utf8Header;
+        return true;
+    }
+
     // scanRootOverride is test-only: when non-empty, BuildIndex() scans just
     // that one directory tree instead of the whole machine (known user
     // folders, %USERPROFILE%, all fixed/removable drives). Production

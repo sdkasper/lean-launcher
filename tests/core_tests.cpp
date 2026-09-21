@@ -702,6 +702,52 @@ int main() {
     }
 
     // -----------------------------------------------------------------------------
+    // EnsureExclusionsFileWithHeader (US-019)
+    // -----------------------------------------------------------------------------
+    {
+        wchar_t tempDirBuf[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf);
+        fs::path scratchDir = fs::path(tempDirBuf) / L"llfi_exclusions_create_test";
+        std::error_code ec;
+        fs::remove_all(scratchDir, ec);
+
+        const std::wstring newFilePath = (scratchDir / L"nested" / L"file_search_excludes.txt").wstring();
+        Check(!fs::exists(newFilePath, ec), "Setup: exclusions file does not exist yet");
+        Check(takeoff::FileIndex::EnsureExclusionsFileWithHeader(newFilePath),
+              "EnsureExclusionsFileWithHeader creates a missing file (and its parent dir)");
+        Check(fs::exists(newFilePath, ec), "EnsureExclusionsFileWithHeader: file now exists");
+
+        auto readAll = [](const std::wstring& p) {
+            std::ifstream f(p, std::ios::binary);
+            std::ostringstream ss;
+            ss << f.rdbuf();
+            return ss.str();
+        };
+        const std::string headerContent = readAll(newFilePath);
+        Check(headerContent.find("file_search_excludes") != std::string::npos ||
+              headerContent.find("exclusion") != std::string::npos,
+              "EnsureExclusionsFileWithHeader: header text describes the file's purpose");
+        Check(headerContent.find(".iso") != std::string::npos,
+              "EnsureExclusionsFileWithHeader: header shows an extension-exclusion example");
+
+        // Second call on an already-existing file must not clobber user edits.
+        {
+            std::ofstream userEdit(newFilePath, std::ios::binary | std::ios::app);
+            userEdit << "\r\nD:\\MyStuff\r\n";
+        }
+        const std::string beforeSecondCall = readAll(newFilePath);
+        Check(takeoff::FileIndex::EnsureExclusionsFileWithHeader(newFilePath),
+              "EnsureExclusionsFileWithHeader on an existing file returns true (no-op)");
+        Check(readAll(newFilePath) == beforeSecondCall,
+              "EnsureExclusionsFileWithHeader does not overwrite an already-existing file");
+
+        Check(!takeoff::FileIndex::EnsureExclusionsFileWithHeader(L""),
+              "EnsureExclusionsFileWithHeader: empty path fails cleanly, no crash");
+
+        fs::remove_all(scratchDir, ec);
+    }
+
+    // -----------------------------------------------------------------------------
     // Requirement R3: Shell Item String Allocation and Cleanup Handling
     // -----------------------------------------------------------------------------
     // 1. FormatAppsFolderPath canonicalization
