@@ -718,22 +718,22 @@ int main() {
     const std::wstring repoPathStr = repoPath.wstring();
     const std::wstring repoFolderName = repoPath.filename().wstring();
 
+    // Throttling must not make a small scoped scan noticeably slow.
+    const auto throttleStart = std::chrono::steady_clock::now();
     FileIndex::Instance().Start(nullptr, repoPathStr);
     for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
+    const auto throttleElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - throttleStart).count();
+    Check(throttleElapsed < 15000, "Scoped repo scan with I/O throttling still completes in under 15s");
+
     Check(FileIndex::Instance().GetPhase() == takeoff::FileIndex::Phase::Loaded,
           "GetPhase reports Loaded once IsReady() is true");
     const size_t indexedCount = FileIndex::Instance().Count();
     std::cout << "[FileIndex] Scoped index populated " << indexedCount << " files/folders under "
               << repoPath.string() << " (ready=" << FileIndex::Instance().IsReady() << ").\n";
     Check(indexedCount > 0, "FileIndex populated files from disk");
-
-    // Throttling must not make a small scoped scan noticeably slow.
-    const auto throttleStart = std::chrono::steady_clock::now();
-    const auto throttleElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - throttleStart).count();
-    Check(throttleElapsed < 15000, "Scoped repo scan with I/O throttling still completes in under 15s");
 
     // Verify broad file & folder search finds repo folder and its files
     auto takeoffLauncherResults = FileIndex::Instance().Search(repoFolderName, 10);
