@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <fstream>
 #include <windows.h>
 #include <shlobj.h>
 
@@ -22,6 +23,30 @@ namespace takeoff {
 namespace fs = std::filesystem;
 
 constexpr UINT kFilesReadyMessage = WM_APP + 8;
+constexpr uint32_t kCacheMagic = 0x4C4C4649; // "LLFI"
+constexpr uint32_t kCacheFormatVersion = 1;
+
+template <typename T>
+void WriteRaw(std::ofstream& out, const T& value) {
+    out.write(reinterpret_cast<const char*>(&value), sizeof(T));
+}
+template <typename T>
+bool ReadRaw(std::ifstream& in, T& value) {
+    in.read(reinterpret_cast<char*>(&value), sizeof(T));
+    return static_cast<bool>(in);
+}
+inline void WriteWString(std::ofstream& out, const std::wstring& s) {
+    const uint32_t len = static_cast<uint32_t>(s.size());
+    WriteRaw(out, len);
+    if (len) out.write(reinterpret_cast<const char*>(s.data()), len * sizeof(wchar_t));
+}
+inline bool ReadWString(std::ifstream& in, std::wstring& s) {
+    uint32_t len = 0;
+    if (!ReadRaw(in, len)) return false;
+    s.resize(len);
+    if (len) in.read(reinterpret_cast<char*>(s.data()), len * sizeof(wchar_t));
+    return static_cast<bool>(in) || len == 0;
+}
 
 struct DirectoryEntry {
     std::wstring path;
@@ -146,6 +171,99 @@ public:
         pool_ = DirectoryPool{};
         snapshot_.reset();
         ready_ = false;
+    }
+
+    // Test-only accessor - real callers never touch the pool directly.
+    DirectoryPool& TestOnlyPool() { return pool_; }
+
+    bool SaveIndexCache(const std::wstring& path) const {
+        std::shared_ptr<const IndexSnapshot> snapshot;
+        DirectoryPool poolCopy;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            snapshot = snapshot_;
+            poolCopy = pool_;
+        }
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+
+        WriteRaw(out, kCacheMagic);
+        WriteRaw(out, kCacheFormatVersion);
+        const uint32_t dirCount = static_cast<uint32_t>(poolCopy.Entries().size());
+        WriteRaw(out, dirCount);
+        for (const auto& entry : poolCopy.Entries()) {
+            WriteWString(out, entry.path);
+            WriteWString(out, entry.normPath);
+            WriteRaw(out, entry.lastKnownMtime.time_since_epoch().count());
+        }
+
+        if (!snapshot) { WriteRaw(out, uint32_t{0}); return static_cast<bool>(out); }
+        const uint32_t chunkCount = static_cast<uint32_t>(snapshot->chunksByDir.size());
+        WriteRaw(out, chunkCount);
+        for (uint32_t i = 0; i < chunkCount; ++i) {
+            const auto& chunk = snapshot->chunksByDir[i];
+            const uint32_t itemCount = chunk ? static_cast<uint32_t>(chunk->size()) : 0;
+            WriteRaw(out, itemCount);
+            if (!chunk) continue;
+            for (const auto& item : *chunk) {
+                WriteWString(out, item.name);
+                WriteWString(out, item.normName);
+                WriteRaw(out, item.parentDirIndex);
+                WriteRaw(out, item.isDirectory);
+            }
+        }
+        return static_cast<bool>(out);
+    }
+
+    bool LoadIndexCache(const std::wstring& path) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return false;
+
+        uint32_t magic = 0, version = 0;
+        if (!ReadRaw(in, magic) || magic != kCacheMagic) return false;
+        if (!ReadRaw(in, version) || version != kCacheFormatVersion) return false;
+
+        DirectoryPool newPool;
+        uint32_t dirCount = 0;
+        if (!ReadRaw(in, dirCount)) return false;
+        std::vector<DirectoryEntry> entries(dirCount);
+        for (uint32_t i = 0; i < dirCount; ++i) {
+            if (!ReadWString(in, entries[i].path)) return false;
+            if (!ReadWString(in, entries[i].normPath)) return false;
+            fs::file_time_type::rep rep{};
+            if (!ReadRaw(in, rep)) return false;
+            entries[i].lastKnownMtime = fs::file_time_type(fs::file_time_type::duration(rep));
+        }
+        for (auto& e : entries) newPool.Intern(e.path, e.normPath); // rebuild index map in original order
+        for (uint32_t i = 0; i < dirCount; ++i) newPool.SetMtime(i, entries[i].lastKnownMtime);
+
+        auto newSnapshot = std::make_shared<IndexSnapshot>();
+        uint32_t chunkCount = 0;
+        if (!ReadRaw(in, chunkCount)) return false;
+        newSnapshot->chunksByDir.resize(chunkCount);
+        for (uint32_t i = 0; i < chunkCount; ++i) {
+            uint32_t itemCount = 0;
+            if (!ReadRaw(in, itemCount)) return false;
+            if (itemCount == 0) continue;
+            auto items = std::make_shared<std::vector<FileItem>>();
+            items->reserve(itemCount);
+            for (uint32_t j = 0; j < itemCount; ++j) {
+                FileItem item;
+                if (!ReadWString(in, item.name)) return false;
+                if (!ReadWString(in, item.normName)) return false;
+                if (!ReadRaw(in, item.parentDirIndex)) return false;
+                if (!ReadRaw(in, item.isDirectory)) return false;
+                items->push_back(std::move(item));
+            }
+            newSnapshot->totalCount += items->size();
+            newSnapshot->chunksByDir[i] = std::move(items);
+        }
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        pool_ = std::move(newPool);
+        snapshot_ = std::move(newSnapshot);
+        ready_ = true;
+        return true;
     }
 
     void SetDirectoryChunk(uint32_t poolIndex, std::vector<FileItem>&& children) {

@@ -807,6 +807,38 @@ int main() {
         // Memory budget verification: see Task 7 for the recalibrated estimate.
     }
 
+    // -----------------------------------------------------------------------------
+    // Persisted cache round-trip and version handling
+    // -----------------------------------------------------------------------------
+    {
+        FileIndex::Instance().Stop();
+        takeoff::DirectoryPool& poolBefore = FileIndex::Instance().TestOnlyPool();
+        uint32_t dirIdx = poolBefore.Intern(L"D:\\Cache\\Test", takeoff::Normalize(L"D:\\Cache\\Test"));
+        std::vector<FileItem> items;
+        items.push_back({L"a.txt", L"a txt", dirIdx, false});
+        items.push_back({L"sub", L"sub", dirIdx, true});
+        FileIndex::Instance().SetDirectoryChunk(dirIdx, std::move(items));
+
+        const std::wstring cachePath = L"cache_roundtrip_test.bin";
+        Check(FileIndex::Instance().SaveIndexCache(cachePath), "SaveIndexCache writes successfully");
+
+        FileIndex::Instance().Stop(); // stops the background thread; LoadIndexCache below unconditionally
+                                       // overwrites pool_/snapshot_ regardless of what they held before
+        Check(FileIndex::Instance().LoadIndexCache(cachePath), "LoadIndexCache reads back what was saved");
+        auto results = FileIndex::Instance().Search(L"a.txt");
+        Check(!results.empty() && results[0].path == L"D:\\Cache\\Test\\a.txt",
+              "LoadIndexCache reconstructs items with correct interned paths");
+
+        std::ofstream corrupt(L"cache_corrupt_test.bin", std::ios::binary);
+        corrupt << "not a real cache file";
+        corrupt.close();
+        Check(!FileIndex::Instance().LoadIndexCache(L"cache_corrupt_test.bin"),
+              "LoadIndexCache rejects a corrupt/wrong-format file");
+
+        DeleteFileW(cachePath.c_str());
+        DeleteFileW(L"cache_corrupt_test.bin");
+    }
+
     // 5. Settings Scroll and Viewport Invariants:
     // Guarantees Settings content cleanly fits and scrolls without overlapping FooterTop (440px).
     //
