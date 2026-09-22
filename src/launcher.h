@@ -422,6 +422,9 @@ private:
                 const int steps = wheelDelta_ / WHEEL_DELTA;
                 wheelDelta_ %= WHEEL_DELTA;
                 MoveSelection(-steps * 3, false);
+            } else if (page_ == Page::Settings && vaultDropdownOpen_) {
+                const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+                ScrollVaultDropdown(-delta / WHEEL_DELTA);
             } else if (page_ == Page::Settings) {
                 const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
                 ScrollSettings(-static_cast<float>(delta) / static_cast<float>(WHEEL_DELTA) * 36.0f);
@@ -1904,6 +1907,8 @@ private:
         vaultDropdownHighlight_ = (it != knownVaults_.end())
             ? static_cast<int>(std::distance(knownVaults_.begin(), it))
             : 0;
+        vaultDropdownScroll_ = 0;
+        EnsureVaultDropdownHighlightVisible();
         settingsStatus_.clear();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -1911,6 +1916,7 @@ private:
     void CloseVaultDropdown() {
         vaultDropdownOpen_ = false;
         vaultDropdownHighlight_ = -1;
+        vaultDropdownScroll_ = 0;
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
@@ -1931,6 +1937,42 @@ private:
         CloseVaultDropdown();
     }
 
+    // How many items the dropdown can show at once before running past the
+    // bottom of the settings viewport. Vault counts are unbounded (one per
+    // Obsidian vault the user has ever opened), unlike the fixed-size web
+    // search preset list, so this list needs to scroll instead of overflow.
+    int VaultDropdownMaxVisibleItems() const {
+        const float available = FooterTop() - VaultDropdownTop();
+        return (std::max)(1, static_cast<int>(available / kVaultDropdownItemHeight));
+    }
+
+    // Clamps vaultDropdownScroll_ so vaultDropdownHighlight_ stays within the
+    // visible window - called after the highlight moves (open, arrow keys).
+    void EnsureVaultDropdownHighlightVisible() {
+        const int count = static_cast<int>(knownVaults_.size());
+        const int maxVisible = VaultDropdownMaxVisibleItems();
+        const int maxScroll = (std::max)(0, count - maxVisible);
+        if (vaultDropdownHighlight_ < vaultDropdownScroll_) {
+            vaultDropdownScroll_ = vaultDropdownHighlight_;
+        } else if (vaultDropdownHighlight_ >= vaultDropdownScroll_ + maxVisible) {
+            vaultDropdownScroll_ = vaultDropdownHighlight_ - maxVisible + 1;
+        }
+        vaultDropdownScroll_ = std::clamp(vaultDropdownScroll_, 0, maxScroll);
+    }
+
+    // Scrolls the open dropdown list by deltaItems (positive = down), used by
+    // WM_MOUSEWHEEL while the dropdown has focus.
+    void ScrollVaultDropdown(int deltaItems) {
+        const int count = static_cast<int>(knownVaults_.size());
+        const int maxVisible = VaultDropdownMaxVisibleItems();
+        const int maxScroll = (std::max)(0, count - maxVisible);
+        const int newScroll = std::clamp(vaultDropdownScroll_ + deltaItems, 0, maxScroll);
+        if (newScroll != vaultDropdownScroll_) {
+            vaultDropdownScroll_ = newScroll;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
+    }
+
     // Index into knownVaults_ for a point inside the open dropdown list, or
     // -1 if the point misses the list (including when it's closed).
     int VaultDropdownItemAtPoint(float x, float y) const {
@@ -1938,10 +1980,12 @@ private:
         if (x < 16.0f || x > width_ - 16.0f) return -1;
         if (y < kSettingsHeaderHeight || y >= FooterTop()) return -1;
         const float listTop = VaultDropdownTop();
-        for (size_t i = 0; i < knownVaults_.size(); ++i) {
-            const float itemTop = listTop + static_cast<float>(i) * kVaultDropdownItemHeight;
+        const int count = static_cast<int>(knownVaults_.size());
+        const int visibleCount = (std::min)(count, VaultDropdownMaxVisibleItems());
+        for (int slot = 0; slot < visibleCount; ++slot) {
+            const float itemTop = listTop + static_cast<float>(slot) * kVaultDropdownItemHeight;
             if (y >= itemTop && y < itemTop + kVaultDropdownItemHeight) {
-                return static_cast<int>(i);
+                return vaultDropdownScroll_ + slot;
             }
         }
         return -1;
@@ -2470,12 +2514,14 @@ private:
                 if (key == VK_UP) {
                     const int count = static_cast<int>(knownVaults_.size());
                     if (count > 0) vaultDropdownHighlight_ = (vaultDropdownHighlight_ - 1 + count) % count;
+                    EnsureVaultDropdownHighlightVisible();
                     InvalidateRect(hwnd_, nullptr, FALSE);
                     return 0;
                 }
                 if (key == VK_DOWN) {
                     const int count = static_cast<int>(knownVaults_.size());
                     if (count > 0) vaultDropdownHighlight_ = (vaultDropdownHighlight_ + 1) % count;
+                    EnsureVaultDropdownHighlightVisible();
                     InvalidateRect(hwnd_, nullptr, FALSE);
                     return 0;
                 }
@@ -4665,30 +4711,51 @@ private:
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
         const float listTop = VaultDropdownTop();
-        const float listHeight = static_cast<float>(knownVaults_.size()) * kVaultDropdownItemHeight;
+        const int count = static_cast<int>(knownVaults_.size());
+        const int maxVisible = VaultDropdownMaxVisibleItems();
+        const int visibleCount = (std::min)(count, maxVisible);
+        const bool scrollable = count > maxVisible;
+        const float listHeight = static_cast<float>(visibleCount) * kVaultDropdownItemHeight;
         const auto listRect = D2D1::RectF(16, listTop, width_ - 16, listTop + listHeight);
 
         Fill(listRect, highContrast_ ? SystemColor(COLOR_BTNFACE) : D2D1::ColorF(0x1C1C1E, 0.98f), 8.0f);
         brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.14f));
         target_->DrawRoundedRectangle(D2D1::RoundedRect(listRect, 8.0f, 8.0f), brush_.Get(), 1.0f);
 
-        for (size_t i = 0; i < knownVaults_.size(); ++i) {
-            const float itemTop = listTop + static_cast<float>(i) * kVaultDropdownItemHeight;
-            const bool highlighted = (static_cast<int>(i) == vaultDropdownHighlight_);
+        for (int slot = 0; slot < visibleCount; ++slot) {
+            const int i = vaultDropdownScroll_ + slot;
+            const float itemTop = listTop + static_cast<float>(slot) * kVaultDropdownItemHeight;
+            const bool highlighted = (i == vaultDropdownHighlight_);
             const bool current = (knownVaults_[i] == obsidianVaultPath_);
+            const float itemRight = scrollable ? width_ - 24.0f : width_ - 18.0f;
             if (highlighted) {
-                Fill(D2D1::RectF(18, itemTop + 1, width_ - 18, itemTop + kVaultDropdownItemHeight - 1),
+                Fill(D2D1::RectF(18, itemTop + 1, itemRight, itemTop + kVaultDropdownItemHeight - 1),
                     highContrast_ ? SystemColor(COLOR_HIGHLIGHT) : D2D1::ColorF(1, 1, 1, 0.10f), 5.0f);
             }
             const auto textColor = highContrast_ && highlighted ? SystemColor(COLOR_HIGHLIGHTTEXT)
                 : current ? Foreground() : Muted();
             Text(fs::path(knownVaults_[i]).filename().wstring(),
-                D2D1::RectF(32, itemTop, width_ - 44, itemTop + kVaultDropdownItemHeight),
+                D2D1::RectF(32, itemTop, itemRight - 20.0f, itemTop + kVaultDropdownItemHeight),
                 hintFormat_.Get(), textColor);
             if (current) {
-                Text(L"✓", D2D1::RectF(width_ - 44, itemTop, width_ - 24, itemTop + kVaultDropdownItemHeight),
+                Text(L"✓", D2D1::RectF(itemRight - 20.0f, itemTop, itemRight, itemTop + kVaultDropdownItemHeight),
                     hintFormat_.Get(), textColor, DWRITE_TEXT_ALIGNMENT_CENTER);
             }
+        }
+
+        // Scrollbar thumb, mirroring the main settings-panel scrollbar, so an
+        // overflowing vault list (e.g. 14+ vaults) reads as scrollable rather
+        // than silently truncated.
+        if (scrollable) {
+            const float trackTop = listTop + 4.0f;
+            const float trackBottom = listTop + listHeight - 4.0f;
+            const float trackHeight = trackBottom - trackTop;
+            const float thumbHeight = (std::max)(20.0f, trackHeight * (static_cast<float>(visibleCount) / static_cast<float>(count)));
+            const int maxScroll = count - maxVisible;
+            const float thumbTop = trackTop + (trackHeight - thumbHeight) *
+                (maxScroll > 0 ? static_cast<float>(vaultDropdownScroll_) / static_cast<float>(maxScroll) : 0.0f);
+            const auto thumbRect = D2D1::RectF(width_ - 21.0f, thumbTop, width_ - 18.0f, thumbTop + thumbHeight);
+            Fill(thumbRect, highContrast_ ? SystemColor(COLOR_HIGHLIGHT) : D2D1::ColorF(1, 1, 1, 0.22f), 1.5f);
         }
         target_->PopAxisAlignedClip();
     }
@@ -5023,6 +5090,10 @@ private:
     int editingRow_ = -1;
     bool vaultDropdownOpen_ = false;
     int vaultDropdownHighlight_ = -1;  // index into knownVaults_ while the dropdown is open
+    // First visible index into knownVaults_ when the list overflows the
+    // settings viewport (e.g. a user with many vaults) - see
+    // VaultDropdownMaxVisibleItems().
+    int vaultDropdownScroll_ = 0;
     bool webSearchDropdownOpen_ = false;
     // Index into [0, kWebSearchPresetCount] while the dropdown is open -
     // kWebSearchPresetCount itself is the trailing "Custom" entry.

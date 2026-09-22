@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.5.5] - 2026-09-22
+
+### Fixed
+- **Obsidian vault picker dropdown silently truncated for users with many vaults** - the dropdown drew and hit-tested its entire vault list at a fixed height with no scrolling, an assumption ("never more than a handful of real-world entries") that broke for a user with 14 vaults: entries past the settings panel's bottom edge were clipped from view and unreachable by mouse, and keyboard arrow-key highlighting could land on an off-screen, invisible item. The dropdown now clamps to the available viewport height, scrolls via mouse wheel or arrow keys (auto-scrolling to keep the highlighted item visible), and shows a scrollbar thumb when the list overflows.
+
 ## [1.5.4] - 2026-09-22
 
 ### Documentation

@@ -19,7 +19,7 @@
 
 namespace takeoff {
 
-inline constexpr wchar_t kAppVersion[] = L"1.5.4";
+inline constexpr wchar_t kAppVersion[] = L"1.5.5";
 inline constexpr wchar_t kRepoUrl[] = L"https://github.com/sdkasper/lean-launcher";
 inline constexpr wchar_t kDefaultReleasesUrl[] = L"https://github.com/sdkasper/lean-launcher/releases";
 inline constexpr wchar_t kDefaultApiHost[] = L"api.github.com";
