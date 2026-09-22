@@ -10,7 +10,12 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
-## [1.5.0] - 2026-09-22
+## [1.5.1] - 2026-09-22
+
+### Fixed
+- **CI/release pipeline** - the full-disk search benchmark's path-matching latency assertion (tuned against the primary dev machine) failed on GitHub's shared CI runner the first time this code was ever pushed to origin, blocking the Release workflow from publishing. Ceiling raised to account for CI-class hardware; see `tests/core_tests.cpp` for details. No application behavior changed.
+
+Note: `v1.5.0` was tagged but its Release workflow failed before publishing, so no v1.5.0 release exists - this release is the first one actually published for the features below.
 
 ### Added
 - **Full-disk file search** - the file-count cap (previously 50,000 files) has been removed; search now covers every fixed and removable drive. The first index is a one-time full walk with a persisted, versioned on-disk cache for instant startup afterward, followed by a mtime-pruned incremental rescan (startup and periodic) so only changed folders are re-walked. Unplugging a removable drive prunes its files from results until it's reconnected.
