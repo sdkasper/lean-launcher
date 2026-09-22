@@ -1165,6 +1165,49 @@ int main() {
     }
 
     // -----------------------------------------------------------------------------
+    // Drive-root path reconstruction does not double the separator
+    //
+    // GetLogicalDriveStringsW interns drive roots with a trailing backslash
+    // (e.g. L"D:\\"), so naively appending another separator when building a
+    // result path produced "D:\\\\file.txt" for any file directly under a
+    // drive root - a doubled backslash that explorer.exe's /select argument
+    // doesn't reliably resolve (reported: a real file at D:\ opened the
+    // wrong folder via "Open containing folder", though "Open" itself and
+    // the raw copied path both looked otherwise fine).
+    // -----------------------------------------------------------------------------
+    {
+        FileIndex::Instance().Stop();
+        FileIndex::Instance().ResetForTest();
+
+        const std::wstring driveRoot = L"Z:\\";
+        const uint32_t rootIdx = FileIndex::Instance().InternDirectoryForTest(driveRoot, takeoff::Normalize(driveRoot));
+        std::vector<FileItem> rootItems;
+        rootItems.push_back({L"asdfasdfsdf.txt", takeoff::Normalize(L"asdfasdfsdf.txt"), rootIdx, false});
+
+        const std::wstring subDir = L"Z:\\Projects";
+        const uint32_t subIdx = FileIndex::Instance().InternDirectoryForTest(subDir, takeoff::Normalize(subDir));
+        std::vector<FileItem> subItems;
+        subItems.push_back({L"notes.txt", takeoff::Normalize(L"notes.txt"), subIdx, false});
+
+        std::vector<std::pair<uint32_t, std::vector<FileItem>>> rootBatch;
+        rootBatch.emplace_back(rootIdx, std::move(rootItems));
+        rootBatch.emplace_back(subIdx, std::move(subItems));
+        FileIndex::Instance().SetDirectoryChunks(std::move(rootBatch));
+
+        auto rootResults = FileIndex::Instance().Search(L"asdfasdfsdf", 10);
+        Check(!rootResults.empty(), "Drive-root file is found by search");
+        Check(rootResults[0].path == L"Z:\\asdfasdfsdf.txt",
+              "Drive-root file's reconstructed path has exactly one backslash after the drive letter");
+
+        auto subResults = FileIndex::Instance().Search(L"notes", 10);
+        Check(!subResults.empty(), "Subdirectory file is found by search");
+        Check(subResults[0].path == L"Z:\\Projects\\notes.txt",
+              "Subdirectory file's reconstructed path is unaffected by the drive-root fix");
+
+        FileIndex::Instance().ResetForTest();
+    }
+
+    // -----------------------------------------------------------------------------
     // Persisted cache round-trip and version handling
     // -----------------------------------------------------------------------------
     {

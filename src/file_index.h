@@ -1203,9 +1203,18 @@ public:
         results.reserve(count);
         for (size_t i = 0; i < count; ++i) {
             const auto& c = candidates[i];
+            // Drive roots are interned with a trailing separator (GetLogicalDriveStringsW
+            // returns e.g. L"D:\\"), so unconditionally appending another one produced a
+            // doubled backslash for any file directly under a drive root (e.g.
+            // "D:\\\\file.txt"), which explorer.exe's /select argument doesn't reliably
+            // resolve.
+            const std::wstring& parentPath = pool_.Get(c.parentDirIndex).path;
+            std::wstring fullPath = parentPath;
+            if (!fullPath.empty() && fullPath.back() != L'\\') fullPath += L'\\';
+            fullPath += c.item->name;
             results.push_back({
                 c.item->name,
-                pool_.Get(c.parentDirIndex).path + L"\\" + c.item->name,
+                std::move(fullPath),
                 c.item->isDirectory,
                 c.score
             });

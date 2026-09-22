@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.5.3] - 2026-09-22
+
+### Fixed
+- **"Open containing folder" opened the wrong folder for files at a drive root** - `GetLogicalDriveStringsW` interns drive roots with a trailing backslash (e.g. `D:\`), and the file-search result path builder unconditionally appended another separator, producing a doubled backslash (e.g. `D:\\file.txt`) for any file directly under a drive root. `explorer.exe`'s `/select` argument doesn't reliably resolve that, so it silently fell back to Explorer's own default folder instead. "Open" and "Copy file path" were unaffected in terms of functioning, but the copied path itself carried the same doubled backslash. Files in subdirectories were never affected.
+
 ## [1.5.2] - 2026-09-22
 
 ### Fixed
