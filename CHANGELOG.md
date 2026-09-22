@@ -10,6 +10,14 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.5.4] - 2026-09-22
+
+### Documentation
+- **Windows Defender false-positive note** - added a README warning and this Known Issues entry after a user report of `LeanLauncher.exe` being flagged as `Trojan:Script/Sabsik.EN.A!ml` on first run. This is a cloud ML heuristic false positive, not a real detection - the release build is not yet code-signed, which makes an unsigned, low-download-count, self-updating executable (the built-in updater replaces its own binary in place) look statistically similar to a dropper. See the README's Windows Defender note for workarounds; a permanent fix via code signing is planned. No application behavior changed in this release.
+
+### Known Issues
+- Windows Defender may flag this and prior releases as `Trojan:Script/Sabsik.EN.A!ml` - false positive, see above.
+
 ## [1.5.3] - 2026-09-22
 
 ### Fixed

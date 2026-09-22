@@ -31,6 +31,14 @@
 
 **Windows only.**
 
+> [!WARNING]
+> **Windows Defender may flag `LeanLauncher.exe` as a threat (e.g. `Trojan:Script/Sabsik.EN.A!ml`) on first run.** This is a false positive, not an actual detection of malicious code - the release build isn't code-signed yet, and Defender's cloud heuristics are cautious about new, unsigned, low-download-count executables, especially ones (like the built-in updater) that replace their own binary in place. The source is fully open in this repo if you want to verify. If you hit this:
+> - Click **"Actions" > "Allow on device"** (or **"Restore"**) in the Windows Security notification, or
+> - Right-click the downloaded `.exe` or `.zip` > **Properties** > check **"Unblock"** > OK, or
+> - Add a Defender **exclusion** for the install folder (Windows Security > Virus & threat protection > Manage settings > Exclusions).
+>
+> Code signing is planned to resolve this permanently - see [CHANGELOG.md](CHANGELOG.md) for status.
+
 ## Features
 
 ### Launcher Core

@@ -44,3 +44,7 @@ Thumbs.db
 
 # Feature design plans/specs - kept locally for design rationale, not published
 /docs/superpowers/
+
+# Claude Code loop config/state and local agent workspace - stays local, not published
+/LOOP.md
+/.claude/

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(LeanLauncher VERSION 1.5.3 LANGUAGES CXX)
+project(LeanLauncher VERSION 1.5.4 LANGUAGES CXX)
 
 function(add_launcher target)
 add_executable(${target} WIN32
