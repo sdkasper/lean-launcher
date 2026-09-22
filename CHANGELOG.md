@@ -10,6 +10,16 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.5.0] - 2026-09-22
+
+### Added
+- **Full-disk file search** - the file-count cap (previously 50,000 files) has been removed; search now covers every fixed and removable drive. The first index is a one-time full walk with a persisted, versioned on-disk cache for instant startup afterward, followed by a mtime-pruned incremental rescan (startup and periodic) so only changed folders are re-walked. Unplugging a removable drive prunes its files from results until it's reconnected.
+- **User-configurable file search exclusions** - add your own folder or file-extension exclusions on top of the built-in skip-list via a new "Edit exclusions..." row in Settings > Search, which opens `%LOCALAPPDATA%\LeanLauncher\file_search_excludes.txt` (auto-created with a header template) in your default text editor. Strictly additive - cannot re-include anything the built-in rules already exclude. A new "Help" row explains both exclusion layers.
+
+### Known Limitations
+- File search indexing progress is only surfaced as a simple "Indexing..." state, not a live item count.
+- Fuzzy name-matching search latency has not yet been re-validated against the new uncapped full-disk item counts and may exceed the app's usual search-latency budget on very large drives.
+
 ## [1.4.1] - 2026-09-18
 
 ### Fixed

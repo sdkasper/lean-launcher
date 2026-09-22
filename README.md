@@ -44,6 +44,13 @@
 - **Privacy First** - Zero telemetry, zero analytics, and zero background services. Search history is never written to disk.
 - **About tab** - version, author, and a link to the GitHub repo, right from Settings.
 
+### File Search
+
+- **Full-disk coverage** - indexes every fixed and removable drive with no file-count cap, so results aren't limited to a handful of common folders
+- **Fast first run, instant restarts** - the first index is a one-time walk; after that, a persisted cache loads instantly on startup, followed by a quick incremental rescan that only re-checks folders that actually changed
+- **Stays current automatically** - a periodic incremental rescan picks up new/changed/deleted files, and unplugging a removable drive prunes its files from search until it's reconnected
+- **User-configurable exclusions** - add your own folder or file-extension exclusions on top of the built-in skip-list from Settings > Search ("Edit exclusions..."), for things like a large personal archive you never want to search
+
 ### Obsidian Integration
 
 Entirely optional and off by default until you point it at a vault.
