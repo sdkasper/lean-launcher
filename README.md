@@ -51,7 +51,7 @@
 - **Keyboard-First** - Launch, elevate to admin (`Ctrl+Enter`), and trigger quick-launch slots (`Alt+1`-`8`) without touching your mouse.
 - **Privacy First** - Zero telemetry, zero analytics, and zero background services. Search history is never written to disk.
 - **Pinned results** - pin up to 5 apps, files, or folders from the actions menu (`Ctrl+K` → Pin). Pins stay at the top of the empty search box and jump to the top whenever they match what you type.
-- **About tab** - version, author, a link to the GitHub repo, and how many files and vault notes are currently indexed, right from Settings.
+- **About tab** - version, author, a link to the GitHub repo, and how many files and vault notes are currently indexed, right from Settings. A **Check for updates** row checks GitHub on demand (even with automatic checks off); when a newer release has downloaded, a second click installs it and restarts.
 
 ### File Search
 
@@ -72,7 +72,7 @@ Entirely optional and off by default until you point it at a vault.
 - **Multi-line captures** - type `\n` or ` // ` in a `t`, `a`, or `l` capture to start a new line (`t buy milk // oat, 1 litre`), or paste multi-line text. Extra lines of a task or log entry are indented under its bullet so it stays one list item; the preview shows each break as `⏎`. Type `\\n` for a literal `\n` (e.g. `C:\\notes`). Markdown links, `[[wiki links]]`, and URLs are written exactly as typed.
 - **Instant note jump** (`o <text>`, default prefix) - fuzzy-matches note titles against a live-synced background index and opens the match via Obsidian's own CLI (not a hand-rolled URI, not a third-party plugin dependency)
 - **Quick open** (`o .`) - opens today's daily note in Obsidian, or one of your capture target notes if you choose that in Settings
-- **Daily-note auto-detection** - reads the vault's own Daily Notes / Periodic Notes / Journals plugin config (whichever is actually enabled, including plugins started by the Lazy Plugin Loader), so notes land exactly where Obsidian itself would put them; optional manual folder/format override available if auto-detection doesn't fit your setup
+- **Daily-note auto-detection** - reads the vault's own Daily Notes / Periodic Notes / Journals plugin config (whichever is actually enabled, including plugins started by the Lazy Plugin Loader), so notes land exactly where Obsidian itself would put them; optional manual folder/format override available if auto-detection doesn't fit your setup. Date formats support `YYYY YY MMMM MMM MM M DD D dddd ddd` and `[literal text]` (English month/weekday names). If today's note doesn't exist yet, Lean Launcher creates it without your daily-note template - open it in Obsidian first if you want the template applied
 - **Fully configurable** - master "Enable Obsidian integration" toggle, a per-action enable toggle for each of the four actions above, and inline-editable prefix/result-label/preview text per action, right from Settings. Prefix-uniqueness validation stops you from configuring two actions with colliding prefixes.
 - **Compact by default** - each action's settings collapse into a one-line summary; expanding one collapses whichever other was open
 

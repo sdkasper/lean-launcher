@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <ctime>
+#include <cwchar>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -79,6 +81,52 @@ inline bool IsNewerVersion(std::wstring_view remote, std::wstring_view current) 
         if (rv < cv) return false;
     }
     return false;
+}
+
+// What the About tab's update row (US-029) shows. Driven by both the
+// automatic startup check and the manual one - they share one worker.
+enum class UpdateCheckState { Idle, Checking, Downloading, UpToDate, Ready, Available, Failed };
+
+// Posted from the update worker to the UI thread (lParam, owned by the
+// receiver). `path` is only set for a downloaded update.
+struct UpdateCheckResult {
+    std::wstring tag;
+    std::wstring htmlUrl;
+    std::wstring path;
+};
+
+inline std::wstring DisplayTag(std::wstring_view tag) {
+    if (!tag.empty() && (tag.front() == L'v' || tag.front() == L'V')) return std::wstring(tag);
+    return L"v" + std::wstring(tag);
+}
+
+inline std::wstring UpdateRowText(UpdateCheckState state, std::wstring_view tag) {
+    switch (state) {
+    case UpdateCheckState::Checking: return L"Checking…";
+    case UpdateCheckState::Downloading:
+        return tag.empty() ? std::wstring(L"Downloading update…") : L"Downloading " + DisplayTag(tag) + L"…";
+    case UpdateCheckState::UpToDate: return L"Up to date";
+    case UpdateCheckState::Ready: return DisplayTag(tag) + L" ready - Restart to update";
+    case UpdateCheckState::Available: return DisplayTag(tag) + L" available - open release page";
+    case UpdateCheckState::Failed: return L"Check failed - try again";
+    case UpdateCheckState::Idle: break;
+    }
+    return L"Check now";
+}
+
+inline bool IsUpdateRowClickable(UpdateCheckState state) {
+    return state != UpdateCheckState::Checking && state != UpdateCheckState::Downloading;
+}
+
+// "Last checked: 23 Sep 2026, 17:40" in local time, or "never" for 0.
+inline std::wstring FormatLastUpdateCheck(uint64_t seconds) {
+    if (seconds == 0) return L"Last checked: never";
+    const std::time_t t = static_cast<std::time_t>(seconds);
+    std::tm local{};
+    if (localtime_s(&local, &t) != 0) return L"Last checked: never";
+    wchar_t buf[64]{};
+    if (std::wcsftime(buf, 64, L"%d %b %Y, %H:%M", &local) == 0) return L"Last checked: never";
+    return std::wstring(L"Last checked: ") + buf;
 }
 
 inline bool ShouldCheckForUpdates(uint64_t lastCheckSeconds, uint64_t currentSeconds, bool enabled) {

@@ -381,6 +381,33 @@ int main() {
     GetModuleFileNameW(nullptr, ownExe, MAX_PATH);
     Check(ValidateExecutableFile(ownExe), "validate own PE executable succeeds");
 
+    // US-029: About tab update row text for each state.
+    Check(UpdateRowText(UpdateCheckState::Idle, L"") == L"Check now", "update row: idle offers a check");
+    Check(UpdateRowText(UpdateCheckState::Checking, L"") == L"Checking…", "update row: checking");
+    Check(UpdateRowText(UpdateCheckState::Downloading, L"v1.7.0") == L"Downloading v1.7.0…",
+          "update row: downloading names the version");
+    Check(UpdateRowText(UpdateCheckState::UpToDate, L"v1.6.1") == L"Up to date", "update row: up to date");
+    Check(UpdateRowText(UpdateCheckState::Ready, L"v1.7.0") == L"v1.7.0 ready - Restart to update",
+          "update row: downloaded update offers the restart");
+    Check(UpdateRowText(UpdateCheckState::Available, L"v1.7.0") == L"v1.7.0 available - open release page",
+          "update row: failed download offers the release page");
+    Check(UpdateRowText(UpdateCheckState::Failed, L"") == L"Check failed - try again",
+          "update row: a failed check is not reported as up to date");
+    Check(UpdateRowText(UpdateCheckState::Ready, L"1.7.0") == L"v1.7.0 ready - Restart to update",
+          "update row: a tag without a leading v still reads v1.7.0");
+    Check(UpdateRowText(UpdateCheckState::Downloading, L"") == L"Downloading update…",
+          "update row: downloading without a known tag");
+    Check(IsUpdateRowClickable(UpdateCheckState::Idle) && IsUpdateRowClickable(UpdateCheckState::Ready) &&
+          IsUpdateRowClickable(UpdateCheckState::Failed) && !IsUpdateRowClickable(UpdateCheckState::Checking) &&
+          !IsUpdateRowClickable(UpdateCheckState::Downloading),
+          "update row: clicks are ignored only while a check or download runs");
+    Check(FormatLastUpdateCheck(0) == L"Last checked: never", "update row: never checked");
+    {
+        const std::wstring when = FormatLastUpdateCheck(1790000000); // 2026-09-21 (UTC)
+        Check(when.rfind(L"Last checked: ", 0) == 0 && when.find(L"2026") != std::wstring::npos,
+              "update row: last check shows a local date and time");
+    }
+
     Check(IsNewerVersion(L"v1.0.1", L"1.0.0"), "v1.0.1 is newer than 1.0.0");
     Check(IsNewerVersion(L"1.1.0", L"1.0.0"), "1.1.0 is newer than 1.0.0");
     Check(IsNewerVersion(L"v2.0", L"1.9.9"), "v2.0 is newer than 1.9.9");
@@ -2295,18 +2322,47 @@ int main() {
     Check(IsDateFormatFullySupported(L"YYYY-MM-DD"), "IsDateFormatFullySupported true for YYYY-MM-DD");
     Check(IsDateFormatFullySupported(L"YYYY/MM/YYYY-MM-DD"),
         "IsDateFormatFullySupported true for repeated-token folder+filename format");
-    Check(!IsDateFormatFullySupported(L"MMMM-DD-YYYY"),
-        "IsDateFormatFullySupported false for unsupported MMMM token");
+    Check(IsDateFormatFullySupported(L"MMMM-DD-YYYY"),
+        "IsDateFormatFullySupported true for the MMMM month-name token (US-030)");
     Check(!IsDateFormatFullySupported(L"dddd, MMMM Do YYYY"),
-        "IsDateFormatFullySupported false for unsupported dddd/MMMM/Do tokens");
+        "IsDateFormatFullySupported false for the unsupported Do (ordinal) token");
     Check(!IsDateFormatFullySupported(L"YYYY-DDDD"),
         "IsDateFormatFullySupported false for unsupported DDDD token (day-of-year), not misread as two DD tokens");
+
+    // US-030: Moment.js month/weekday names and short forms. 2026-09-23 is a
+    // Wednesday - the date of the user report this story fixes.
+    Check(FormatDateTokens(L"YYYY/MM-MMMM/YYYY-MM-DD-dddd", 2026, 9, 23) == L"2026/09-September/2026-09-23-Wednesday",
+        "FormatDateTokens expands the reporter's YYYY/MM-MMMM/YYYY-MM-DD-dddd format");
+    Check(FormatDateTokens(L"ddd D MMM YY", 2026, 9, 3) == L"Thu 3 Sep 26",
+        "FormatDateTokens short weekday/month names, unpadded day, two-digit year");
+    Check(FormatDateTokens(L"M/D", 2026, 1, 5) == L"1/5", "FormatDateTokens unpadded month and day");
+    Check(FormatDateTokens(L"[Week of] YYYY-MM-DD", 2026, 9, 14) == L"Week of 2026-09-14",
+        "FormatDateTokens writes [bracketed] text literally");
+    Check(FormatDateTokens(L"dddd", 2024, 2, 29) == L"Thursday" && FormatDateTokens(L"dddd", 2000, 1, 1) == L"Saturday" &&
+          FormatDateTokens(L"dddd", 2026, 1, 4) == L"Sunday",
+        "FormatDateTokens weekday is right across a leap day, a century year, and a Sunday");
+    Check(IsDateFormatFullySupported(L"YYYY/MM-MMMM/YYYY-MM-DD-dddd") && IsDateFormatFullySupported(L"[W] YYYY"),
+        "IsDateFormatFullySupported true for name tokens and bracketed literals");
+    Check(!IsDateFormatFullySupported(L"YYYY-[W]ww") && !IsDateFormatFullySupported(L"gggg-MM") &&
+          !IsDateFormatFullySupported(L"YYYY-Q") && !IsDateFormatFullySupported(L"dd") &&
+          !IsDateFormatFullySupported(L"YYY") && !IsDateFormatFullySupported(L"MMMMM"),
+        "IsDateFormatFullySupported false for week, week-year, quarter, min weekday, and odd-length runs");
+    {
+        DailyNoteConfig config;
+        config.folder = L"_Daily_notes";
+        config.format = L"YYYY/MM-MMMM/YYYY-MM-DD-dddd";
+        Check(ResolveTodayPath(config, L"D:\\Vault", 2026, 9, 23) ==
+                  L"D:\\Vault\\_Daily_notes\\2026/09-September/2026-09-23-Wednesday.md",
+            "ResolveTodayPath finds the reporter's month-name daily note instead of falling back");
+        Check(TodayNoteRef(config, 2026, 9, 23) == L"_Daily_notes/2026/09-September/2026-09-23-Wednesday",
+            "TodayNoteRef (quick open) resolves the same month-name note");
+    }
 
     {
         // Regression: an unsupported format token must not silently produce a
         // garbled filename - ResolveTodayPath should fall back to YYYY-MM-DD.
         DailyNoteConfig config;
-        config.format = L"MMMM-DD-YYYY";
+        config.format = L"YYYY-[W]ww";
         const std::wstring path = ResolveTodayPath(config, L"D:\\Vault", 2026, 9, 14);
         Check(path.size() >= 13 && path.compare(path.size() - 13, 13, L"2026-09-14.md") == 0,
             "ResolveTodayPath falls back to YYYY-MM-DD for an unsupported format instead of garbling the filename");
@@ -2355,7 +2411,7 @@ int main() {
         rootConfig.format = L"YYYY-MM-DD";
         Check(TodayNoteRef(rootConfig, 2026, 9, 14) == L"2026-09-14", "TodayNoteRef with no folder");
         DailyNoteConfig badFormat;
-        badFormat.format = L"MMMM-DD-YYYY";
+        badFormat.format = L"Do-MM-YYYY";
         Check(TodayNoteRef(badFormat, 2026, 9, 14) == L"2026-09-14",
             "TodayNoteRef falls back to YYYY-MM-DD like ResolveTodayPath");
     }

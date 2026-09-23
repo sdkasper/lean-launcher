@@ -24,66 +24,85 @@ namespace obsidian {
 
 namespace fs = std::filesystem;
 
-// Replaces YYYY/MM/DD tokens in a Moment.js-style date format string with
-// zero-padded values. Only the three tokens Obsidian's daily-notes format
-// actually needs for this codebase's vault conventions are supported;
-// anything else in the format string passes through unchanged. The DD branch
-// mirrors IsDateFormatFullySupported's lookahead guard (below) so this
-// function can't garble a token like "DDDD" if a future caller ever reaches
-// it without validating the format first - today ResolveTodayPath is the
-// only caller and always validates, but the two functions must agree on
-// what counts as a real DD token.
-inline std::wstring FormatDateTokens(const std::wstring& format, int year, int month, int day) {
-    std::wstring result;
-    result.reserve(format.size());
+// 0 = Sunday ... 6 = Saturday, for a Gregorian date (Sakamoto's method).
+inline int DayOfWeek(int year, int month, int day) {
+    static constexpr int kOffsets[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    if (month < 3) year -= 1;
+    return (year + year / 4 - year / 100 + year / 400 + kOffsets[(month + 11) % 12] + day) % 7;
+}
+
+// Expands a Moment.js-style date format (US-030) into `out`. Supported:
+// YYYY YY, MMMM MMM MM M, DD D, dddd ddd, and [literal text]. Names are
+// English - Obsidian's default Moment locale. Returns false if the format
+// uses any other token; those letters are copied to `out` unchanged.
+//
+// Tokens are read as whole runs of the same letter, which is how Moment
+// matches them: "MMMM" is the month name, never two "MM"s, and "DDDD" (day
+// of year) is an unsupported run rather than two "DD"s. A letter that isn't
+// part of a supported run - including one right after a token, like the "o"
+// in "Do" (ordinal day) - makes the whole format unsupported, so callers can
+// fall back instead of writing a garbled path.
+inline bool ExpandDateFormat(const std::wstring& format, int year, int month, int day, std::wstring& out) {
+    static constexpr const wchar_t* kMonths[] = {L"January", L"February", L"March", L"April", L"May", L"June",
+        L"July", L"August", L"September", L"October", L"November", L"December"};
+    static constexpr const wchar_t* kWeekdays[] = {L"Sunday", L"Monday", L"Tuesday", L"Wednesday",
+        L"Thursday", L"Friday", L"Saturday"};
+    out.clear();
+    out.reserve(format.size() + 16);
+    bool supported = true;
     wchar_t buf[8];
     size_t i = 0;
     while (i < format.size()) {
-        if (format.compare(i, 4, L"YYYY") == 0) {
-            swprintf_s(buf, L"%04d", year);
-            result += buf;
-            i += 4;
-        } else if (format.compare(i, 2, L"MM") == 0) {
-            swprintf_s(buf, L"%02d", month);
-            result += buf;
-            i += 2;
-        } else if (format.compare(i, 2, L"DD") == 0 &&
-                   (i + 2 >= format.size() || format[i + 2] != L'D')) {
-            swprintf_s(buf, L"%02d", day);
-            result += buf;
-            i += 2;
-        } else {
-            result.push_back(format[i]);
-            ++i;
+        const wchar_t ch = format[i];
+        if (ch == L'[') {
+            const size_t close = format.find(L']', i + 1);
+            if (close != std::wstring::npos) {
+                out.append(format, i + 1, close - i - 1);
+                i = close + 1;
+                continue;
+            }
         }
+        if (!std::iswalpha(ch)) {
+            out.push_back(ch);
+            ++i;
+            continue;
+        }
+        size_t run = 1;
+        while (i + run < format.size() && format[i + run] == ch) ++run;
+        const std::wstring_view month3(kMonths[month - 1], 3);
+        const std::wstring_view weekday(kWeekdays[DayOfWeek(year, month, day)]);
+        if (ch == L'Y' && run == 4) { swprintf_s(buf, L"%04d", year); out += buf; }
+        else if (ch == L'Y' && run == 2) { swprintf_s(buf, L"%02d", year % 100); out += buf; }
+        else if (ch == L'M' && run == 4) { out += kMonths[month - 1]; }
+        else if (ch == L'M' && run == 3) { out += month3; }
+        else if (ch == L'M' && run == 2) { swprintf_s(buf, L"%02d", month); out += buf; }
+        else if (ch == L'M' && run == 1) { out += std::to_wstring(month); }
+        else if (ch == L'D' && run == 2) { swprintf_s(buf, L"%02d", day); out += buf; }
+        else if (ch == L'D' && run == 1) { out += std::to_wstring(day); }
+        else if (ch == L'd' && run == 4) { out += weekday; }
+        else if (ch == L'd' && run == 3) { out += weekday.substr(0, 3); }
+        else {
+            supported = false;
+            out.append(format, i, run);
+        }
+        i += run;
     }
+    return supported;
+}
+
+// Expands a date format for display/paths; unsupported tokens pass through
+// unchanged. Callers that build a path check IsDateFormatFullySupported first.
+inline std::wstring FormatDateTokens(const std::wstring& format, int year, int month, int day) {
+    std::wstring result;
+    ExpandDateFormat(format, year, month, day, result);
     return result;
 }
 
-// Returns true if every letter in `format` is consumed by a recognized
-// YYYY/MM/DD token (in any combination/order, with any non-letter
-// separators around them). Used to detect formats FormatDateTokens can't
-// fully honor, so callers can fall back instead of silently producing a
-// garbled path.
-//
-// Note: a naive "MM" check would greedily match a longer run like "MMMM"
-// (Moment.js's full-month-name token) as two consecutive MM tokens and
-// incorrectly call it fully supported - exactly the silent-garbling bug
-// this function exists to catch. Guard against that by requiring the "MM"
-// match not be immediately followed by another 'M'. "DD" needs the same
-// guard because Moment.js's "DDDD" (day of year) would misread the same way.
+// True when ExpandDateFormat understands every token in `format`. The date
+// used for the check doesn't matter - support depends only on the tokens.
 inline bool IsDateFormatFullySupported(const std::wstring& format) {
-    size_t i = 0;
-    while (i < format.size()) {
-        if (format.compare(i, 4, L"YYYY") == 0) { i += 4; }
-        else if (format.compare(i, 2, L"MM") == 0 &&
-                 (i + 2 >= format.size() || format[i + 2] != L'M')) { i += 2; }
-        else if (format.compare(i, 2, L"DD") == 0 &&
-                 (i + 2 >= format.size() || format[i + 2] != L'D')) { i += 2; }
-        else if (std::iswalpha(format[i])) { return false; }
-        else { ++i; }
-    }
-    return true;
+    std::wstring ignored;
+    return ExpandDateFormat(format, 2000, 1, 1, ignored);
 }
 
 // Rejects vault-relative config strings that could steer a write outside the
@@ -108,10 +127,9 @@ inline bool IsUnsafeVaultRelativePath(const std::wstring& value) {
 
 // Today's daily-note name (no extension) under config.format. Falls back to
 // the safe default format whenever the configured format contains anything
-// FormatDateTokens can't fully account for (e.g. a Moment.js token like
-// MMMM), or is itself unsafe (e.g. "../../secret"), rather than silently
-// producing a garbled or traversal-y filename. Expanding token support is
-// out of scope here.
+// ExpandDateFormat can't fully account for (e.g. a Moment.js token like
+// "ww" or "Do"), or is itself unsafe (e.g. "../../secret"), rather than
+// silently producing a garbled or traversal-y filename.
 inline std::wstring FormatTodayNoteName(const DailyNoteConfig& config, int year, int month, int day) {
     const bool formatIsSafe = !IsUnsafeVaultRelativePath(config.format);
     const std::wstring& formatToUse =

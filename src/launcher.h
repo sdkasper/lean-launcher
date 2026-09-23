@@ -258,20 +258,36 @@ private:
             return 0;
         }
         case kUpdateCheckCompletedMessage: {
-            std::unique_ptr<std::wstring> pathPtr(reinterpret_cast<std::wstring*>(lParam));
+            // wParam: 0 up to date, 1 newer release but download failed,
+            // 2 downloaded and validated, 3 check failed (no usable answer).
+            std::unique_ptr<takeoff::UpdateCheckResult> result(reinterpret_cast<takeoff::UpdateCheckResult*>(lParam));
+            if (result) {
+                updateTag_ = result->tag;
+                updateReleaseUrl_ = result->htmlUrl;
+            }
             if (wParam == 2) {
                 updateDownloaded_ = true;
                 updateAvailable_ = true;
-                if (pathPtr && !pathPtr->empty()) {
-                    downloadedUpdatePath_ = *pathPtr;
+                if (result && !result->path.empty()) {
+                    downloadedUpdatePath_ = result->path;
                 }
+                updateState_ = takeoff::UpdateCheckState::Ready;
             } else if (wParam == 1) {
                 updateAvailable_ = true;
                 updateDownloaded_ = false;
+                updateState_ = takeoff::UpdateCheckState::Available;
             } else {
                 updateAvailable_ = false;
                 updateDownloaded_ = false;
+                updateState_ = wParam == 3 ? takeoff::UpdateCheckState::Failed : takeoff::UpdateCheckState::UpToDate;
             }
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
+        case kUpdateProgressMessage: {
+            std::unique_ptr<takeoff::UpdateCheckResult> result(reinterpret_cast<takeoff::UpdateCheckResult*>(lParam));
+            if (result) updateTag_ = result->tag;
+            updateState_ = takeoff::UpdateCheckState::Downloading;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
@@ -984,9 +1000,12 @@ private:
         }
     }
 
-    void CheckForUpdatesAsync(bool force = false) {
+    // `manual` is the About tab's "Check for updates" row (US-029): it runs
+    // even with automatic checks turned off, and skips the 24h throttle.
+    void CheckForUpdatesAsync(bool force = false, bool manual = false) {
         if constexpr (kUiTest) return;
-        if (!settings_.checkForUpdates) return;
+        if (!manual && !settings_.checkForUpdates) return;
+        if (manual) force = true;
         const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
         // Throttle to at most once per 24h unless explicitly forced (startup
         // used to pass force=true unconditionally, so this check was never
@@ -1002,6 +1021,8 @@ private:
         }
         lastUpdateCheck_ = now;
         SaveLastUpdateCheck(now);
+        updateState_ = takeoff::UpdateCheckState::Checking;
+        InvalidateRect(hwnd_, nullptr, FALSE);
         const HWND hwnd = hwnd_;
         const std::wstring host = apiHost_;
         const std::wstring path = apiPath_;
@@ -1017,35 +1038,37 @@ private:
                 std::wstring tag;
                 std::wstring htmlUrl;
                 std::wstring assetUrl;
-                if (takeoff::QueryLatestReleaseInfo(host, path, tag, htmlUrl, assetUrl)) {
-                    if (takeoff::IsNewerVersion(tag, takeoff::kAppVersion)) {
-                        const std::wstring stagingPath = takeoff::GetUpdateStagingPath(tag);
-                        // The handler takes ownership of the posted path, so
-                        // only release it once the post is known to have
-                        // succeeded - it fails if shutdown got there first.
-                        if (!stagingPath.empty() && takeoff::ValidateExecutableFile(stagingPath)) {
-                            auto p = std::make_unique<std::wstring>(stagingPath);
-                            if (PostMessageW(hwnd, kUpdateCheckCompletedMessage, 2,
-                                    reinterpret_cast<LPARAM>(p.get()))) {
-                                p.release();
-                            }
-                            return;
-                        }
-                        if (!assetUrl.empty() && !stagingPath.empty()) {
-                            if (takeoff::DownloadUpdateFile(assetUrl, stagingPath)) {
-                                auto p = std::make_unique<std::wstring>(stagingPath);
-                                if (PostMessageW(hwnd, kUpdateCheckCompletedMessage, 2,
-                                        reinterpret_cast<LPARAM>(p.get()))) {
-                                    p.release();
-                                }
-                                return;
-                            }
-                        }
-                        PostMessageW(hwnd, kUpdateCheckCompletedMessage, 1, 0);
+                // The handler takes ownership of the posted result, so only
+                // release it once the post is known to have succeeded - it
+                // fails if shutdown got there first.
+                auto post = [hwnd, &tag, &htmlUrl](UINT message, WPARAM verdict, std::wstring stagedPath = {}) {
+                    auto p = std::make_unique<takeoff::UpdateCheckResult>(
+                        takeoff::UpdateCheckResult{tag, htmlUrl, std::move(stagedPath)});
+                    if (PostMessageW(hwnd, message, verdict, reinterpret_cast<LPARAM>(p.get()))) {
+                        p.release();
+                    }
+                };
+                if (!takeoff::QueryLatestReleaseInfo(host, path, tag, htmlUrl, assetUrl)) {
+                    post(kUpdateCheckCompletedMessage, 3);
+                    return;
+                }
+                if (takeoff::IsNewerVersion(tag, takeoff::kAppVersion)) {
+                    const std::wstring stagingPath = takeoff::GetUpdateStagingPath(tag);
+                    if (!stagingPath.empty() && takeoff::ValidateExecutableFile(stagingPath)) {
+                        post(kUpdateCheckCompletedMessage, 2, stagingPath);
                         return;
                     }
+                    if (!assetUrl.empty() && !stagingPath.empty()) {
+                        post(kUpdateProgressMessage, 0);
+                        if (takeoff::DownloadUpdateFile(assetUrl, stagingPath)) {
+                            post(kUpdateCheckCompletedMessage, 2, stagingPath);
+                            return;
+                        }
+                    }
+                    post(kUpdateCheckCompletedMessage, 1);
+                    return;
                 }
-                PostMessageW(hwnd, kUpdateCheckCompletedMessage, 0, 0);
+                post(kUpdateCheckCompletedMessage, 0);
             });
         } catch (const std::system_error&) {
             *updateInProgress_ = false;
@@ -1363,9 +1386,9 @@ private:
     // ObsidianVisibleRows(). 40-43 are later Obsidian additions (capture
     // target notes - US-025; quick-open target - US-026), numbered after 39
     // so no existing row ID shifts - like every Obsidian row, their screen
-    // position comes from ObsidianVisibleRows(), not the number. 44 is the
-    // About tab's one row (not part of "All" - see IsRowInCategory). 45 is
-    // the Reset button, handled as a sentinel row rather than a real
+    // position comes from ObsidianVisibleRows(), not the number. 44-45 are the
+    // About tab's rows, check for updates then GitHub, in screen order (not
+    // part of "All" - see IsRowInCategory). 46 is the Reset button, handled as a sentinel row rather than a real
     // settings row.
     // Rows 9-14 are not part of the Obsidian block below - they live in the
     // Search category alongside rows 7-8 - so every Obsidian row constant
@@ -1406,9 +1429,10 @@ private:
     static constexpr int kRowNoteAddTargetNote = 41;
     static constexpr int kRowLogTargetNote = 42;
     static constexpr int kRowQuickOpenTarget = 43;
-    static constexpr int kRowAboutGithubLink = 44;
-    static constexpr int kSettingsMaxRow = 44;
-    static constexpr int kRowResetToDefaults = 45;
+    static constexpr int kRowAboutCheckUpdates = 44;
+    static constexpr int kRowAboutGithubLink = 45;
+    static constexpr int kSettingsMaxRow = 45;
+    static constexpr int kRowResetToDefaults = 46;
 
     // Which of the five Obsidian action blocks is currently expanded, or
     // -1 if all are collapsed. A single int gives accordion behavior for
@@ -1510,7 +1534,7 @@ private:
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
         if (cat == SettingsCategory::Search) return row >= 7 && row <= kRowFileSearchHelp;
         if (cat == SettingsCategory::Obsidian) return ObsidianRowRank(row) >= 0;
-        if (cat == SettingsCategory::About) return row == kRowAboutGithubLink;
+        if (cat == SettingsCategory::About) return row == kRowAboutCheckUpdates || row == kRowAboutGithubLink;
         return false;
     }
 
@@ -1519,7 +1543,7 @@ private:
         if (cat == SettingsCategory::System) return 4;
         if (cat == SettingsCategory::Search) return 7;
         if (cat == SettingsCategory::Obsidian) return kRowObsidianEnabled;
-        if (cat == SettingsCategory::About) return kRowAboutGithubLink;
+        if (cat == SettingsCategory::About) return kRowAboutCheckUpdates;
         return 0;
     }
 
@@ -1604,10 +1628,14 @@ private:
         return 200.0f;
     }
 
-    // About tab layout: version/author lines, "LINKS" header@66, its one-row
-    // card@86, then the "INDEX" header 18px below that card and its card 20px
-    // below the header - the same header/card spacing the All view uses.
-    static constexpr float AboutIndexHeaderTop() { return 86.0f + kSettingsRowHeight + 18.0f; }
+    // About tab layout: version/author lines, "UPDATES" header@66 and its
+    // one-row card@86 (US-029), then "LINKS" and "INDEX", each header 18px
+    // below the previous card and its card 20px below the header - the same
+    // header/card spacing the All view uses.
+    static constexpr float AboutUpdatesCardTop() { return 86.0f; }
+    static constexpr float AboutLinksHeaderTop() { return AboutUpdatesCardTop() + kSettingsRowHeight + 18.0f; }
+    static constexpr float AboutLinksCardTop() { return AboutLinksHeaderTop() + 20.0f; }
+    static constexpr float AboutIndexHeaderTop() { return AboutLinksCardTop() + kSettingsRowHeight + 18.0f; }
     static constexpr float AboutIndexCardTop() { return AboutIndexHeaderTop() + 20.0f; }
 
     // "482113" -> "482,113" for the About tab's index counts.
@@ -1647,7 +1675,7 @@ private:
         } else if (settingsCategory_ == SettingsCategory::Obsidian) {
             return 36.0f + ObsidianRowRank(row) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::About) {
-            return 86.0f;
+            return row == kRowAboutCheckUpdates ? AboutUpdatesCardTop() : AboutLinksCardTop();
         }
         return 0.0f;
     }
@@ -1694,7 +1722,7 @@ private:
             else if (row == 7) sectionHeaderTop = 421.0f;
             else if (row == kRowObsidianEnabled) sectionHeaderTop = 835.0f;
         } else {
-            if (row == 0 || row == 4 || row == 7 || row == kRowObsidianEnabled || row == kRowAboutGithubLink) sectionHeaderTop = 16.0f;
+            if (row == 0 || row == 4 || row == 7 || row == kRowObsidianEnabled || row == kRowAboutCheckUpdates) sectionHeaderTop = 16.0f;
         }
         const float visibleTop = sectionHeaderTop;
         const float visibleBottom = rBottom + 8.0f;
@@ -2566,6 +2594,19 @@ private:
             ShellExecuteW(nullptr, L"open", takeoff::kRepoUrl, nullptr, nullptr, SW_SHOWNORMAL);
             return;
         }
+        if (row == kRowAboutCheckUpdates) {
+            if (!takeoff::IsUpdateRowClickable(updateState_)) return;
+            if (updateState_ == takeoff::UpdateCheckState::Ready) {
+                RestartToUpdate();
+            } else if (updateState_ == takeoff::UpdateCheckState::Available) {
+                const std::wstring& url = updateReleaseUrl_.empty()
+                    ? std::wstring(takeoff::kDefaultReleasesUrl) : updateReleaseUrl_;
+                ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            } else {
+                CheckForUpdatesAsync(true, true);
+            }
+            return;
+        }
         if (row == kRowFileSearchEditExclusions) {
             // File I/O + spawning the user's editor is a real side effect
             // that a UI test run must not trigger - mirrors the existing
@@ -2643,6 +2684,7 @@ private:
             if (!settings_.checkForUpdates) {
                 updateAvailable_ = false;
                 updateDownloaded_ = false;
+                updateState_ = takeoff::UpdateCheckState::Idle;
             } else {
                 CheckForUpdatesAsync(true);
             }
@@ -5126,7 +5168,7 @@ private:
                 settings_.dailyNoteFolderOverride, false, false, false, true);
             return;
         case kRowDailyNoteFormatOverride:
-            DrawSettingsRow(row, top, L"Daily note format override", L"Leave empty to auto-detect; supports YYYY/MM/DD tokens",
+            DrawSettingsRow(row, top, L"Daily note format override", L"Leave empty to auto-detect; e.g. YYYY-MM-DD or YYYY/MMMM/YYYY-MM-DD-dddd",
                 settings_.dailyNoteFormatOverride, false, false, false, true);
             return;
         default:
@@ -5385,8 +5427,13 @@ private:
                 D2D1::RectF(24, 38.0f + offsetY, width_ - 24, 56.0f + offsetY),
                 hintFormat_.Get(), Muted());
 
-            drawCard(L"LINKS", 66.0f, 86.0f, 1);
-            DrawSettingsRow(kRowAboutGithubLink, 86.0f + offsetY, L"View on GitHub",
+            drawCard(L"UPDATES", 66.0f, AboutUpdatesCardTop(), 1);
+            DrawSettingsRow(kRowAboutCheckUpdates, AboutUpdatesCardTop() + offsetY, L"Check for updates",
+                takeoff::FormatLastUpdateCheck(lastUpdateCheck_),
+                takeoff::UpdateRowText(updateState_, updateTag_), false, false, true);
+
+            drawCard(L"LINKS", AboutLinksHeaderTop(), AboutLinksCardTop(), 1);
+            DrawSettingsRow(kRowAboutGithubLink, AboutLinksCardTop() + offsetY, L"View on GitHub",
                 L"Open the Lean Launcher repository in your browser",
                 L"github.com/sdkasper/lean-launcher", false, false, true);
 
@@ -5628,6 +5675,11 @@ private:
     bool updateAvailable_ = false;
     bool updateDownloaded_ = false;
     std::wstring downloadedUpdatePath_;
+    // About tab update row (US-029). updateTag_/updateReleaseUrl_ come from
+    // the latest check that reached GitHub.
+    takeoff::UpdateCheckState updateState_ = takeoff::UpdateCheckState::Idle;
+    std::wstring updateTag_;
+    std::wstring updateReleaseUrl_;
     bool updateHovered_ = false;
     bool webSearchCardHovered_ = false;
     bool adminActionHovered_ = false;

@@ -71,6 +71,9 @@ constexpr UINT kIconReadyMessage = WM_APP + 4;
 constexpr UINT kUpdateCheckCompletedMessage = WM_APP + 5;
 constexpr UINT kExitLauncherMessage = WM_APP + 6;
 constexpr UINT kShellNotifyMessage = WM_APP + 7;
+// Update worker -> UI: "a newer release was found, downloading it" (US-029).
+// WM_APP + 8 to + 11 are taken by file_index.h, note_index.h, obsidian_config.h.
+constexpr UINT kUpdateProgressMessage = WM_APP + 12;
 constexpr UINT_PTR kCaretTimer = 1;
 constexpr UINT_PTR kHotkeyTimer = 2;
 constexpr UINT_PTR kRenderRetryTimer = 3;
@@ -876,11 +879,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
             while (PeekMessageW(&message, nullptr, kIconReadyMessage, kIconReadyMessage, PM_REMOVE)) {
                 delete reinterpret_cast<IconResult*>(message.lParam);
             }
-            // lParam only carries a staged-update path when wParam is 2; the
-            // other verdicts post a null lParam, which delete tolerates.
+            // Both update messages carry an owned UpdateCheckResult (or null,
+            // which delete tolerates).
             while (PeekMessageW(&message, nullptr, kUpdateCheckCompletedMessage,
                     kUpdateCheckCompletedMessage, PM_REMOVE)) {
-                delete reinterpret_cast<std::wstring*>(message.lParam);
+                delete reinterpret_cast<takeoff::UpdateCheckResult*>(message.lParam);
+            }
+            while (PeekMessageW(&message, nullptr, kUpdateProgressMessage,
+                    kUpdateProgressMessage, PM_REMOVE)) {
+                delete reinterpret_cast<takeoff::UpdateCheckResult*>(message.lParam);
             }
             while (PeekMessageW(&message, nullptr, kKnownVaultsReadyMessage,
                     kKnownVaultsReadyMessage, PM_REMOVE)) {
