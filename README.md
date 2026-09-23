@@ -50,7 +50,8 @@
 - **Built-in Calculator** - Instantly evaluate mathematical expressions (e.g. `125 * 8`, `sqrt(144)`, `2^10`, `(10 + 20) * 3`). Press `Enter` to copy the result to the clipboard and close, or `Ctrl+C` to copy directly.
 - **Keyboard-First** - Launch, elevate to admin (`Ctrl+Enter`), and trigger quick-launch slots (`Alt+1`-`8`) without touching your mouse.
 - **Privacy First** - Zero telemetry, zero analytics, and zero background services. Search history is never written to disk.
-- **About tab** - version, author, and a link to the GitHub repo, right from Settings.
+- **Pinned results** - pin up to 5 apps, files, or folders from the actions menu (`Ctrl+K` → Pin). Pins stay at the top of the empty search box and jump to the top whenever they match what you type.
+- **About tab** - version, author, a link to the GitHub repo, and how many files and vault notes are currently indexed, right from Settings.
 
 ### File Search
 
@@ -64,11 +65,13 @@
 Entirely optional and off by default until you point it at a vault.
 
 - **Auto-detected vault picker** - reads Obsidian's own `obsidian.json` to find every vault on your machine; click (or press Enter on) the Obsidian Vault row in Settings to pick one from a dropdown list (mouse or Up/Down/Enter/Esc)
-- **Quick task capture** (`t <text>`, default prefix) - appends `- [ ] <text>` to today's daily note and hides the launcher immediately. Obsidian is never opened or focused.
-- **Quick note capture** (`a <text>`, default prefix) - appends a plain line (not a checkbox) to today's daily note, for anything that isn't a task
-- **Quick log capture** (`l <text>`, default prefix) - inserts a timestamped line (`- HH:MM: <text>`) at the end of a configured heading's section (default `## Log`) in today's daily note, for a running log without opening Obsidian
+- **Quick task capture** (`t <text>`, default prefix) - appends `- [ ] <text>` to today's daily note (or your task target note) and hides the launcher immediately. Obsidian is never opened or focused.
+- **Quick note capture** (`a <text>`, default prefix) - appends a plain line (not a checkbox) to today's daily note (or your note target), for anything that isn't a task
+- **Quick log capture** (`l <text>`, default prefix) - inserts a timestamped line (`- HH:MM: <text>`) at the end of a configured heading's section (default `## Log`) in today's daily note (or your log target note), for a running log without opening Obsidian
+- **Capture target notes** - optionally send tasks, notes, or log entries to a specific note (e.g. `Inbox/Tasks`) instead of the daily note, set per action in Settings
 - **Instant note jump** (`o <text>`, default prefix) - fuzzy-matches note titles against a live-synced background index and opens the match via Obsidian's own CLI (not a hand-rolled URI, not a third-party plugin dependency)
-- **Daily-note auto-detection** - reads the vault's own Daily Notes / Periodic Notes / Journals plugin config (whichever is actually enabled), so notes land exactly where Obsidian itself would put them; optional manual folder/format override available if auto-detection doesn't fit your setup
+- **Quick open** (`o .`) - opens today's daily note in Obsidian, or one of your capture target notes if you choose that in Settings
+- **Daily-note auto-detection** - reads the vault's own Daily Notes / Periodic Notes / Journals plugin config (whichever is actually enabled, including plugins started by the Lazy Plugin Loader), so notes land exactly where Obsidian itself would put them; optional manual folder/format override available if auto-detection doesn't fit your setup
 - **Fully configurable** - master "Enable Obsidian integration" toggle, a per-action enable toggle for each of the four actions above, and inline-editable prefix/result-label/preview text per action, right from Settings. Prefix-uniqueness validation stops you from configuring two actions with colliding prefixes.
 - **Compact by default** - each action's settings collapse into a one-line summary; expanding one collapses whichever other was open
 
@@ -92,10 +95,11 @@ These aren't global hotkeys - they're prefixes you type in the launcher's search
 
 | Prefix | Action | Requires Obsidian running? |
 | --- | --- | --- |
-| `t <text>` | Add a task (`- [ ] <text>`) to today's daily note | No |
-| `a <text>` | Add a plain line to today's daily note | No |
+| `t <text>` | Add a task (`- [ ] <text>`) to today's daily note or task target note | No |
+| `a <text>` | Add a plain line to today's daily note or note target | No |
 | `l <text>` | Add a timestamped log line to a configured heading's section in today's daily note | No |
 | `o <text>` | Fuzzy-search note titles and open the match | Yes* |
+| `o .` | Open today's daily note (or a chosen capture target note) | Yes* |
 
 **\*** Obsidian's CLI requires the app to be running to open the note. If it isn't, `o` launches Obsidian as part of that same command - but per [Obsidian's own docs](https://obsidian.md/help/cli), the app needs to actually be running for the command to complete, so on a cold start Lean Launcher waits up to 10 seconds for Obsidian to finish booting before giving up.
 

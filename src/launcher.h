@@ -198,6 +198,7 @@ private:
                 }
             }
             baseAppsCount_ = apps_.size();
+            RefreshPins();
             // Set here (UI thread, via the PostMessageW handoff) rather than
             // on the index worker thread that posted this message - writing
             // it there raced Show()'s read of the same field with no
@@ -617,6 +618,8 @@ private:
                 settings_.taskAddEnabled = ReadDword(key, L"TaskAddEnabled", 1) != 0;
                 settings_.noteAddEnabled = ReadDword(key, L"NoteAddEnabled", 1) != 0;
                 settings_.logEnabled = ReadDword(key, L"LogEnabled", 1) != 0;
+                settings_.quickOpenTarget =
+                    std::clamp(static_cast<int>(ReadDword(key, L"QuickOpenTarget", 0)), 0, kQuickOpenTargetCount - 1);
                 const DWORD low = ReadDword(key, L"LastUpdateCheckLow", 0);
                 const DWORD high = ReadDword(key, L"LastUpdateCheckHigh", 0);
                 lastUpdateCheck_ = (static_cast<uint64_t>(high) << 32) | low;
@@ -662,12 +665,32 @@ private:
                 readStringSetting(L"NoteAddPrefix", settings_.noteAddPrefix);
                 readStringSetting(L"NoteAddPillLabel", settings_.noteAddPillLabel);
                 readStringSetting(L"NoteAddPreviewPrefix", settings_.noteAddPreviewPrefix);
+                // Pre-1.6.0 default, saved verbatim by every SaveSettings() -
+                // no longer accurate once a capture can target a non-daily
+                // note (US-025). Only the untouched default migrates; a
+                // user-customized preview is left alone.
+                if (settings_.noteAddPreviewPrefix == L"Add to today's note: ") {
+                    settings_.noteAddPreviewPrefix = quicklaunch::Settings{}.noteAddPreviewPrefix;
+                }
                 readStringSetting(L"LogPrefix", settings_.logPrefix);
                 readStringSetting(L"LogPillLabel", settings_.logPillLabel);
                 readStringSetting(L"LogPreviewPrefix", settings_.logPreviewPrefix);
                 readStringSetting(L"LogHeading", settings_.logHeading);
                 readStringSetting(L"DailyNoteFolderOverride", settings_.dailyNoteFolderOverride);
                 readStringSetting(L"DailyNoteFormatOverride", settings_.dailyNoteFormatOverride);
+                readStringSetting(L"TaskTargetNote", settings_.taskTargetNote);
+                readStringSetting(L"NoteAddTargetNote", settings_.noteAddTargetNote);
+                readStringSetting(L"LogTargetNote", settings_.logTargetNote);
+                // Settings UI only ever saves normalized refs, but the
+                // registry is hand-editable - anything that doesn't
+                // normalize to a note inside the vault is dropped (treated
+                // as unset) rather than trusted as a write target.
+                for (std::wstring* target : {&settings_.taskTargetNote, &settings_.noteAddTargetNote,
+                         &settings_.logTargetNote}) {
+                    std::wstring normalized;
+                    *target = leanlauncher::obsidian::NormalizeTargetNoteRef(*target, normalized)
+                        ? normalized : std::wstring();
+                }
 
                 RegCloseKey(key);
             }
@@ -696,7 +719,138 @@ private:
                 SetRunAtStartup(true);
             }
             LoadRecent();
+            LoadPins();
         }
+    }
+
+    // Pinned results (US-024), persisted like Recent: HKCU\...\Pinned\Pin0..Pin4,
+    // newest first, each value "app|<path>" or "file|<path>" (see EncodePin).
+    void SavePins() {
+        if constexpr (!kUiTest) {
+            HKEY key = nullptr;
+            if (RegCreateKeyExW(HKEY_CURRENT_USER, (std::wstring(kSettingsRegistryPath) + L"\\Pinned").c_str(),
+                    0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+                for (size_t i = 0; i < leanlauncher::pins::kMaxPins; ++i) {
+                    RegDeleteValueW(key, (L"Pin" + std::to_wstring(i)).c_str());
+                }
+                for (size_t i = 0; i < pins_.size(); ++i) {
+                    const std::wstring value = leanlauncher::pins::EncodePin(pins_[i]);
+                    RegSetValueExW(key, (L"Pin" + std::to_wstring(i)).c_str(), 0, REG_SZ,
+                        reinterpret_cast<const BYTE*>(value.c_str()),
+                        static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+                }
+                RegCloseKey(key);
+            }
+        }
+    }
+
+    void LoadPins() {
+        pins_.clear();
+        if constexpr (!kUiTest) {
+            HKEY key = nullptr;
+            if (RegOpenKeyExW(HKEY_CURRENT_USER, (std::wstring(kSettingsRegistryPath) + L"\\Pinned").c_str(),
+                    0, KEY_READ, &key) == ERROR_SUCCESS) {
+                for (size_t i = 0; i < leanlauncher::pins::kMaxPins; ++i) {
+                    wchar_t buffer[MAX_PATH * 2]{};
+                    DWORD size = sizeof(buffer);
+                    leanlauncher::pins::Pin pin;
+                    if (RegGetValueW(key, nullptr, (L"Pin" + std::to_wstring(i)).c_str(), RRF_RT_REG_SZ, nullptr,
+                            buffer, &size) == ERROR_SUCCESS &&
+                        leanlauncher::pins::DecodePin(buffer, pin) &&
+                        leanlauncher::pins::FindPin(pins_, pin.path) < 0) {
+                        pins_.push_back(std::move(pin));
+                    }
+                }
+                RegCloseKey(key);
+            }
+        }
+        RefreshPins();
+    }
+
+    // Rebuilds the per-pin lookup data PinRank() and result assembly use -
+    // on load, after every app rescan, and on pin/unpin; never per keystroke
+    // (NFR-015). A pinned app missing from the current scan (uninstalled)
+    // resolves to npos and is silently left out.
+    void RefreshPins() {
+        pinnedAppIndex_.assign(pins_.size(), static_cast<size_t>(-1));
+        pinnedNames_.clear();
+        for (size_t p = 0; p < pins_.size(); ++p) {
+            if (pins_[p].isApp) {
+                for (size_t i = 0; i < baseAppsCount_ && i < apps_.size(); ++i) {
+                    if (leanlauncher::pins::SamePath(apps_[i].path, pins_[p].path)) {
+                        pinnedAppIndex_[p] = i;
+                        break;
+                    }
+                }
+            }
+            pinnedNames_.push_back(Normalize(fs::path(pins_[p].path).filename().wstring()));
+        }
+    }
+
+    // Pin order of apps_[index] (0 = newest pin), or -1 if it isn't pinned.
+    // At most kMaxPins comparisons - cheap enough for every result row.
+    int PinRank(size_t index) const {
+        if (index >= apps_.size()) return -1;
+        if (index < baseAppsCount_) {
+            for (size_t p = 0; p < pinnedAppIndex_.size(); ++p) {
+                if (pinnedAppIndex_[p] == index) return static_cast<int>(p);
+            }
+            return -1;
+        }
+        const AppEntry& entry = apps_[index];
+        if (entry.category != takeoff::AppCategory::File && entry.category != takeoff::AppCategory::Folder) return -1;
+        for (size_t p = 0; p < pins_.size(); ++p) {
+            if (!pins_[p].isApp && leanlauncher::pins::SamePath(entry.path, pins_[p].path)) return static_cast<int>(p);
+        }
+        return -1;
+    }
+
+    static bool IsPinnable(const AppEntry& app) {
+        return !app.inert && (app.category == takeoff::AppCategory::Application ||
+            app.category == takeoff::AppCategory::System || app.category == takeoff::AppCategory::File ||
+            app.category == takeoff::AppCategory::Folder);
+    }
+
+    // Result row for a pinned file/folder built straight from its saved
+    // path, or false if it no longer exists (stale pins are dropped
+    // silently, never shown as a broken row).
+    bool BuildPinnedFileEntry(size_t pinIndex, AppEntry& entry) const {
+        std::error_code ec;
+        const fs::path path(pins_[pinIndex].path);
+        if (!fs::exists(path, ec)) return false;
+        entry.name = path.filename().wstring();
+        entry.path = pins_[pinIndex].path;
+        entry.normalizedName = pinnedNames_[pinIndex];
+        entry.category = fs::is_directory(path, ec) ? takeoff::AppCategory::Folder : takeoff::AppCategory::File;
+        return true;
+    }
+
+    void TogglePinSelected() {
+        if (!HasResult()) return;
+        const AppEntry& app = apps_[results_[selected_]];
+        if (!IsPinnable(app)) return;
+        const std::wstring path = app.path;
+        const bool isApp = (app.category == takeoff::AppCategory::Application ||
+                            app.category == takeoff::AppCategory::System);
+        const auto result = leanlauncher::pins::TogglePin(pins_, path, isApp);
+        if (result == leanlauncher::pins::PinResult::AtCap) {
+            status_ = L"Unpin one first - up to 5 pins";
+        } else {
+            SavePins();
+            RefreshPins();
+            status_ = (result == leanlauncher::pins::PinResult::Pinned) ? L"Pinned" : L"Unpinned";
+            UpdateResults();
+            // Keep the toggled item selected wherever it moved to.
+            for (size_t i = 0; i < results_.size(); ++i) {
+                if (leanlauncher::pins::SamePath(apps_[results_[i]].path, path)) {
+                    selected_ = static_cast<int>(i);
+                    EnsureVisible();
+                    break;
+                }
+            }
+        }
+        ResetCaret();
+        InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
     void SaveRecent() {
@@ -772,6 +926,7 @@ private:
                 {L"TaskAddEnabled", settings_.taskAddEnabled ? 1u : 0u},
                 {L"NoteAddEnabled", settings_.noteAddEnabled ? 1u : 0u},
                 {L"LogEnabled", settings_.logEnabled ? 1u : 0u},
+                {L"QuickOpenTarget", static_cast<DWORD>(settings_.quickOpenTarget)},
             };
             bool saved = true;
             for (const auto& entry : entries) {
@@ -805,6 +960,9 @@ private:
             writeStringSetting(L"LogHeading", settings_.logHeading);
             writeStringSetting(L"DailyNoteFolderOverride", settings_.dailyNoteFolderOverride);
             writeStringSetting(L"DailyNoteFormatOverride", settings_.dailyNoteFormatOverride);
+            writeStringSetting(L"TaskTargetNote", settings_.taskTargetNote);
+            writeStringSetting(L"NoteAddTargetNote", settings_.noteAddTargetNote);
+            writeStringSetting(L"LogTargetNote", settings_.logTargetNote);
             RegCloseKey(key);
             if (!saved) settingsStatus_ = L"Could not save this setting.";
         }
@@ -1202,9 +1360,13 @@ private:
     // IsRowInCategory/ObsidianRowCount). Each of the five *Summary rows is
     // always shown when Obsidian is enabled; its detail rows only appear
     // while obsidianExpandedSection_ names that section - see
-    // ObsidianVisibleRows(). 40 is the About tab's one row (not part of
-    // "All" - see IsRowInCategory). 41 is the Reset button, handled as a
-    // sentinel row rather than a real settings row.
+    // ObsidianVisibleRows(). 40-43 are later Obsidian additions (capture
+    // target notes - US-025; quick-open target - US-026), numbered after 39
+    // so no existing row ID shifts - like every Obsidian row, their screen
+    // position comes from ObsidianVisibleRows(), not the number. 44 is the
+    // About tab's one row (not part of "All" - see IsRowInCategory). 45 is
+    // the Reset button, handled as a sentinel row rather than a real
+    // settings row.
     // Rows 9-14 are not part of the Obsidian block below - they live in the
     // Search category alongside rows 7-8 - so every Obsidian row constant
     // shifts relative to the row it would otherwise have under a plain
@@ -1240,9 +1402,13 @@ private:
     static constexpr int kRowOverridesSummary = 37;
     static constexpr int kRowDailyNoteFolderOverride = 38;
     static constexpr int kRowDailyNoteFormatOverride = 39;
-    static constexpr int kRowAboutGithubLink = 40;
-    static constexpr int kSettingsMaxRow = 40;
-    static constexpr int kRowResetToDefaults = 41;
+    static constexpr int kRowTaskTargetNote = 40;
+    static constexpr int kRowNoteAddTargetNote = 41;
+    static constexpr int kRowLogTargetNote = 42;
+    static constexpr int kRowQuickOpenTarget = 43;
+    static constexpr int kRowAboutGithubLink = 44;
+    static constexpr int kSettingsMaxRow = 44;
+    static constexpr int kRowResetToDefaults = 45;
 
     // Which of the five Obsidian action blocks is currently expanded, or
     // -1 if all are collapsed. A single int gives accordion behavior for
@@ -1287,6 +1453,7 @@ private:
             rows.push_back(kRowVaultSearchEnabled);
             rows.push_back(kRowVaultSearchPrefix);
             rows.push_back(kRowVaultSearchPillLabel);
+            rows.push_back(kRowQuickOpenTarget);
         }
 
         rows.push_back(kRowTaskSummary);
@@ -1295,6 +1462,7 @@ private:
             rows.push_back(kRowTaskPrefix);
             rows.push_back(kRowTaskPillLabel);
             rows.push_back(kRowTaskPreviewPrefix);
+            rows.push_back(kRowTaskTargetNote);
         }
 
         rows.push_back(kRowNoteAddSummary);
@@ -1303,6 +1471,7 @@ private:
             rows.push_back(kRowNoteAddPrefix);
             rows.push_back(kRowNoteAddPillLabel);
             rows.push_back(kRowNoteAddPreviewPrefix);
+            rows.push_back(kRowNoteAddTargetNote);
         }
 
         rows.push_back(kRowLogSummary);
@@ -1312,6 +1481,7 @@ private:
             rows.push_back(kRowLogPillLabel);
             rows.push_back(kRowLogPreviewPrefix);
             rows.push_back(kRowLogHeading);
+            rows.push_back(kRowLogTargetNote);
         }
 
         rows.push_back(kRowOverridesSummary);
@@ -1428,10 +1598,25 @@ private:
             // 36 header offset + N rows + 16 bottom padding.
             return 36.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
         } else if (settingsCategory_ == SettingsCategory::About) {
-            // 86 = version/author info lines + "LINKS" header offset; 1 row + 16 bottom padding.
-            return 86.0f + kSettingsRowHeight + 16.0f;
+            // INDEX card (US-027) sits below the one-row LINKS card; 2 rows + 16 bottom padding.
+            return AboutIndexCardTop() + 2 * kSettingsRowHeight + 16.0f;
         }
         return 200.0f;
+    }
+
+    // About tab layout: version/author lines, "LINKS" header@66, its one-row
+    // card@86, then the "INDEX" header 18px below that card and its card 20px
+    // below the header - the same header/card spacing the All view uses.
+    static constexpr float AboutIndexHeaderTop() { return 86.0f + kSettingsRowHeight + 18.0f; }
+    static constexpr float AboutIndexCardTop() { return AboutIndexHeaderTop() + 20.0f; }
+
+    // "482113" -> "482,113" for the About tab's index counts.
+    static std::wstring FormatCount(size_t value) {
+        std::wstring digits = std::to_wstring(value);
+        for (int i = static_cast<int>(digits.size()) - 3; i > 0; i -= 3) {
+            digits.insert(static_cast<size_t>(i), 1, L',');
+        }
+        return digits;
     }
 
     float SettingsContentHeight() const {
@@ -1488,6 +1673,7 @@ private:
             settingsScroll_ = newScroll;
             if (vaultDropdownOpen_) CloseVaultDropdown();
             if (webSearchDropdownOpen_) CloseWebSearchDropdown();
+            if (quickOpenDropdownOpen_) CloseQuickOpenDropdown();
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
     }
@@ -1535,6 +1721,8 @@ private:
         vaultDropdownHighlight_ = -1;
         webSearchDropdownOpen_ = false;
         webSearchDropdownHighlight_ = -1;
+        quickOpenDropdownOpen_ = false;
+        quickOpenDropdownHighlight_ = -1;
         obsidianExpandedSection_ = -1;
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
@@ -1569,6 +1757,8 @@ private:
         vaultDropdownHighlight_ = -1;
         webSearchDropdownOpen_ = false;
         webSearchDropdownHighlight_ = -1;
+        quickOpenDropdownOpen_ = false;
+        quickOpenDropdownHighlight_ = -1;
         obsidianExpandedSection_ = -1;
         settingsScroll_ = 0.0f;
         settingsDraggingScroll_ = false;
@@ -1647,11 +1837,28 @@ private:
         }
         const std::wstring query = Normalize(scopedText);
         if (input_.text.empty()) {
-            for (size_t index : recent_) {
-                if (index < apps_.size()) results_.push_back(index);
+            // Pins first (US-024) - pinned files included, a deliberate
+            // exception to this otherwise apps-only view - then the
+            // recency view, skipping anything already shown as a pin.
+            const size_t appCount = apps_.size();
+            for (size_t p = 0; p < pins_.size(); ++p) {
+                if (pins_[p].isApp) {
+                    if (pinnedAppIndex_[p] < appCount) results_.push_back(pinnedAppIndex_[p]);
+                    continue;
+                }
+                AppEntry entry;
+                if (BuildPinnedFileEntry(p, entry)) {
+                    results_.push_back(apps_.size());
+                    apps_.push_back(std::move(entry));
+                }
             }
-            for (size_t i = 0; i < apps_.size(); ++i) {
-                if (std::find(recent_.begin(), recent_.end(), i) == recent_.end()) results_.push_back(i);
+            for (size_t index : recent_) {
+                if (index < appCount && PinRank(index) < 0) results_.push_back(index);
+            }
+            for (size_t i = 0; i < appCount; ++i) {
+                if (std::find(recent_.begin(), recent_.end(), i) == recent_.end() && PinRank(i) < 0) {
+                    results_.push_back(i);
+                }
             }
         } else if (!query.empty()) {
             std::vector<RankedResult> ranked;
@@ -1680,6 +1887,25 @@ private:
                     ranked.push_back({newIdx, item.score});
                 }
             }
+            if (!appSearchOnly) {
+                // A pinned file matching the query must not vanish just
+                // because FileIndex's top 30 didn't include it (US-024).
+                static const std::vector<std::wstring> kNoAliases;
+                for (size_t p = 0; p < pins_.size(); ++p) {
+                    if (pins_[p].isApp) continue;
+                    const int score = takeoff::ScoreApp(pinnedNames_[p], kNoAliases, query, -1);
+                    if (score < 0) continue;
+                    bool present = false;
+                    for (size_t k = baseAppsCount_; k < apps_.size() && !present; ++k) {
+                        present = leanlauncher::pins::SamePath(apps_[k].path, pins_[p].path);
+                    }
+                    AppEntry entry;
+                    if (present || !BuildPinnedFileEntry(p, entry)) continue;
+                    const size_t newIdx = apps_.size();
+                    apps_.push_back(std::move(entry));
+                    ranked.push_back({newIdx, score});
+                }
+            }
             std::sort(ranked.begin(), ranked.end(), [this](const RankedResult& a, const RankedResult& b) {
                 if (a.score != b.score) return a.score > b.score;
                 const auto& appA = apps_[a.appIndex];
@@ -1694,6 +1920,10 @@ private:
                 return appA.name < appB.name;
             });
             for (const auto& item : ranked) results_.push_back(item.appIndex);
+            // Matching pins rise to the top in pin order; non-matching pins
+            // simply aren't in results_. Command rows (calculator, capture,
+            // web, vault search) are inserted above this afterwards.
+            leanlauncher::pins::MovePinnedToFront(results_, [this](size_t index) { return PinRank(index); });
             topAppScore = ranked.empty() ? -1 : ranked.front().score;
         }
         if (!input_.text.empty()) {
@@ -1721,11 +1951,8 @@ private:
                 entry.name = L"Set up your vault in Settings";
                 entry.iconPath = L"notepad.exe";
             } else {
-                int year = 0, month = 0, day = 0;
-                leanlauncher::obsidian::GetTodayYmd(year, month, day);
-                entry.path = leanlauncher::obsidian::ResolveTodayPath(
-                    dailyNoteConfig_, obsidianVaultPath_, year, month, day);
-                entry.name = settings_.taskPreviewPrefix + taskText;
+                entry.path = CaptureTargetPath(settings_.taskTargetNote);
+                entry.name = settings_.taskPreviewPrefix + taskText + CaptureTargetSuffix(settings_.taskTargetNote);
                 entry.iconPath = L"notepad.exe";
             }
             entry.normalizedName = Normalize(entry.name);
@@ -1748,11 +1975,8 @@ private:
                 entry.name = L"Set up your vault in Settings";
                 entry.iconPath = L"notepad.exe";
             } else {
-                int year = 0, month = 0, day = 0;
-                leanlauncher::obsidian::GetTodayYmd(year, month, day);
-                entry.path = leanlauncher::obsidian::ResolveTodayPath(
-                    dailyNoteConfig_, obsidianVaultPath_, year, month, day);
-                entry.name = settings_.noteAddPreviewPrefix + noteText;
+                entry.path = CaptureTargetPath(settings_.noteAddTargetNote);
+                entry.name = settings_.noteAddPreviewPrefix + noteText + CaptureTargetSuffix(settings_.noteAddTargetNote);
                 entry.iconPath = L"notepad.exe";
             }
             entry.normalizedName = Normalize(entry.name);
@@ -1773,11 +1997,8 @@ private:
                 entry.name = L"Set up your vault in Settings";
                 entry.iconPath = L"notepad.exe";
             } else {
-                int year = 0, month = 0, day = 0;
-                leanlauncher::obsidian::GetTodayYmd(year, month, day);
-                entry.path = leanlauncher::obsidian::ResolveTodayPath(
-                    dailyNoteConfig_, obsidianVaultPath_, year, month, day);
-                entry.name = settings_.logPreviewPrefix + logText;
+                entry.path = CaptureTargetPath(settings_.logTargetNote);
+                entry.name = settings_.logPreviewPrefix + logText + CaptureTargetSuffix(settings_.logTargetNote);
                 entry.iconPath = L"notepad.exe";
             }
             entry.normalizedName = Normalize(entry.name);
@@ -1812,6 +2033,40 @@ private:
                 entry.category = AppCategory::NoteJump;
                 entry.name = L"Set up your vault in Settings";
                 entry.iconPath = L"notepad.exe";
+                entry.normalizedName = Normalize(entry.name);
+                const size_t idx = apps_.size();
+                apps_.push_back(std::move(entry));
+                results_.insert(results_.begin(), idx);
+            } else if (noteQuery == L".") {
+                // Quick open (US-026): exactly "<prefix> ." opens the note
+                // chosen in Settings instead of searching. Never creates a
+                // missing note - that case gets an inert row instead.
+                const std::wstring target = leanlauncher::obsidian::SelectQuickOpenTarget(
+                    settings_.quickOpenTarget, settings_.taskTargetNote, settings_.noteAddTargetNote,
+                    settings_.logTargetNote);
+                std::wstring noteRef = target;
+                if (noteRef.empty()) {
+                    int year = 0, month = 0, day = 0;
+                    leanlauncher::obsidian::GetTodayYmd(year, month, day);
+                    noteRef = leanlauncher::obsidian::TodayNoteRef(dailyNoteConfig_, year, month, day);
+                }
+                AppEntry entry;
+                entry.category = AppCategory::NoteJump;
+                entry.iconPath = L"notepad.exe";
+                // One stat of a single known path, and only for this exact
+                // query - not the per-keystroke vault walk NoteIndex exists
+                // to avoid. The index itself can't answer this reliably: a
+                // daily note created seconds ago may not be indexed yet.
+                std::error_code existsEc;
+                if (fs::exists(leanlauncher::obsidian::ResolveNoteAbsolutePath(obsidianVaultPath_, noteRef), existsEc)) {
+                    entry.name = target.empty() ? std::wstring(L"Open today's daily note") : L"Open " + target;
+                    entry.path = noteRef;
+                    entry.parameters = fs::path(noteRef).filename().wstring();
+                } else {
+                    entry.name = target.empty() ? std::wstring(L"Today's daily note doesn't exist yet")
+                                                : target + L" doesn't exist yet";
+                    entry.inert = true;
+                }
                 entry.normalizedName = Normalize(entry.name);
                 const size_t idx = apps_.size();
                 apps_.push_back(std::move(entry));
@@ -1868,6 +2123,8 @@ private:
         vaultDropdownHighlight_ = -1;
         webSearchDropdownOpen_ = false;
         webSearchDropdownHighlight_ = -1;
+        quickOpenDropdownOpen_ = false;
+        quickOpenDropdownHighlight_ = -1;
         obsidianExpandedSection_ = -1;
         settingsStatus_.clear();
         settings_ = quicklaunch::Settings{};
@@ -2063,6 +2320,65 @@ private:
         return -1;
     }
 
+    static constexpr int kQuickOpenTargetCount = 4;
+
+    static const wchar_t* QuickOpenTargetLabel(int choice) {
+        switch (choice) {
+        case 1: return L"Task target";
+        case 2: return L"Append target";
+        case 3: return L"Log target";
+        default: return L"Daily note";
+        }
+    }
+
+    // Overlay picker for the Quick open row (US-026) - same fixed-list
+    // pattern as the web search engine dropdown, with four entries indexed
+    // by settings_.quickOpenTarget.
+    float QuickOpenDropdownTop() const {
+        const float desired =
+            SettingsRowTop(kRowQuickOpenTarget) + kSettingsRowHeight + (kSettingsHeaderHeight - settingsScroll_);
+        const float listHeight = static_cast<float>(kQuickOpenTargetCount) * kVaultDropdownItemHeight;
+        const float viewportTop = kSettingsHeaderHeight;
+        const float viewportBottom = FooterTop();
+        return std::clamp(desired, viewportTop, (std::max)(viewportTop, viewportBottom - listHeight));
+    }
+
+    void OpenQuickOpenDropdown() {
+        if (editingRow_ >= 0) CancelEditingRow();
+        quickOpenDropdownOpen_ = true;
+        quickOpenDropdownHighlight_ = std::clamp(settings_.quickOpenTarget, 0, kQuickOpenTargetCount - 1);
+        settingsStatus_.clear();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void CloseQuickOpenDropdown() {
+        quickOpenDropdownOpen_ = false;
+        quickOpenDropdownHighlight_ = -1;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void SelectQuickOpenDropdownItem(int index) {
+        CloseQuickOpenDropdown();
+        if (index < 0 || index >= kQuickOpenTargetCount) return;
+        settings_.quickOpenTarget = index;
+        SaveSettings();
+    }
+
+    // Mirrors WebSearchDropdownItemAtPoint.
+    int QuickOpenDropdownItemAtPoint(float x, float y) const {
+        if (!quickOpenDropdownOpen_) return -1;
+        if (x < 16.0f || x > width_ - 16.0f) return -1;
+        if (y < kSettingsHeaderHeight || y >= FooterTop()) return -1;
+        const float listTop = QuickOpenDropdownTop();
+        for (int i = 0; i < kQuickOpenTargetCount; ++i) {
+            const float itemTop = listTop + static_cast<float>(i) * kVaultDropdownItemHeight;
+            if (y >= itemTop && y < itemTop + kVaultDropdownItemHeight) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     // Expands the given section, collapsing whichever other one was open;
     // expanding the already-expanded section collapses it instead.
     void ToggleObsidianSection(int section) {
@@ -2102,6 +2418,9 @@ private:
         case kRowLogHeading: return &settings_.logHeading;
         case kRowDailyNoteFolderOverride: return &settings_.dailyNoteFolderOverride;
         case kRowDailyNoteFormatOverride: return &settings_.dailyNoteFormatOverride;
+        case kRowTaskTargetNote: return &settings_.taskTargetNote;
+        case kRowNoteAddTargetNote: return &settings_.noteAddTargetNote;
+        case kRowLogTargetNote: return &settings_.logTargetNote;
         default: return nullptr;
         }
     }
@@ -2110,6 +2429,10 @@ private:
         return row == kRowVaultSearchPrefix || row == kRowTaskPrefix || row == kRowNoteAddPrefix ||
             row == kRowLogPrefix || row == kRowWebSearchPrefix || row == kRowFileSearchPrefix ||
             row == kRowAppSearchPrefix;
+    }
+
+    bool IsTargetNoteRow(int row) const {
+        return row == kRowTaskTargetNote || row == kRowNoteAddTargetNote || row == kRowLogTargetNote;
     }
 
     void BeginEditingRow(int row, const std::wstring& currentValue) {
@@ -2159,9 +2482,21 @@ private:
                 return;  // stay in edit mode so the user can fix it
             }
         }
+        // Target notes (US-025): empty/whitespace clears the target (back to
+        // the daily note); anything else must normalize to a note inside the
+        // vault, or the edit is rejected rather than silently falling back.
+        const bool isTargetNoteRow = IsTargetNoteRow(editingRow_);
+        std::wstring normalizedTarget;
+        if (isTargetNoteRow &&
+            settingsEdit_.text.find_first_not_of(L" \t") != std::wstring::npos &&
+            !leanlauncher::obsidian::NormalizeTargetNoteRef(settingsEdit_.text, normalizedTarget)) {
+            settingsStatus_ = L"Use a note path inside the vault, e.g. Inbox/Tasks";
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;  // stay in edit mode so the user can fix it
+        }
         const bool wasLogHeadingRow = (editingRow_ == kRowLogHeading);
         const bool wasWebSearchEngineRow = (editingRow_ == kRowWebSearchEngine);
-        *field = settingsEdit_.text;
+        *field = isTargetNoteRow ? normalizedTarget : settingsEdit_.text;
         editingRow_ = -1;
         if (wasWebSearchEngineRow) {
             settings_.webSearchEngineName = takeoff::DeriveSearchEngineName(*field);
@@ -2218,6 +2553,10 @@ private:
         }
         if (row == kRowWebSearchEngine) {
             OpenWebSearchDropdown();
+            return;
+        }
+        if (row == kRowQuickOpenTarget) {
+            OpenQuickOpenDropdown();
             return;
         }
         if (row == kRowAboutGithubLink) {
@@ -2545,6 +2884,22 @@ private:
                 if (key == VK_ESCAPE) { CloseWebSearchDropdown(); return 0; }
                 return 0;
             }
+            if (quickOpenDropdownOpen_) {
+                if (key == VK_UP) {
+                    quickOpenDropdownHighlight_ =
+                        (quickOpenDropdownHighlight_ - 1 + kQuickOpenTargetCount) % kQuickOpenTargetCount;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                if (key == VK_DOWN) {
+                    quickOpenDropdownHighlight_ = (quickOpenDropdownHighlight_ + 1) % kQuickOpenTargetCount;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return 0;
+                }
+                if (key == VK_RETURN) { SelectQuickOpenDropdownItem(quickOpenDropdownHighlight_); return 0; }
+                if (key == VK_ESCAPE) { CloseQuickOpenDropdown(); return 0; }
+                return 0;
+            }
             if (editingRow_ >= 0) {
                 if (key == VK_RETURN) { CommitEditingRow(); return 0; }
                 if (key == VK_ESCAPE) { CancelEditingRow(); return 0; }
@@ -2641,7 +2996,7 @@ private:
         if (MatchesActionsHotkey(key, control, shift, alt)) { ToggleActions(); return 0; }
         if (actionsOpen_) {
             if (key == VK_UP || key == VK_DOWN || key == VK_TAB) {
-                actionSelected_ = (actionSelected_ + (key == VK_UP || (key == VK_TAB && shift) ? 2 : 1)) % 3;
+                actionSelected_ = (actionSelected_ + (key == VK_UP || (key == VK_TAB && shift) ? ActionCount() - 1 : 1)) % ActionCount();
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (key == VK_RETURN) RunAction(actionSelected_);
             return 0;
@@ -2778,12 +3133,30 @@ private:
         }
     }
 
+    // Where a capture action writes (US-025): its target note if one is set,
+    // otherwise today's daily note. Target refs are normalized on save/load,
+    // so they're trusted here.
+    std::wstring CaptureTargetPath(const std::wstring& targetRef) const {
+        if (!targetRef.empty()) {
+            return leanlauncher::obsidian::ResolveNoteAbsolutePath(obsidianVaultPath_, targetRef);
+        }
+        int year = 0, month = 0, day = 0;
+        leanlauncher::obsidian::GetTodayYmd(year, month, day);
+        return leanlauncher::obsidian::ResolveTodayPath(dailyNoteConfig_, obsidianVaultPath_, year, month, day);
+    }
+
+    // Preview-row suffix naming a non-default destination, e.g. " \u2192 Inbox/Tasks".
+    static std::wstring CaptureTargetSuffix(const std::wstring& targetRef) {
+        return targetRef.empty() ? std::wstring() : L" \u2192 " + targetRef;
+    }
+
     bool HasResult() const { return selected_ >= 0 && selected_ < static_cast<int>(results_.size()); }
 
     void LaunchSelected(bool asAdministrator = false) {
         if (!HasResult()) return;
         const size_t index = results_[selected_];
         const AppEntry& app = apps_[index];
+        if (app.inert) return;  // informational row, e.g. a quick-open note that doesn't exist yet
         if (app.category == takeoff::AppCategory::Calculator) {
             CopyText(app.path);
             Hide();
@@ -2971,7 +3344,7 @@ private:
     }
 
     void ToggleActions() {
-        if (!HasResult()) return;
+        if (!HasResult() || apps_[results_[selected_]].inert) return;
         actionsOpen_ = !actionsOpen_;
         actionsPositioned_ = false;
         actionSelected_ = 0;
@@ -2980,7 +3353,7 @@ private:
     }
 
     void OpenActionsAt(float x, float y) {
-        if (!HasResult()) return;
+        if (!HasResult() || apps_[results_[selected_]].inert) return;
         actionsOpen_ = true;
         actionsX_ = x;
         actionsY_ = y;
@@ -3122,8 +3495,12 @@ private:
                 ResetCaret();
                 InvalidateRect(hwnd_, nullptr, FALSE);
                 return;
+            } else if (action == 3) {
+                TogglePinSelected();
+                return;
             }
         }
+        if (action == 3 && IsPinnable(app)) { TogglePinSelected(); return; }
         if (action == 0) { LaunchSelected(true); return; }
         const bool copied = CopyText(action == 1 ? app.name : app.path);
         status_ = copied ? (action == 1 ? L"App name copied" : L"Launch path copied")
@@ -3132,9 +3509,15 @@ private:
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
+    // 3 actions for most rows; pinnable rows (apps, files, folders) add
+    // Pin/Unpin as a 4th (US-024).
+    int ActionCount() const {
+        return (HasResult() && IsPinnable(apps_[results_[selected_]])) ? 4 : 3;
+    }
+
     D2D1_RECT_F ActionsRect(float x, float y) const {
         constexpr float kActionsWidth = 276.0f;
-        constexpr float kActionsHeight = 152.0f;
+        const float kActionsHeight = 32.0f + ActionCount() * 36.0f + 12.0f;
         const float minLeft = 8.0f;
         const float maxLeft = (std::max)(minLeft, width_ - kActionsWidth - 8.0f);
         const float minTop = 8.0f;
@@ -3226,6 +3609,21 @@ private:
                     return;
                 }
             }
+            // Same close-on-click-away behavior for the Quick open picker.
+            if (quickOpenDropdownOpen_) {
+                const int clickedItem = QuickOpenDropdownItemAtPoint(x, y);
+                if (clickedItem >= 0) {
+                    SelectQuickOpenDropdownItem(clickedItem);
+                    return;
+                }
+                const bool clickedTrigger = (SettingsRowAtPoint(x, y) == kRowQuickOpenTarget);
+                CloseQuickOpenDropdown();
+                if (clickedTrigger) {
+                    settingsSelected_ = kRowQuickOpenTarget;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return;
+                }
+            }
             if (y < kSettingsHeaderHeight) {
                 if (x < 46.0f) {
                     CloseSettings();
@@ -3304,7 +3702,7 @@ private:
         if (actionsOpen_) {
             const auto rect = ActionsRect();
             if (x >= rect.left && x <= rect.right && y >= rect.top + 32 && y < rect.bottom - 6) {
-                RunAction(std::clamp(static_cast<int>((y - rect.top - 32) / 36), 0, 2));
+                RunAction(std::clamp(static_cast<int>((y - rect.top - 32) / 36), 0, ActionCount() - 1));
             } else if (PointInAdminAction(x, y)) {
                 actionsOpen_ = false;
                 actionsPositioned_ = false;
@@ -3426,6 +3824,7 @@ private:
                         settingsScroll_ = newScroll;
                         if (vaultDropdownOpen_) CloseVaultDropdown();
                         if (webSearchDropdownOpen_) CloseWebSearchDropdown();
+                        if (quickOpenDropdownOpen_) CloseQuickOpenDropdown();
                         InvalidateRect(hwnd_, nullptr, FALSE);
                     }
                 }
@@ -3443,6 +3842,14 @@ private:
                 const int hoveredItem = WebSearchDropdownItemAtPoint(x, y);
                 if (hoveredItem >= 0 && hoveredItem != webSearchDropdownHighlight_) {
                     webSearchDropdownHighlight_ = hoveredItem;
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                }
+                return;
+            }
+            if (quickOpenDropdownOpen_) {
+                const int hoveredItem = QuickOpenDropdownItemAtPoint(x, y);
+                if (hoveredItem >= 0 && hoveredItem != quickOpenDropdownHighlight_) {
+                    quickOpenDropdownHighlight_ = hoveredItem;
                     InvalidateRect(hwnd_, nullptr, FALSE);
                 }
                 return;
@@ -3490,7 +3897,7 @@ private:
         if (actionsOpen_) {
             const auto rect = ActionsRect();
             if (x >= rect.left && x <= rect.right && y >= rect.top + 32 && y < rect.bottom - 6) {
-                actionSelected_ = std::clamp(static_cast<int>((y - rect.top - 32) / 36), 0, 2);
+                actionSelected_ = std::clamp(static_cast<int>((y - rect.top - 32) / 36), 0, ActionCount() - 1);
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
         } else if (const int result = ResultAtPoint(x, y); result >= 0 && result != selected_) {
@@ -4130,9 +4537,10 @@ private:
                     }
                 }
                 Text(app.name, D2D1::RectF(60, top, width_ - 158, top + 40), resultFormat_.Get(), textColor);
+                const bool pinned = PinRank(results_[i]) >= 0;
                 const bool recent = input_.text.empty() &&
                     std::find(recent_.begin(), recent_.end(), results_[i]) != recent_.end();
-                const wchar_t* categoryLabel = recent ? L"Recent"
+                const wchar_t* categoryLabel = pinned ? L"Pinned" : recent ? L"Recent"
                     : (app.category == takeoff::AppCategory::System ? L"System"
                     : (app.category == takeoff::AppCategory::Folder ? L"Folder"
                     : (app.category == takeoff::AppCategory::File ? L"File"
@@ -4470,8 +4878,9 @@ private:
         const bool isWebSearch = (app.category == takeoff::AppCategory::WebSearch);
         const bool isFileOrFolder = (app.category == takeoff::AppCategory::File ||
                                      app.category == takeoff::AppCategory::Folder);
-        const wchar_t* appLabels[] = {L"Open as Administrator", L"Copy app name", L"Copy launch path"};
-        const wchar_t* fileLabels[] = {L"Open", L"Open containing folder", L"Copy file path"};
+        const wchar_t* pinLabel = PinRank(results_[selected_]) >= 0 ? L"Unpin" : L"Pin";
+        const wchar_t* appLabels[] = {L"Open as Administrator", L"Copy app name", L"Copy launch path", pinLabel};
+        const wchar_t* fileLabels[] = {L"Open", L"Open containing folder", L"Copy file path", pinLabel};
         const wchar_t* calcLabels[] = {L"Copy result", L"Copy calculation", L"Open Windows Calculator"};
         const wchar_t* taskLabels[] = {L"Add task", L"Copy task text", L"Open today's note"};
         const wchar_t* noteAddLabels[] = {L"Add to note", L"Copy text", L"Open today's note"};
@@ -4485,7 +4894,8 @@ private:
             : (isNoteJump ? noteLabels
             : (isWebSearch ? webSearchLabels
             : (isFileOrFolder ? fileLabels : appLabels))))));
-        for (int i = 0; i < 3; ++i) {
+        const int actionCount = ActionCount();
+        for (int i = 0; i < actionCount; ++i) {
             const float top = rect.top + 32 + i * 36;
             const auto row = D2D1::RectF(rect.left + 6, top, rect.right - 6, top + 34);
             if (i == actionSelected_) {
@@ -4614,7 +5024,7 @@ private:
                 settings_.taskAddEnabled, settings_.taskPrefix, settings_.taskPillLabel);
             return;
         case kRowTaskAddEnabled:
-            DrawSettingsRow(row, top, L"Add task enabled", L"Append a checklist item to today's daily note",
+            DrawSettingsRow(row, top, L"Add task enabled", L"Append a checklist item to today's daily note or the target note",
                 {}, true, settings_.taskAddEnabled);
             return;
         case kRowTaskPrefix:
@@ -4635,7 +5045,7 @@ private:
             return;
         case kRowNoteAddEnabled:
             DrawSettingsRow(row, top, L"Add to note enabled",
-                L"Append a plain line (not a checklist item) to today's daily note",
+                L"Append a plain line (not a checklist item) to today's daily note or the target note",
                 {}, true, settings_.noteAddEnabled);
             return;
         case kRowNoteAddPrefix:
@@ -4648,7 +5058,7 @@ private:
             return;
         case kRowNoteAddPreviewPrefix:
             DrawSettingsRow(row, top, L"Add to note preview",
-                L"Text shown before what you typed, e.g. \"Add to today's note: back from the gym\"",
+                L"Text shown before what you typed, e.g. \"Add to note: back from the gym\"",
                 settings_.noteAddPreviewPrefix, false, false, false, true);
             return;
         case kRowLogSummary:
@@ -4657,7 +5067,7 @@ private:
             return;
         case kRowLogEnabled:
             DrawSettingsRow(row, top, L"Log enabled",
-                L"Insert a timestamped line after a heading in today's daily note",
+                L"Insert a timestamped line after a heading in today's daily note or the target note",
                 {}, true, settings_.logEnabled);
             return;
         case kRowLogPrefix:
@@ -4676,6 +5086,27 @@ private:
         case kRowLogHeading:
             DrawSettingsRow(row, top, L"Log heading", L"Exact heading line to insert after, e.g. \"## Log\"",
                 settings_.logHeading, false, false, false, true);
+            return;
+        case kRowQuickOpenTarget:
+            DrawSettingsRow(row, top, L"Quick open (" + settings_.vaultSearchPrefix + L" .)",
+                quickOpenDropdownOpen_ ? L"Tap to collapse"
+                    : L"Note opened in Obsidian when you type the vault search prefix, a space, and a dot",
+                QuickOpenTargetLabel(settings_.quickOpenTarget), false, false, true);
+            return;
+        case kRowTaskTargetNote:
+            DrawSettingsRow(row, top, L"Add task target note",
+                L"Leave empty for today's daily note, or a vault path, e.g. Inbox/Tasks",
+                settings_.taskTargetNote, false, false, false, true);
+            return;
+        case kRowNoteAddTargetNote:
+            DrawSettingsRow(row, top, L"Add to note target note",
+                L"Leave empty for today's daily note, or a vault path, e.g. Scratch",
+                settings_.noteAddTargetNote, false, false, false, true);
+            return;
+        case kRowLogTargetNote:
+            DrawSettingsRow(row, top, L"Log target note",
+                L"Leave empty for today's daily note, or a vault path, e.g. Logs/Work Log",
+                settings_.logTargetNote, false, false, false, true);
             return;
         case kRowOverridesSummary: {
             const bool hasOverride = !settings_.dailyNoteFolderOverride.empty() ||
@@ -4803,6 +5234,43 @@ private:
         target_->PopAxisAlignedClip();
     }
 
+    // Mirrors DrawWebSearchDropdown() for the Quick open row (US-026).
+    void DrawQuickOpenDropdown() {
+        if (!quickOpenDropdownOpen_) return;
+        const float viewportTop = kSettingsHeaderHeight;
+        const float viewportBottom = FooterTop();
+        target_->PushAxisAlignedClip(
+            D2D1::RectF(0, viewportTop, width_, viewportBottom),
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+        const float listTop = QuickOpenDropdownTop();
+        const float listHeight = static_cast<float>(kQuickOpenTargetCount) * kVaultDropdownItemHeight;
+        const auto listRect = D2D1::RectF(16, listTop, width_ - 16, listTop + listHeight);
+
+        Fill(listRect, highContrast_ ? SystemColor(COLOR_BTNFACE) : D2D1::ColorF(0x1C1C1E, 0.98f), 8.0f);
+        brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.14f));
+        target_->DrawRoundedRectangle(D2D1::RoundedRect(listRect, 8.0f, 8.0f), brush_.Get(), 1.0f);
+
+        for (int i = 0; i < kQuickOpenTargetCount; ++i) {
+            const float itemTop = listTop + static_cast<float>(i) * kVaultDropdownItemHeight;
+            const bool highlighted = (i == quickOpenDropdownHighlight_);
+            const bool current = (i == settings_.quickOpenTarget);
+            if (highlighted) {
+                Fill(D2D1::RectF(18, itemTop + 1, width_ - 18, itemTop + kVaultDropdownItemHeight - 1),
+                    highContrast_ ? SystemColor(COLOR_HIGHLIGHT) : D2D1::ColorF(1, 1, 1, 0.10f), 5.0f);
+            }
+            const auto textColor = highContrast_ && highlighted ? SystemColor(COLOR_HIGHLIGHTTEXT)
+                : current ? Foreground() : Muted();
+            Text(QuickOpenTargetLabel(i), D2D1::RectF(32, itemTop, width_ - 44, itemTop + kVaultDropdownItemHeight),
+                hintFormat_.Get(), textColor);
+            if (current) {
+                Text(L"\u2713", D2D1::RectF(width_ - 44, itemTop, width_ - 24, itemTop + kVaultDropdownItemHeight),
+                    hintFormat_.Get(), textColor, DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+        }
+        target_->PopAxisAlignedClip();
+    }
+
     void DrawSettings() {
         const float viewportTop = kSettingsHeaderHeight;
         const float viewportBottom = FooterTop();
@@ -4917,6 +5385,32 @@ private:
             DrawSettingsRow(kRowAboutGithubLink, 86.0f + offsetY, L"View on GitHub",
                 L"Open the Lean Launcher repository in your browser",
                 L"github.com/sdkasper/lean-launcher", false, false, true);
+
+            // Index counts (US-027): read-only lines, not selectable rows.
+            // Both are snapshot sizes behind a lock - cheap to read per paint.
+            // A first pass still in flight shows "Indexing..." rather than a
+            // partial number (no live counter - US-018 AC #2 stays declined).
+            std::wstring filesValue = L"Off";
+            if (settings_.enableFileSearch) {
+                const auto& fileIndex = FileIndex::Instance();
+                filesValue = fileIndex.IsReady() ? FormatCount(fileIndex.Count()) : std::wstring(L"Indexing\u2026");
+            }
+            std::wstring notesValue = L"No vault";
+            if (settings_.obsidianEnabled && !obsidianVaultPath_.empty()) {
+                const auto& noteIndex = leanlauncher::obsidian::NoteIndex::Instance();
+                notesValue = noteIndex.IsReady() ? FormatCount(noteIndex.Count()) : std::wstring(L"Indexing\u2026");
+            }
+            drawCard(L"INDEX", AboutIndexHeaderTop(), AboutIndexCardTop(), 2);
+            const std::pair<const wchar_t*, const std::wstring*> indexLines[] = {
+                {L"Indexed files", &filesValue},
+                {L"Indexed notes", &notesValue},
+            };
+            for (int i = 0; i < 2; ++i) {
+                const float lineTop = AboutIndexCardTop() + i * kSettingsRowHeight + offsetY;
+                const auto lineRect = D2D1::RectF(32, lineTop, width_ - 32, lineTop + kSettingsRowHeight);
+                Text(indexLines[i].first, lineRect, resultFormat_.Get(), Foreground());
+                Text(*indexLines[i].second, lineRect, hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
+            }
         }
 
         target_->PopAxisAlignedClip();
@@ -5023,6 +5517,7 @@ private:
 
         DrawVaultDropdown();
         DrawWebSearchDropdown();
+        DrawQuickOpenDropdown();
     }
 
     void Paint() {
@@ -5072,6 +5567,13 @@ private:
     std::unordered_set<std::wstring> iconPending_;
     std::vector<AppEntry> apps_;
     std::vector<size_t> results_, recent_;
+    // Pinned results (US-024), newest first. pinnedAppIndex_[i] is pins_[i]'s
+    // index into apps_ (npos for file pins, or an app missing from the
+    // current scan); pinnedNames_[i] is its normalized file name, used to
+    // match pinned files while typing. Both are rebuilt by RefreshPins().
+    std::vector<leanlauncher::pins::Pin> pins_;
+    std::vector<size_t> pinnedAppIndex_;
+    std::vector<std::wstring> pinnedNames_;
     std::vector<std::wstring> recentPaths_;
     size_t baseAppsCount_ = 0;
     SearchInput input_;
@@ -5098,6 +5600,8 @@ private:
     // Index into [0, kWebSearchPresetCount] while the dropdown is open -
     // kWebSearchPresetCount itself is the trailing "Custom" entry.
     int webSearchDropdownHighlight_ = -1;
+    bool quickOpenDropdownOpen_ = false;
+    int quickOpenDropdownHighlight_ = -1;  // index into QuickOpenTargetLabel while open
     int obsidianExpandedSection_ = -1;  // kSection* of the expanded action block, or -1
     // Memoized ObsidianVisibleRows() result; empty means "not built yet".
     mutable std::vector<int> obsidianRowsCache_;

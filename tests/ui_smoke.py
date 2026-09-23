@@ -1,6 +1,6 @@
 """Interactive Windows smoke test. Captures only our fixture window.
 
-Usage: py tests/ui_smoke.py cmake/Release/TakeoffUiTests.exe
+Usage: py tests/ui_smoke.py cmake/Release/LeanLauncherUiTests.exe
 Requires Pillow and tkinter. Does not launch apps or use the clipboard.
 """
 
@@ -91,12 +91,12 @@ def capture(name=None):
 
 
 exe = Path(sys.argv[1]).resolve()
-check(exe.name in ("TakeoffUiTests.exe", "QuickLaunchUiTests.exe"), "isolated test executable")
-check(not u.FindWindowW("TakeoffTestWindow", None), "no existing test instance")
+check(exe.name == "LeanLauncherUiTests.exe", "isolated test executable")
+check(not u.FindWindowW("LeanLauncherTestWindow", None), "no existing test instance")
 output = exe.parent.parent / "ui-smoke"
 output.mkdir(exist_ok=True)
 background = tk.Tk()
-background.title("Takeoff test backdrop")
+background.title("Lean Launcher test backdrop")
 background.overrideredirect(True)
 background.geometry(f"{u.GetSystemMetrics(0)}x{u.GetSystemMetrics(1)}+0+0")
 canvas = tk.Canvas(background, highlightthickness=0, bg="#8998ac")
@@ -110,7 +110,7 @@ process = subprocess.Popen([str(exe)])
 try:
     hwnd = None
     for _ in range(100):
-        hwnd = u.FindWindowW("TakeoffTestWindow", None)
+        hwnd = u.FindWindowW("LeanLauncherTestWindow", None)
         if hwnd and u.IsWindowVisible(hwnd):
             break
         pump(0.05)

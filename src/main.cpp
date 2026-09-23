@@ -35,6 +35,7 @@
 #include "obsidian_config.h"
 #include "daily_note.h"
 #include "note_index.h"
+#include "pins.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -84,6 +85,9 @@ struct AppEntry {
     std::vector<std::wstring> aliases;
     std::wstring iconPath;
     std::wstring parameters;
+    // Informational row only - activating it (Enter, click, actions menu)
+    // does nothing. E.g. a quick-open note that does not exist yet.
+    bool inert = false;
 };
 
 struct RankedResult {

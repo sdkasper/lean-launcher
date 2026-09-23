@@ -6,6 +6,7 @@
 #include "../src/obsidian_config.h"
 #include "../src/daily_note.h"
 #include "../src/note_index.h"
+#include "../src/pins.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -2241,6 +2242,119 @@ int main() {
             "ResolveTodayPath falls back to YYYY-MM-DD for an unsupported format instead of garbling the filename");
     }
 
+    // IsUnsafeVaultRelativePath: a rooted-but-driveless path ("\Windows")
+    // is not is_absolute() on Windows, yet joining it onto the vault path
+    // replaces the vault's root directory - it must count as unsafe too.
+    Check(IsUnsafeVaultRelativePath(L"\\Windows"), "IsUnsafeVaultRelativePath rejects a rooted driveless path");
+    Check(IsUnsafeVaultRelativePath(L"/Daily"), "IsUnsafeVaultRelativePath rejects a leading forward slash");
+    Check(IsUnsafeVaultRelativePath(L"C:Daily"), "IsUnsafeVaultRelativePath rejects a drive-relative path");
+    Check(!IsUnsafeVaultRelativePath(L"06 BJ/10 Daily"), "IsUnsafeVaultRelativePath accepts a plain relative folder");
+
+    // NormalizeTargetNoteRef (US-025): user-entered capture target -> the
+    // vault-relative, forward-slash, extension-less ref NoteIndex uses.
+    {
+        std::wstring ref;
+        Check(NormalizeTargetNoteRef(L"Inbox/Tasks", ref) && ref == L"Inbox/Tasks",
+            "NormalizeTargetNoteRef keeps a plain relative ref");
+        Check(NormalizeTargetNoteRef(L"Inbox/Tasks.md", ref) && ref == L"Inbox/Tasks",
+            "NormalizeTargetNoteRef strips a trailing .md");
+        Check(NormalizeTargetNoteRef(L"Inbox\\Tasks", ref) && ref == L"Inbox/Tasks",
+            "NormalizeTargetNoteRef converts backslashes to forward slashes");
+        Check(NormalizeTargetNoteRef(L"  Scratch.MD  ", ref) && ref == L"Scratch",
+            "NormalizeTargetNoteRef trims spaces and strips .md case-insensitively");
+        Check(!NormalizeTargetNoteRef(L"", ref), "NormalizeTargetNoteRef rejects empty");
+        Check(!NormalizeTargetNoteRef(L"   ", ref), "NormalizeTargetNoteRef rejects whitespace-only");
+        Check(!NormalizeTargetNoteRef(L".md", ref), "NormalizeTargetNoteRef rejects an extension with no name");
+        Check(!NormalizeTargetNoteRef(L"Inbox/", ref), "NormalizeTargetNoteRef rejects a folder with no note name");
+        Check(!NormalizeTargetNoteRef(L"C:\\Temp\\x", ref), "NormalizeTargetNoteRef rejects an absolute path");
+        Check(!NormalizeTargetNoteRef(L"\\\\server\\share\\x", ref), "NormalizeTargetNoteRef rejects a UNC path");
+        Check(!NormalizeTargetNoteRef(L"/Inbox/Tasks", ref), "NormalizeTargetNoteRef rejects a rooted path");
+        Check(!NormalizeTargetNoteRef(L"../outside", ref), "NormalizeTargetNoteRef rejects .. traversal");
+        Check(!NormalizeTargetNoteRef(L"Inbox/../../x", ref), "NormalizeTargetNoteRef rejects embedded .. traversal");
+    }
+
+    // TodayNoteRef (US-026): the daily note as a vault-relative ref, built
+    // from the same folder/format rules as ResolveTodayPath.
+    {
+        DailyNoteConfig config;
+        config.folder = L"06 BJ\\10 Daily";
+        config.format = L"YYYY/MM/YYYY-MM-DD";
+        Check(TodayNoteRef(config, 2026, 9, 14) == L"06 BJ/10 Daily/2026/09/2026-09-14",
+            "TodayNoteRef joins folder + formatted name with forward slashes, no extension");
+        DailyNoteConfig rootConfig;
+        rootConfig.format = L"YYYY-MM-DD";
+        Check(TodayNoteRef(rootConfig, 2026, 9, 14) == L"2026-09-14", "TodayNoteRef with no folder");
+        DailyNoteConfig badFormat;
+        badFormat.format = L"MMMM-DD-YYYY";
+        Check(TodayNoteRef(badFormat, 2026, 9, 14) == L"2026-09-14",
+            "TodayNoteRef falls back to YYYY-MM-DD like ResolveTodayPath");
+    }
+
+    // SelectQuickOpenTarget (US-026): which configured target `o .` opens;
+    // empty means "use today's daily note".
+    Check(SelectQuickOpenTarget(0, L"T", L"A", L"L").empty(), "SelectQuickOpenTarget 0 = daily note");
+    Check(SelectQuickOpenTarget(1, L"T", L"A", L"L") == L"T", "SelectQuickOpenTarget 1 = task target");
+    Check(SelectQuickOpenTarget(2, L"T", L"A", L"L") == L"A", "SelectQuickOpenTarget 2 = append target");
+    Check(SelectQuickOpenTarget(3, L"T", L"A", L"L") == L"L", "SelectQuickOpenTarget 3 = log target");
+    Check(SelectQuickOpenTarget(1, L"", L"A", L"L").empty(), "SelectQuickOpenTarget falls back when the target is unset");
+    Check(SelectQuickOpenTarget(9, L"T", L"A", L"L").empty(), "SelectQuickOpenTarget out of range = daily note");
+
+    // Pins (US-024): toggle, cap, identity, and the pinned-first reorder.
+    {
+        using namespace leanlauncher::pins;
+        std::vector<Pin> pins;
+        Check(TogglePin(pins, L"C:\\Apps\\Code.lnk", true) == PinResult::Pinned && pins.size() == 1,
+            "TogglePin pins a new path");
+        Check(TogglePin(pins, L"D:\\Docs\\plan.md", false) == PinResult::Pinned && pins.front().path == L"D:\\Docs\\plan.md",
+            "TogglePin puts the newest pin first");
+        Check(FindPin(pins, L"c:\\apps\\CODE.lnk") == 1, "FindPin matches paths case-insensitively");
+        Check(FindPin(pins, L"C:\\Apps\\Other.lnk") == -1, "FindPin reports -1 for an unpinned path");
+        Check(TogglePin(pins, L"C:\\APPS\\code.lnk", true) == PinResult::Unpinned && pins.size() == 1 &&
+                FindPin(pins, L"C:\\Apps\\Code.lnk") == -1,
+            "TogglePin on a pinned path unpins it");
+        for (int i = 0; i < 4; ++i) TogglePin(pins, L"C:\\x" + std::to_wstring(i), false);
+        Check(pins.size() == kMaxPins, "five pins fit the cap");
+        Check(TogglePin(pins, L"C:\\sixth", false) == PinResult::AtCap && pins.size() == kMaxPins &&
+                FindPin(pins, L"C:\\sixth") == -1,
+            "TogglePin refuses a sixth pin without dropping an existing one");
+        Check(TogglePin(pins, L"C:\\x0", false) == PinResult::Unpinned && pins.size() == kMaxPins - 1,
+            "unpinning still works at the cap");
+
+        // Serialization: "app|" / "file|" prefix keeps the kind; '|' can't
+        // appear in a Windows path.
+        Check(EncodePin({L"C:\\a.lnk", true}) == L"app|C:\\a.lnk", "EncodePin app");
+        Check(EncodePin({L"D:\\b.md", false}) == L"file|D:\\b.md", "EncodePin file");
+        Pin decoded;
+        Check(DecodePin(L"file|D:\\b.md", decoded) && !decoded.isApp && decoded.path == L"D:\\b.md", "DecodePin file");
+        Check(DecodePin(L"app|shell:AppsFolder\\X!App", decoded) && decoded.isApp &&
+                decoded.path == L"shell:AppsFolder\\X!App",
+            "DecodePin app");
+        Check(!DecodePin(L"C:\\no-prefix", decoded) && !DecodePin(L"app|", decoded), "DecodePin rejects malformed values");
+
+        // MovePinnedToFront: pinned results move up in pin order, everything
+        // else keeps its relative order, nothing is duplicated or lost.
+        std::vector<size_t> results = {10, 11, 12, 13, 14};
+        MovePinnedToFront(results, [](size_t idx) { return idx == 13 ? 0 : idx == 11 ? 1 : -1; });
+        Check(results == std::vector<size_t>({13, 11, 10, 12, 14}), "MovePinnedToFront orders pins by rank, keeps the rest stable");
+        std::vector<size_t> none = {1, 2, 3};
+        MovePinnedToFront(none, [](size_t) { return -1; });
+        Check(none == std::vector<size_t>({1, 2, 3}), "MovePinnedToFront leaves an unpinned list untouched");
+
+        // NFR-015: the reorder runs on every keystroke - it must stay linear
+        // and cheap even at full-disk result counts.
+        std::vector<size_t> big(500000);
+        for (size_t i = 0; i < big.size(); ++i) big[i] = i;
+        const auto pinStart = std::chrono::steady_clock::now();
+        MovePinnedToFront(big, [](size_t idx) {
+            return idx == 499999 ? 0 : idx == 250000 ? 1 : idx == 7 ? 2 : -1;
+        });
+        const auto pinMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - pinStart).count();
+        Check(big[0] == 499999 && big[1] == 250000 && big[2] == 7 && big[3] == 0 && big.size() == 500000,
+            "MovePinnedToFront correct at 500K results");
+        Check(pinMs < 20, "MovePinnedToFront stays under 20ms at 500K results (NFR-015)");
+    }
+
     {
         using namespace leanlauncher::obsidian;
         wchar_t tempDirBuf[MAX_PATH]{};
@@ -2381,6 +2495,59 @@ int main() {
             "to the enabled Journals config");
 
         fs::remove_all(tempVault, staleEc);
+    }
+
+    {
+        // Regression: the Lazy Plugin Loader community plugin removes every
+        // lazily-started plugin from community-plugins.json and loads it
+        // itself, recording each one's startupType in its own data.json.
+        // Journals set to "instant" there is enabled even though
+        // community-plugins.json no longer lists it - otherwise captures
+        // silently land in a new vault-root daily note. Mirrors this
+        // project's own D:\Lean Notes vault (dualConfigs on, desktop section).
+        using namespace leanlauncher::obsidian;
+        const std::string dualJson =
+            R"({"dualConfigs":true,"plugins":{"journals":{"startupType":"disabled"}},)"
+            R"("desktop":{"defaultStartupType":"instant","plugins":{"journals":{"startupType":"instant"},)"
+            R"("periodic-notes":{"startupType":"disabled"}}},)"
+            R"("mobile":{"plugins":{"journals":{"startupType":"disabled"}}}})";
+        Check(IsLazyPluginEnabledInConfig(dualJson, "journals"),
+            "Lazy Plugins: dualConfigs reads the desktop section, where journals is instant");
+        Check(!IsLazyPluginEnabledInConfig(dualJson, "periodic-notes"),
+            "Lazy Plugins: startupType disabled means disabled");
+        Check(!IsLazyPluginEnabledInConfig(dualJson, "dataview"),
+            "Lazy Plugins: a plugin with no entry is not reported as enabled");
+        const std::string singleJson =
+            R"({"dualConfigs":false,"desktop":{"plugins":{"journals":{"startupType":"disabled"}}},)"
+            R"("plugins":{"journals":{"startupType":"short"}}})";
+        Check(IsLazyPluginEnabledInConfig(singleJson, "journals"),
+            "Lazy Plugins: without dualConfigs the top-level plugins section wins, not desktop's");
+        Check(!IsLazyPluginEnabledInConfig("", "journals"), "Lazy Plugins: empty config means disabled");
+
+        wchar_t tempDirBuf[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tempDirBuf);
+        const fs::path tempVault = fs::path(tempDirBuf) / L"LeanLauncherLazyPluginsTest";
+        std::error_code lazyEc;
+        fs::remove_all(tempVault, lazyEc);
+        fs::create_directories(tempVault / L".obsidian" / L"plugins" / L"journals", lazyEc);
+        fs::create_directories(tempVault / L".obsidian" / L"plugins" / L"lazy-plugins", lazyEc);
+        {
+            std::ofstream(tempVault / L".obsidian" / L"core-plugins.json") << R"({"daily-notes": false})";
+            std::ofstream(tempVault / L".obsidian" / L"community-plugins.json")
+                << R"(["lazy-plugins","dataview"])";
+            std::ofstream(tempVault / L".obsidian" / L"plugins" / L"lazy-plugins" / L"data.json") << dualJson;
+            std::ofstream(tempVault / L".obsidian" / L"plugins" / L"journals" / L"data.json")
+                << R"({"journals":{"Journal daily":{"write":{"type":"day"},)"
+                << R"("dateFormat":"YYYY/MM/YYYY-MM-DD","folder":"06 BJ/10 Daily"}}})";
+        }
+        Check(IsCommunityPluginEnabled(tempVault.wstring(), "journals"),
+            "IsCommunityPluginEnabled honors a plugin started by Lazy Plugins");
+        Check(!IsCommunityPluginEnabled(tempVault.wstring(), "periodic-notes"),
+            "IsCommunityPluginEnabled honors Lazy Plugins' disabled startupType");
+        const DailyNoteConfig config = ReadDailyNoteConfig(tempVault.wstring());
+        Check(config.found && config.folder == L"06 BJ/10 Daily" && config.format == L"YYYY/MM/YYYY-MM-DD",
+            "ReadDailyNoteConfig finds the Journals config when Journals is lazily loaded");
+        fs::remove_all(tempVault, lazyEc);
     }
 
     {

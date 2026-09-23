@@ -8,6 +8,7 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
@@ -90,15 +91,32 @@ inline bool IsDateFormatFullySupported(const std::wstring& format) {
 // handshake) and ".." traversal segments. `folder`/`format` come straight out
 // of the vault's own .obsidian/daily-notes.json (or Periodic Notes/Journals
 // plugin config) with no validation upstream - a synced/shared vault could
-// have a tampered config, so this codebase must not trust it.
+// have a tampered config, so this codebase must not trust it. Rooted paths
+// without a drive ("\Windows") and drive-relative ones ("C:Daily") aren't
+// is_absolute() on Windows, but joining either onto the vault path discards
+// the vault's own root - so any root name/directory counts as unsafe too.
 inline bool IsUnsafeVaultRelativePath(const std::wstring& value) {
     if (value.empty()) return false;
     const fs::path p(value);
-    if (p.is_absolute()) return true;
+    if (p.is_absolute() || p.has_root_name() || p.has_root_directory()) return true;
     for (const auto& part : p) {
         if (part == L"..") return true;
     }
     return false;
+}
+
+// Today's daily-note name (no extension) under config.format. Falls back to
+// the safe default format whenever the configured format contains anything
+// FormatDateTokens can't fully account for (e.g. a Moment.js token like
+// MMMM), or is itself unsafe (e.g. "../../secret"), rather than silently
+// producing a garbled or traversal-y filename. Expanding token support is
+// out of scope here.
+inline std::wstring FormatTodayNoteName(const DailyNoteConfig& config, int year, int month, int day) {
+    const bool formatIsSafe = !IsUnsafeVaultRelativePath(config.format);
+    const std::wstring& formatToUse =
+        (formatIsSafe && IsDateFormatFullySupported(config.format)) ? config.format
+                                                                     : std::wstring(L"YYYY-MM-DD");
+    return FormatDateTokens(formatToUse, year, month, day);
 }
 
 inline std::wstring ResolveTodayPath(const DailyNoteConfig& config, const std::wstring& vaultPath,
@@ -107,17 +125,57 @@ inline std::wstring ResolveTodayPath(const DailyNoteConfig& config, const std::w
     if (!config.folder.empty() && !IsUnsafeVaultRelativePath(config.folder)) {
         base /= config.folder;
     }
-    // Fall back to the safe default format whenever the configured format
-    // contains anything FormatDateTokens can't fully account for (e.g. a
-    // Moment.js token like MMMM), or is itself unsafe (e.g. "../../secret"),
-    // rather than silently producing a garbled or traversal-y filename.
-    // Expanding token support is out of scope here.
-    const bool formatIsSafe = !IsUnsafeVaultRelativePath(config.format);
-    const std::wstring& formatToUse =
-        (formatIsSafe && IsDateFormatFullySupported(config.format)) ? config.format
-                                                                     : std::wstring(L"YYYY-MM-DD");
-    const std::wstring filename = FormatDateTokens(formatToUse, year, month, day) + L".md";
+    const std::wstring filename = FormatTodayNoteName(config, year, month, day) + L".md";
     return (base / filename).wstring();
+}
+
+// Today's daily note as a vault-relative ref (forward slashes, no ".md") -
+// the same shape NoteIndex produces and OpenNoteInObsidian expects. Follows
+// ResolveTodayPath's folder/format rules exactly (US-026).
+inline std::wstring TodayNoteRef(const DailyNoteConfig& config, int year, int month, int day) {
+    std::wstring ref;
+    if (!config.folder.empty() && !IsUnsafeVaultRelativePath(config.folder)) {
+        ref = config.folder;
+        if (ref.back() != L'/' && ref.back() != L'\\') ref += L'/';
+    }
+    ref += FormatTodayNoteName(config, year, month, day);
+    std::replace(ref.begin(), ref.end(), L'\\', L'/');
+    return ref;
+}
+
+// Normalizes a user-entered capture target note ("Inbox/Tasks",
+// "Inbox\Tasks.md", " Scratch.MD ") into a vault-relative ref: trimmed,
+// forward slashes, no ".md". Returns false for anything that isn't a note
+// inside the vault - empty, absolute/UNC/rooted, ".." traversal, or no note
+// name at all ("Inbox/", ".md") - so callers can reject it at save time
+// instead of silently writing somewhere else (US-025).
+inline bool NormalizeTargetNoteRef(const std::wstring& target, std::wstring& outRef) {
+    const size_t first = target.find_first_not_of(L" \t");
+    if (first == std::wstring::npos) return false;
+    const size_t last = target.find_last_not_of(L" \t");
+    std::wstring ref = target.substr(first, last - first + 1);
+    if (IsUnsafeVaultRelativePath(ref)) return false;
+    std::replace(ref.begin(), ref.end(), L'\\', L'/');
+    if (ref.size() >= 3 && _wcsicmp(ref.c_str() + ref.size() - 3, L".md") == 0) {
+        ref.resize(ref.size() - 3);
+    }
+    if (ref.empty() || ref.back() == L'/') return false;
+    if (fs::path(ref).filename() == L".") return false;
+    outRef = std::move(ref);
+    return true;
+}
+
+// Which note `o .` opens (US-026): QuickOpenTarget 1/2/3 pick the task,
+// append, or log target; 0 - or a target that isn't set - means today's
+// daily note, signalled by an empty return.
+inline std::wstring SelectQuickOpenTarget(int choice, const std::wstring& taskTarget,
+    const std::wstring& noteAddTarget, const std::wstring& logTarget) {
+    switch (choice) {
+    case 1: return taskTarget;
+    case 2: return noteAddTarget;
+    case 3: return logTarget;
+    default: return {};
+    }
 }
 
 inline void GetTodayYmd(int& year, int& month, int& day) {

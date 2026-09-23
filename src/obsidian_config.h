@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -316,16 +317,91 @@ inline bool IsCorePluginEnabled(const std::wstring& vaultPath, std::string_view 
     return json.compare(pos, 5, "false") != 0;
 }
 
-// Returns true only if `.obsidian/community-plugins.json` (a flat JSON array
-// of enabled plugin-folder ids) contains `pluginId`. Unlike core plugins,
-// community plugins are off by default, so a missing file or missing id
-// both mean disabled.
+// Byte offset just past the ':' of `"key":` where that key sits directly in
+// the object `obj` starts with (brace/bracket depth 1), or npos. Unlike
+// ExtractStringField's first-match search, a same-named key nested deeper
+// (e.g. "plugins" inside "desktop") can't win - Lazy Plugins' config repeats
+// the same key names at several levels. String-literal aware, so braces or
+// quotes inside values don't throw the depth count off.
+inline size_t FindTopLevelKey(std::string_view obj, std::string_view key) {
+    const std::string pattern = "\"" + std::string(key) + "\"";
+    int depth = 0;
+    bool inString = false;
+    for (size_t i = 0; i < obj.size(); ++i) {
+        const char c = obj[i];
+        if (inString) {
+            if (c == '\\') ++i;
+            else if (c == '"') inString = false;
+            continue;
+        }
+        if (c == '"') {
+            if (depth == 1 && obj.compare(i, pattern.size(), pattern) == 0) {
+                size_t j = i + pattern.size();
+                while (j < obj.size() && std::isspace(static_cast<unsigned char>(obj[j]))) ++j;
+                if (j < obj.size() && obj[j] == ':') return j + 1;
+            }
+            inString = true;
+        } else if (c == '{' || c == '[') {
+            ++depth;
+        } else if (c == '}' || c == ']') {
+            --depth;
+        }
+    }
+    return std::string_view::npos;
+}
+
+// The object value of top-level `key` in `obj`, or empty if the key is
+// missing or its value isn't an object.
+inline std::string_view TopLevelObject(std::string_view obj, std::string_view key) {
+    const size_t pos = FindTopLevelKey(obj, key);
+    if (pos == std::string_view::npos) return {};
+    size_t start = 0, end = 0;
+    if (!FindBalancedObject(obj, pos, start, end)) return {};
+    for (size_t k = pos; k < start; ++k) {
+        if (!std::isspace(static_cast<unsigned char>(obj[k]))) return {};
+    }
+    return obj.substr(start, end - start);
+}
+
+// Whether the Lazy Plugin Loader's data.json starts `pluginId`. That plugin
+// takes every lazily-started plugin out of community-plugins.json and loads
+// it itself, recording plugins.<id>.startupType ("instant"/"short"/"long",
+// or "disabled"). With dualConfigs on, the desktop section's plugins map is
+// the one that applies here (this is a Windows app); otherwise the top-level
+// one. A plugin with no entry isn't reported as enabled - same conservative
+// default as a missing community-plugins.json id.
+inline bool IsLazyPluginEnabledInConfig(std::string_view json, std::string_view pluginId) {
+    bool dualConfigs = false;
+    size_t dualPos = FindTopLevelKey(json, "dualConfigs");
+    if (dualPos != std::string_view::npos) {
+        while (dualPos < json.size() && std::isspace(static_cast<unsigned char>(json[dualPos]))) ++dualPos;
+        dualConfigs = json.compare(dualPos, 4, "true") == 0;
+    }
+    const std::string_view scope = dualConfigs ? TopLevelObject(json, "desktop") : json;
+    const std::string_view entry = TopLevelObject(TopLevelObject(scope, "plugins"), pluginId);
+    if (entry.empty()) return false;
+    std::wstring startupType;
+    if (!ExtractStringField(entry, "startupType", startupType)) return false;
+    return startupType != L"disabled";
+}
+
+// Returns true if `.obsidian/community-plugins.json` (a flat JSON array of
+// enabled plugin-folder ids) contains `pluginId`, or - when the Lazy Plugin
+// Loader is itself enabled - if that loader starts it (see
+// IsLazyPluginEnabledInConfig). Unlike core plugins, community plugins are
+// off by default, so a missing file or missing id both mean disabled.
 inline bool IsCommunityPluginEnabled(const std::wstring& vaultPath, std::string_view pluginId) {
     const fs::path base(vaultPath);
     const std::string json = ReadFileUtf8(base / L".obsidian" / L"community-plugins.json");
     if (json.empty()) return false;
     const std::string idPattern = "\"" + std::string(pluginId) + "\"";
-    return json.find(idPattern) != std::string::npos;
+    if (json.find(idPattern) != std::string::npos) return true;
+    if (pluginId != "lazy-plugins" && json.find("\"lazy-plugins\"") != std::string::npos) {
+        const std::string lazyJson =
+            ReadFileUtf8(base / L".obsidian" / L"plugins" / L"lazy-plugins" / L"data.json");
+        return IsLazyPluginEnabledInConfig(lazyJson, pluginId);
+    }
+    return false;
 }
 
 // Reads the daily-notes plugin config for a vault, falling back to the

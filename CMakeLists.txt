@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(LeanLauncher VERSION 1.5.5 LANGUAGES CXX)
+project(LeanLauncher VERSION 1.6.0 LANGUAGES CXX)
 
 function(add_launcher target)
 add_executable(${target} WIN32
@@ -13,6 +13,7 @@ add_executable(${target} WIN32
     src/obsidian_config.h
     src/daily_note.h
     src/note_index.h
+    src/pins.h
     src/LeanLauncher.manifest
     src/LeanLauncher.rc
 )

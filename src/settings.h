@@ -77,7 +77,7 @@ struct Settings {
 
     std::wstring noteAddPrefix = L"a";
     std::wstring noteAddPillLabel = L"Note";
-    std::wstring noteAddPreviewPrefix = L"Add to today's note: ";
+    std::wstring noteAddPreviewPrefix = L"Add to note: ";
 
     std::wstring logPrefix = L"l";
     std::wstring logPillLabel = L"Log";
@@ -91,6 +91,17 @@ struct Settings {
     // plugin config (existing ReadDailyNoteConfig behavior, unchanged).
     std::wstring dailyNoteFolderOverride;
     std::wstring dailyNoteFormatOverride;
+
+    // Per-action capture target notes (US-025): vault-relative refs as
+    // produced by NormalizeTargetNoteRef ("Inbox/Tasks", no .md). Empty =
+    // write to today's daily note, the pre-existing behavior.
+    std::wstring taskTargetNote;
+    std::wstring noteAddTargetNote;
+    std::wstring logTargetNote;
+
+    // What "<vault prefix> ." opens (US-026): 0 daily note, 1 task target,
+    // 2 append target, 3 log target - see SelectQuickOpenTarget.
+    int quickOpenTarget = 0;
 };
 
 inline std::wstring KeyName(uint16_t vk) {

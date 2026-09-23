@@ -10,6 +10,22 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.6.0] - 2026-09-23
+
+### Added
+- **Capture target notes** - task (`t`), note (`a`), and log (`l`) capture can each write to a specific note (e.g. `Inbox/Tasks`) instead of today's daily note, configured per action under Settings > Obsidian. Leave a field empty to keep using the daily note. Paths outside the vault are rejected when saving, and the capture preview now names a non-default destination.
+- **Quick open with `o .`** - typing the vault search prefix followed by a dot opens today's daily note in Obsidian, or the task/note/log target note chosen in the new "Quick open" setting. If the note doesn't exist yet, the result says so and nothing is created.
+- **Pinned results** - pin up to 5 apps, files, or folders via the actions menu (`Ctrl+K` → Pin). Pinned items lead the empty search box (pinned files included) and rise to the top of results whenever they match the query. Pins persist across restarts; uninstalled apps and deleted files are dropped silently.
+- **Index counts in the About tab** - Settings > About shows how many files and vault notes are currently indexed.
+
+### Changed
+- The default "Add to note" preview text is now "Add to note:" (was "Add to today's note:"), since a capture can now target a note other than the daily note. A customized preview is left unchanged.
+
+### Fixed
+- **Captures created a new daily note in the vault root when the Lazy Plugin Loader was in use** - Lazy Plugin Loader removes lazily-started plugins (such as Journals) from `community-plugins.json`, so Lean Launcher treated them as disabled and fell back to the vault root. Plugin detection now also reads the Lazy Plugin Loader's own startup settings.
+- **Daily-note folder settings could point outside the vault** - a rooted (`\folder`) or drive-relative (`C:folder`) value in a vault's daily-notes config wasn't recognized as unsafe and, joined onto the vault path, escaped it. Such values are now rejected like absolute paths and `..` segments.
+- The UI smoke test script (`tests/ui_smoke.py`) now targets the current `LeanLauncherUiTests.exe` build output and window class.
+
 ## [1.5.5] - 2026-09-22
 
 ### Fixed
