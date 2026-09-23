@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <b>⚡ &lt; ~500 KB binary</b> &nbsp;&bull;&nbsp;
+  <b>⚡ &lt; <1 MB binary</b> &nbsp;&bull;&nbsp;
   <b>🧠 ~10 MB RAM</b> &nbsp;&bull;&nbsp;
   <b>🚀 &lt; 1 ms search</b> &nbsp;&bull;&nbsp;
   <b>🔒 Zero telemetry</b>
