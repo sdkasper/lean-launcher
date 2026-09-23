@@ -1943,7 +1943,8 @@ private:
         }
         std::wstring taskText;
         if (settings_.obsidianEnabled && settings_.taskAddEnabled &&
-            leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.taskPrefix, taskText)) {
+            leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.taskPrefix, taskText) &&
+            !leanlauncher::obsidian::SplitCaptureLines(taskText).empty()) {
             AppEntry entry;
             entry.category = AppCategory::TaskAdd;
             entry.parameters = taskText;
@@ -1952,7 +1953,7 @@ private:
                 entry.iconPath = L"notepad.exe";
             } else {
                 entry.path = CaptureTargetPath(settings_.taskTargetNote);
-                entry.name = settings_.taskPreviewPrefix + taskText + CaptureTargetSuffix(settings_.taskTargetNote);
+                entry.name = settings_.taskPreviewPrefix + leanlauncher::obsidian::CapturePreviewText(taskText) + CaptureTargetSuffix(settings_.taskTargetNote);
                 entry.iconPath = L"notepad.exe";
             }
             entry.normalizedName = Normalize(entry.name);
@@ -1967,7 +1968,8 @@ private:
         }
         std::wstring noteText;
         if (settings_.obsidianEnabled && settings_.noteAddEnabled &&
-            leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.noteAddPrefix, noteText)) {
+            leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.noteAddPrefix, noteText) &&
+            !leanlauncher::obsidian::SplitCaptureLines(noteText).empty()) {
             AppEntry entry;
             entry.category = AppCategory::NoteAdd;
             entry.parameters = noteText;
@@ -1976,7 +1978,7 @@ private:
                 entry.iconPath = L"notepad.exe";
             } else {
                 entry.path = CaptureTargetPath(settings_.noteAddTargetNote);
-                entry.name = settings_.noteAddPreviewPrefix + noteText + CaptureTargetSuffix(settings_.noteAddTargetNote);
+                entry.name = settings_.noteAddPreviewPrefix + leanlauncher::obsidian::CapturePreviewText(noteText) + CaptureTargetSuffix(settings_.noteAddTargetNote);
                 entry.iconPath = L"notepad.exe";
             }
             entry.normalizedName = Normalize(entry.name);
@@ -1989,7 +1991,8 @@ private:
         }
         std::wstring logText;
         if (settings_.obsidianEnabled && settings_.logEnabled &&
-            leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.logPrefix, logText)) {
+            leanlauncher::obsidian::TryParsePrefix(input_.text, settings_.logPrefix, logText) &&
+            !leanlauncher::obsidian::SplitCaptureLines(logText).empty()) {
             AppEntry entry;
             entry.category = AppCategory::LogAdd;
             entry.parameters = logText;
@@ -1998,7 +2001,7 @@ private:
                 entry.iconPath = L"notepad.exe";
             } else {
                 entry.path = CaptureTargetPath(settings_.logTargetNote);
-                entry.name = settings_.logPreviewPrefix + logText + CaptureTargetSuffix(settings_.logTargetNote);
+                entry.name = settings_.logPreviewPrefix + leanlauncher::obsidian::CapturePreviewText(logText) + CaptureTargetSuffix(settings_.logTargetNote);
                 entry.iconPath = L"notepad.exe";
             }
             entry.normalizedName = Normalize(entry.name);
@@ -3099,6 +3102,7 @@ private:
             }
         }
         CloseClipboard();
+        value = leanlauncher::obsidian::PastedTextForInput(value);
         if (!value.empty()) { input_.Insert(value); OnQueryChanged(); }
     }
 

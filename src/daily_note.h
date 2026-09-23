@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #include "obsidian_config.h"
 
@@ -186,26 +187,103 @@ inline void GetTodayYmd(int& year, int& month, int& day) {
     day = st.wDay;
 }
 
-// Strips embedded CR/LF from `text` so a pasted multi-line entry can never
-// split into more than one line/list item.
-inline std::wstring StripLineBreaks(std::wstring_view text) {
-    std::wstring clean;
-    clean.reserve(text.size());
-    for (wchar_t ch : text) {
-        if (ch == L'\r' || ch == L'\n') continue;
-        clean.push_back(ch);
+// Splits capture text into its lines (US-028). The search box is single-line,
+// so a break is written as `\n` or ` // ` (spaces around it are dropped);
+// real CR/LF/CRLF also count in case one arrives some other way. `\\n` is the
+// escape for a literal backslash-n; every other backslash is kept, so
+// `C:\temp` survives. Trailing spaces are trimmed from each line (two of them
+// would be a Markdown hard break), then empty lines at the start and end are
+// dropped - so a capture that is only breaks comes back empty.
+inline std::vector<std::wstring> SplitCaptureLines(std::wstring_view text) {
+    std::vector<std::wstring> lines(1);
+    auto breakLine = [&lines] { lines.emplace_back(); };
+    for (size_t i = 0; i < text.size(); ++i) {
+        const wchar_t ch = text[i];
+        if (ch == L'\r') {
+            if (i + 1 < text.size() && text[i + 1] == L'\n') ++i;
+            breakLine();
+        } else if (ch == L'\n') {
+            breakLine();
+        } else if (ch == L'\\' && i + 2 < text.size() && text[i + 1] == L'\\' && text[i + 2] == L'n') {
+            lines.back() += L"\\n";
+            i += 2;
+        } else if (ch == L'\\' && i + 1 < text.size() && text[i + 1] == L'n') {
+            breakLine();
+            ++i;
+        } else if (ch == L' ' && text.substr(i, 4) == L" // ") {
+            breakLine();
+            i += 3;
+            while (i + 1 < text.size() && text[i + 1] == L' ') ++i;
+        } else {
+            lines.back().push_back(ch);
+        }
     }
-    return clean;
+    for (std::wstring& line : lines) {
+        while (!line.empty() && std::iswspace(line.back())) line.pop_back();
+    }
+    auto first = std::find_if(lines.begin(), lines.end(), [](const std::wstring& l) { return !l.empty(); });
+    auto last = std::find_if(lines.rbegin(), lines.rend(), [](const std::wstring& l) { return !l.empty(); }).base();
+    if (first >= last) return {};
+    return std::vector<std::wstring>(first, last);
+}
+
+// The capture preview row's version of the text: lines joined with " ⏎ ",
+// built from the same split as the write so the two can't disagree.
+inline std::wstring CapturePreviewText(std::wstring_view text) {
+    std::wstring preview;
+    for (const std::wstring& line : SplitCaptureLines(text)) {
+        if (!preview.empty()) preview += L" \u23CE ";
+        preview += line;
+    }
+    return preview;
+}
+
+// The search box drops control characters, which used to glue pasted lines
+// together ("line1line2"). Paste runs clipboard text through this first:
+// breaks at the ends are dropped (copying one line usually brings its
+// newline along) and the rest become `\n`, which captures turn back into
+// real line breaks.
+inline std::wstring PastedTextForInput(std::wstring_view text) {
+    const size_t start = text.find_first_not_of(L"\r\n");
+    if (start == std::wstring_view::npos) return {};
+    const size_t end = text.find_last_not_of(L"\r\n");
+    std::wstring result;
+    for (size_t i = start; i <= end; ++i) {
+        if (text[i] == L'\r' || text[i] == L'\n') {
+            if (text[i] == L'\r' && i + 1 <= end && text[i + 1] == L'\n') ++i;
+            result += L"\\n";
+        } else {
+            result.push_back(text[i]);
+        }
+    }
+    return result;
+}
+
+// Writes `lead` + the first line, then each extra line indented 2 spaces (the
+// content column after "- ") so Obsidian keeps it inside the same list item.
+// Blank extra lines are dropped - they would split the list.
+inline std::wstring BuildListItem(const std::wstring& lead, std::wstring_view text) {
+    const std::vector<std::wstring> lines = SplitCaptureLines(text);
+    std::wstring item = lead + (lines.empty() ? std::wstring() : lines[0]) + L"\n";
+    for (size_t i = 1; i < lines.size(); ++i) {
+        const size_t start = lines[i].find_first_not_of(L" \t");
+        if (start == std::wstring::npos) continue;
+        item += L"  " + lines[i].substr(start) + L"\n";
+    }
+    return item;
 }
 
 // Builds a Markdown checklist line for one task.
 inline std::wstring BuildTaskLine(std::wstring_view text) {
-    return L"- [ ] " + StripLineBreaks(text) + L"\n";
+    return BuildListItem(L"- [ ] ", text);
 }
 
-// Builds a plain text line (no bullet, no checklist) for the "a " prefix.
+// Builds plain text (no bullet, no checklist) for the "a " prefix: each line
+// as written, blank middle lines kept.
 inline std::wstring BuildPlainLine(std::wstring_view text) {
-    return StripLineBreaks(text) + L"\n";
+    std::wstring plain;
+    for (const std::wstring& line : SplitCaptureLines(text)) plain += line + L"\n";
+    return plain.empty() ? std::wstring(L"\n") : plain;
 }
 
 // Forward declaration: FormatTimeHHMM is defined below (after
@@ -216,7 +294,7 @@ inline std::wstring FormatTimeHHMM();
 
 // Builds a timestamped log line: "- HH:MM: <text>\n".
 inline std::wstring BuildLogLine(std::wstring_view text) {
-    return L"- " + FormatTimeHHMM() + L": " + StripLineBreaks(text) + L"\n";
+    return BuildListItem(L"- " + FormatTimeHHMM() + L": ", text);
 }
 
 // Returns the ATX heading level (count of leading '#' characters) of `line`,

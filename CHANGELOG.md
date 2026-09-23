@@ -10,6 +10,15 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [Unreleased]
+
+### Added
+- **Multi-line captures** - `\n` or ` // ` in a task (`t`), note (`a`), or log (`l`) capture starts a new line, e.g. `t buy milk // oat, 1 litre`. Extra lines of a task or log entry are indented two spaces under its bullet so Obsidian keeps it one list item (blank extra lines are dropped); note captures keep each line, including blank ones in the middle. The capture preview shows each break as `⏎`. `\\n` writes a literal `\n`; every other backslash is kept as typed. A capture that is only line breaks is treated as empty.
+
+### Fixed
+- **Pasted multi-line text was glued into one line** (`line1line2`) - the search box dropped the line breaks. Pasted line breaks now become `\n`, so a capture writes them as real lines; breaks at the start and end of the pasted text are dropped, so pasting a single copied line into a normal search is unaffected.
+- **File search was about 3x over its 20ms latency budget on large drives** (listed under 1.5.0's Known Limitations). Name matching allocated two strings for nearly every indexed file on every keystroke, and nothing skipped names that couldn't match. Name scoring no longer allocates, each indexed name carries a character summary that rules out impossible matches before scoring, and search stops collecting results that can't make the top of the list. On a synthetic 500,000-file index a typical name query dropped from ~67ms to ~13ms, and a query that matches every file runs in ~19ms. Scores are unchanged - a new test checks the new scorer against a frozen copy of the old one over 26,820 name/query pairs.
+
 ## [1.6.1] - 2026-09-23
 
 ### Fixed

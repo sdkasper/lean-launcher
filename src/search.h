@@ -53,34 +53,66 @@ inline std::wstring Normalize(std::wstring_view value) {
     return normalized;
 }
 
-inline std::wstring Condense(std::wstring_view value) {
-    std::wstring condensed;
-    condensed.reserve(value.size());
-    for (wchar_t ch : value) {
-        if (ch != L' ') condensed.push_back(ch);
+// Same result as `Condense(a) == Condense(b)` with a non-empty condensed
+// form, but without building either string. MatchScore runs this for nearly
+// every file name (Normalize turns the extension dot into a space), and the
+// two allocations were most of its cost at full-disk scale (NFR-014).
+inline bool CondensedEqualNonEmpty(std::wstring_view a, std::wstring_view b) {
+    size_t i = 0;
+    size_t j = 0;
+    bool any = false;
+    for (;;) {
+        while (i < a.size() && a[i] == L' ') ++i;
+        while (j < b.size() && b[j] == L' ') ++j;
+        if (i == a.size() || j == b.size()) return any && i == a.size() && j == b.size();
+        if (a[i] != b[j]) return false;
+        any = true;
+        ++i;
+        ++j;
     }
-    return condensed;
 }
 
+// The target's initials are its first character plus every non-space
+// character that follows a space. Matches when the query equals them
+// (exact) or is a prefix of them. Walks the initials in place instead of
+// collecting them into a string.
 inline bool MatchAcronym(std::wstring_view target, std::wstring_view query, bool& exact) {
     exact = false;
     if (query.empty() || target.empty()) return false;
-    std::wstring initials;
-    initials.push_back(target[0]);
+    if (target[0] != query[0]) return false;
+    size_t matched = 1;
     for (size_t i = 1; i < target.size(); ++i) {
-        if (target[i - 1] == L' ' && target[i] != L' ') {
-            initials.push_back(target[i]);
-        }
+        if (target[i - 1] != L' ' || target[i] == L' ') continue;
+        if (matched == query.size()) return true; // more initials than query: prefix match
+        if (target[i] != query[matched]) return false;
+        ++matched;
     }
-    if (query == initials) {
-        exact = true;
-        return true;
+    if (matched < query.size()) return false;
+    exact = true;
+    return true;
+}
+
+// 64-bit summary of which characters a string contains, for rejecting a
+// candidate before MatchScore runs. Spaces are ignored. a-z and 0-9 get a
+// bit each; anything else shares the remaining bits by code point. Every
+// MatchScore path that can succeed needs each non-space query character to
+// appear somewhere in the name, so a name whose mask lacks any of the
+// query's bits scores -1 - skipping it never changes a result.
+inline uint64_t CharMask(std::wstring_view value) {
+    uint64_t mask = 0;
+    for (wchar_t ch : value) {
+        if (ch == L' ') continue;
+        unsigned bit;
+        if (ch >= L'a' && ch <= L'z') bit = static_cast<unsigned>(ch - L'a');
+        else if (ch >= L'0' && ch <= L'9') bit = 26u + static_cast<unsigned>(ch - L'0');
+        else bit = 36u + static_cast<unsigned>(ch) % 28u;
+        mask |= uint64_t{1} << bit;
     }
-    if (initials.rfind(query, 0) == 0) {
-        exact = false;
-        return true;
-    }
-    return false;
+    return mask;
+}
+
+inline bool MaskCanMatch(uint64_t nameMask, uint64_t queryMask) {
+    return (nameMask & queryMask) == queryMask;
 }
 
 inline bool MatchTokens(std::wstring_view target, std::wstring_view query) {
@@ -117,17 +149,11 @@ inline int MatchScore(std::wstring_view name, std::wstring_view query) {
     if (query.empty()) return -1;
     if (name == query) return 10000;
 
-    // Condense() heap-allocates; skip it entirely when neither string has a
-    // space to collapse - the condensed forms would just equal the
-    // originals, which the `name == query` check above already ruled out.
-    // This is the common case (most app/file names and queries are a single
-    // word), and MatchScore runs once per candidate on every keystroke.
+    // Skip the condensed comparison when neither string has a space to
+    // collapse - the condensed forms would just equal the originals, which
+    // the `name == query` check above already ruled out.
     if (query.find(L' ') != std::wstring_view::npos || name.find(L' ') != std::wstring_view::npos) {
-        const std::wstring queryCondensed = Condense(query);
-        const std::wstring nameCondensed = Condense(name);
-        if (!queryCondensed.empty() && queryCondensed == nameCondensed) {
-            return 9500;
-        }
+        if (CondensedEqualNonEmpty(query, name)) return 9500;
     }
 
     // Check word boundary matches

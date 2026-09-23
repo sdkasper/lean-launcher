@@ -2,6 +2,7 @@
 
 #include "search.h"
 #include <algorithm>
+#include <functional>
 #include <atomic>
 #include <chrono>
 #include <cwctype>
@@ -89,6 +90,11 @@ struct FileItem {
     std::wstring normName;
     uint32_t parentDirIndex = 0;
     bool isDirectory = false;
+    // takeoff::CharMask(normName), so Search() can reject names that can't
+    // match before scoring them (NFR-014). 0 means "not computed" and is never
+    // used to reject - an empty name really does have mask 0, and hand-built
+    // items (tests) may not set it.
+    uint64_t nameMask = 0;
 };
 
 struct FileSearchResult {
@@ -573,6 +579,7 @@ public:
                     FileItem item;
                     if (!ReadWString(in, item.name)) return false;
                     if (!ReadWString(in, item.normName)) return false;
+                    item.nameMask = CharMask(item.normName);
                     if (!ReadRaw(in, item.parentDirIndex)) return false;
                     // Search() indexes the pool with this value directly
                     // (pool_.Get(item.parentDirIndex)), which is an
@@ -1104,8 +1111,20 @@ public:
         };
         std::vector<Candidate> candidates;
         candidates.reserve(128);
+        if (maxResults == 0) return {};
+
+        // Min-heap of the best maxResults scores seen so far. A candidate
+        // scoring strictly below the worst of them can never reach the final
+        // top maxResults, so it isn't collected: when every item matches (a
+        // common-letter query over a full disk), collecting all 500K and
+        // partial-sorting them was about half the query time (NFR-014). The
+        // top scores are exactly what they were; the order among equal
+        // scores was never defined (partial_sort isn't stable).
+        std::vector<int> topScores;
+        topScores.reserve(maxResults);
 
         const wchar_t firstChar = normQuery[0];
+        const uint64_t queryMask = CharMask(normQuery);
         const size_t qLen = normQuery.size();
         const bool isSingleToken = (tokens.size() <= 1);
         const bool hasPathSep = (query.find(L'/') != std::wstring_view::npos ||
@@ -1138,7 +1157,8 @@ public:
                 int s = -1;
 
                 // 1. Primary match: check if query matches the file/folder name directly
-                if (item.normName.size() >= (isSingleToken ? qLen : tokens.back().size())) {
+                if (item.normName.size() >= (isSingleToken ? qLen : tokens.back().size()) &&
+                    (item.nameMask == 0 || MaskCanMatch(item.nameMask, queryMask))) {
                     if (item.normName.find(firstChar) != std::wstring::npos) {
                         s = ScoreFile(item.normName, normQuery, item.isDirectory);
                     }
@@ -1185,8 +1205,16 @@ public:
                     }
                 }
 
-                if (s > 0) {
+                if (s > 0 && (topScores.size() < maxResults || s >= topScores.front())) {
                     candidates.push_back({s, &item, item.parentDirIndex});
+                    if (topScores.size() < maxResults) {
+                        topScores.push_back(s);
+                        std::push_heap(topScores.begin(), topScores.end(), std::greater<int>());
+                    } else if (s > topScores.front()) {
+                        std::pop_heap(topScores.begin(), topScores.end(), std::greater<int>());
+                        topScores.back() = s;
+                        std::push_heap(topScores.begin(), topScores.end(), std::greater<int>());
+                    }
                 }
             }
         }
@@ -1239,7 +1267,8 @@ private:
         uint64_t pathHash = Fnv1a64(Normalize(p.wstring()));
         if (!seen.insert(pathHash).second) return;
         std::wstring norm = Normalize(name);
-        items.push_back({std::move(name), std::move(norm), parentDirIndex, isDir});
+        const uint64_t mask = CharMask(norm);
+        items.push_back({std::move(name), std::move(norm), parentDirIndex, isDir, mask});
     }
 
     // scannedDirs tracks every pool index already fully walked by

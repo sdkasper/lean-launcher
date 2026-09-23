@@ -7,6 +7,7 @@
 #include "../src/daily_note.h"
 #include "../src/note_index.h"
 #include "../src/pins.h"
+#include "reference_scorer.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -30,6 +31,63 @@ int main() {
     Check(MatchScore(L"visual studio code", L"vsc") > 0, "fuzzy match");
     Check(MatchScore(L"notepad", L"xyz") == -1, "no match");
     Check(MatchScore(L"notepad", L"") == -1, "empty query");
+
+    // NFR-014: the allocation-free MatchScore must score every name/query
+    // pair exactly like the frozen v1.6.1 copy in reference_scorer.h, and the
+    // CharMask pre-check may only reject pairs that copy scores -1. The corpus
+    // mixes app names, file names (extension dot -> space), aliases that were
+    // never normalized, odd spacing, and non-ASCII letters.
+    {
+        const std::vector<std::wstring> names = {
+            L"visual studio code", L"code", L"code editor", L"visual code", L"task manager", L"control panel",
+            L"windows update", L"device manager", L"notepad", L"module4242 7 cpp", L"module42 4 cpp",
+            L"readme md", L"img 20230415 143022 jpg", L"testdoc pdf", L"a", L"ab", L"a b", L"b a", L"",
+            L" leading space", L"trailing space ", L"double  space", L"Visual Studio Code", L"VS Code",
+            L"résumé pdf", L"日本語 txt", L"x y z", L"xyz", L"aaa aaa", L"aa a",
+            L"microsoft edge", L"edge", L"obsidian", L"lean launcher", L"ll", L"2024 03 notes md"};
+        std::vector<std::wstring> queries = {
+            L"vsc", L"vs", L"v", L"code", L"cod", L"ode", L"tm", L"cp", L"mod", L"cpp", L"e", L"module4242",
+            L"m4c", L"xyz", L"x y", L"xy z", L"a", L"aa", L"aaa", L"a a", L"ab", L"b", L" ", L"  a", L"a ",
+            L"visualstudiocode", L"visual  studio", L"studio code", L"code studio", L"rés", L"日",
+            L"2024", L"notes md", L"lean", L"ll", L"llr", L"VS", L"Code", L"edge micro", L"zz"};
+        uint32_t seed = 12345;
+        auto next = [&seed] { seed = seed * 1103515245u + 12345u; return (seed >> 16) & 0x7FFF; };
+        for (const std::wstring& n : names) {
+            queries.push_back(n);
+            for (size_t len = 1; len <= (std::min<size_t>)(6, n.size()); ++len) queries.push_back(n.substr(0, len));
+            for (int k = 0; k < 6 && !n.empty(); ++k) {
+                std::wstring sub;
+                for (wchar_t ch : n) if (next() % 3 == 0) sub.push_back(ch);
+                if (!sub.empty()) queries.push_back(sub);
+            }
+        }
+        const std::wstring alphabet = L"abcdemost 0123é";
+        for (int k = 0; k < 300; ++k) {
+            std::wstring q;
+            const size_t len = 1 + next() % 5;
+            for (size_t c = 0; c < len; ++c) q.push_back(alphabet[next() % alphabet.size()]);
+            queries.push_back(q);
+        }
+
+        size_t pairs = 0;
+        size_t scoreMismatches = 0;
+        size_t unsafeRejections = 0;
+        for (const std::wstring& n : names) {
+            for (const std::wstring& q : queries) {
+                ++pairs;
+                const int expected = reference_scorer::MatchScore(n, q);
+                if (MatchScore(n, q) != expected) {
+                    if (scoreMismatches++ == 0) {
+                        std::wcout << L"  first MatchScore mismatch: name=\"" << n << L"\" query=\"" << q << L"\"\n";
+                    }
+                }
+                if (!MaskCanMatch(CharMask(n), CharMask(q)) && expected != -1) ++unsafeRejections;
+            }
+        }
+        std::cout << "[NFR-014] compared " << pairs << " name/query pairs against the reference scorer\n";
+        Check(scoreMismatches == 0, "allocation-free MatchScore scores every corpus pair exactly like the v1.6.1 reference");
+        Check(unsafeRejections == 0, "CharMask never rejects a name/query pair the reference scorer would match");
+    }
 
     // Acronym and initials matching
     Check(MatchScore(L"visual studio code", L"vsc") > 0, "acronym vsc");
@@ -1093,7 +1151,8 @@ int main() {
             for (size_t f = 0; f < kItemsPerDir; ++f) {
                 std::wstring name = L"module" + std::to_wstring(d) + L"_" + std::to_wstring(f) + L".cpp";
                 std::wstring norm = takeoff::Normalize(name);
-                items.push_back({std::move(name), std::move(norm), dirIdx, false});
+                const uint64_t mask = takeoff::CharMask(norm); // as the real scan sets it
+                items.push_back({std::move(name), std::move(norm), dirIdx, false, mask});
             }
             benchBatch.emplace_back(dirIdx, std::move(items));
         }
@@ -1130,31 +1189,42 @@ int main() {
         // the CI-facing ceiling is raised with headroom rather than blocking releases
         // on shared-runner speed. 60ms keeps this a real regression guard (a true fix
         // to the path-matching branch would still need to land to hit 20ms on slow
-        // hardware) without being a no-op ceiling like the name-match check below.
+        // hardware).
         Check(pathMatchMs < 60.0,
               "file search's path matching stays within budget at a realistic 500K-item scale on CI-class hardware");
 
         // (b) The fuzzy name scorer (ScoreFile/MatchScore in search.h),
         //     entered whenever a name merely contains the query's first
         //     character - which, for a common letter, is most of the index.
-        //     This is the dominant cost at scale and it is NOT inside the
-        //     20ms budget: it measures ~70ms here, roughly 3.5x over.
-        //     Removing the old 50K file cap made this branch unbounded in
-        //     exactly the way it made the path branch unbounded; only the
-        //     path branch has been addressed. The ceiling below is a
-        //     regression guard on today's measured behaviour, deliberately
-        //     not a claim that the budget is met - closing that gap means
-        //     changing how candidates are rejected before MatchScore runs,
-        //     which is a search.h design change, not a FileIndex one.
+        //     This was ~67ms before NFR-014: MatchScore heap-allocated two
+        //     condensed strings for every name with a space (nearly all file
+        //     names, since Normalize turns the extension dot into one), and
+        //     nothing rejected names that couldn't match. Now MatchScore
+        //     doesn't allocate and FileItem::nameMask skips names missing a
+        //     query character: ~13ms on the primary dev machine.
         const double nameMatchMs = timeQuery(L"module4242");
         std::cout << "[FileIndex] name-match query across " << (kBenchDirs * kItemsPerDir)
-                  << " synthetic items: " << nameMatchMs << "ms per query (over the 20ms budget - see comment)\n";
-        // Same CI-vs-dev-machine gap as the path-match ceiling above: this measured
-        // 165.68ms on GitHub's shared runner (v1.5.1 CI run 35693982417) against a
-        // 150ms ceiling tuned on the primary dev machine. Raised with headroom for
-        // the same reason - not a regression from this release, still a real guard.
-        Check(nameMatchMs < 250.0,
-              "file search's name scoring does not regress further at a realistic 500K-item scale on CI-class hardware");
+                  << " synthetic items: " << nameMatchMs << "ms per query\n";
+
+        // (c) Worst case for the name scorer: a query every one of the 500K
+        //     names matches, so the mask rejects nothing and every item is
+        //     scored. Search() only collects candidates that can still reach
+        //     the top maxResults, so this no longer builds a 500K-entry
+        //     candidate list: ~19ms on the primary dev machine (was ~28ms
+        //     with the scorer fix alone).
+        const double broadMatchMs = timeQuery(L"cpp");
+        std::cout << "[FileIndex] broad name-match query (every item matches) across " << (kBenchDirs * kItemsPerDir)
+                  << " synthetic items: " << broadMatchMs << "ms per query\n";
+
+        // Both are inside the 20ms budget on the primary dev machine. GitHub's
+        // shared runner has measured ~2.5x slower for this loop (path-match
+        // above: 32.7-35.2ms), so the CI-facing ceiling is the same 60ms the
+        // path-match check uses - down from 250ms, and one the old ~67ms
+        // (~165ms on CI) scorer would fail.
+        Check(nameMatchMs < 60.0,
+              "file search's name scoring stays within budget at a realistic 500K-item scale on CI-class hardware");
+        Check(broadMatchMs < 60.0,
+              "file search stays within budget when every one of 500K items matches, on CI-class hardware");
 
         auto scaleResults = FileIndex::Instance().Search(L"project4242", 10);
         Check(!scaleResults.empty(),
@@ -2617,11 +2687,45 @@ int main() {
 
     {
         Check(BuildTaskLine(L"buy milk") == L"- [ ] buy milk\n", "BuildTaskLine basic construction");
-        Check(BuildTaskLine(L"line1\r\nline2") == L"- [ ] line1line2\n",
-            "BuildTaskLine strips embedded CR/LF so one task never becomes two lines");
+        Check(BuildTaskLine(L"line1\r\nline2") == L"- [ ] line1\n  line2\n",
+            "BuildTaskLine indents a pasted second line under the bullet so it stays one task");
         Check(BuildTaskLine(L"") == L"- [ ] \n", "BuildTaskLine tolerates empty text");
         Check(BuildTaskLine(L"[[Some Note]] and #tag") == L"- [ ] [[Some Note]] and #tag\n",
             "BuildTaskLine passes through wikilinks and tags unescaped (valid Markdown as-is)");
+        Check(BuildTaskLine(L"buy milk // oat, 1 litre") == L"- [ ] buy milk\n  oat, 1 litre\n",
+            "BuildTaskLine turns ' // ' into an indented continuation line");
+        Check(BuildTaskLine(L"task\\n\\n  detail") == L"- [ ] task\n  detail\n",
+            "BuildTaskLine drops blank continuation lines and re-indents detail lines to 2 spaces");
+    }
+
+    // --- Multi-line captures (US-028): SplitCaptureLines / CapturePreviewText ---
+    {
+        using V = std::vector<std::wstring>;
+        Check(SplitCaptureLines(L"one line") == V{L"one line"}, "SplitCaptureLines keeps a one-line capture as-is");
+        Check(SplitCaptureLines(L"first\\nsecond") == V{L"first", L"second"}, "SplitCaptureLines splits on \\n");
+        Check(SplitCaptureLines(L"literal \\\\n kept") == V{L"literal \\n kept"},
+            "SplitCaptureLines writes \\\\n as a literal backslash-n");
+        Check(SplitCaptureLines(L"path C:\\temp") == V{L"path C:\\temp"},
+            "SplitCaptureLines keeps other backslashes as typed");
+        Check(SplitCaptureLines(L"a  //   b") == V{L"a", L"b"},
+            "SplitCaptureLines splits on ' // ' and removes the spaces around it");
+        Check(SplitCaptureLines(L"see https://example.com") == V{L"see https://example.com"},
+            "SplitCaptureLines leaves '//' without surrounding spaces alone");
+        Check(SplitCaptureLines(L"a\r\nb\nc\rd") == V{L"a", L"b", L"c", L"d"},
+            "SplitCaptureLines treats CRLF, LF, and CR as line breaks");
+        Check(SplitCaptureLines(L"\\nfirst\\n\\nthird\\n") == V{L"first", L"", L"third"},
+            "SplitCaptureLines trims empty lines at the start and end but keeps a blank line in the middle");
+        Check(SplitCaptureLines(L"\\n\\n").empty() && SplitCaptureLines(L" // ").empty(),
+            "SplitCaptureLines returns nothing for a capture that is only line breaks");
+        Check(SplitCaptureLines(L"trailing   \\nnext") == V{L"trailing", L"next"},
+            "SplitCaptureLines trims trailing spaces so a line never ends in a Markdown hard break");
+        Check(CapturePreviewText(L"one\\ntwo // three") == L"one \u23CE two \u23CE three",
+            "CapturePreviewText shows each line break as ' \u23CE '");
+        Check(CapturePreviewText(L"plain") == L"plain", "CapturePreviewText leaves a one-line capture unchanged");
+        Check(PastedTextForInput(L"line1\r\nline2\r\n") == L"line1\\nline2",
+            "PastedTextForInput turns pasted line breaks into \\n and drops breaks at the ends");
+        Check(PastedTextForInput(L"notepad\r\n") == L"notepad",
+            "PastedTextForInput leaves a single pasted line (with trailing newline) clean for normal search");
     }
 
     {
@@ -2719,8 +2823,10 @@ int main() {
 
     {
         Check(BuildPlainLine(L"buy milk") == L"buy milk\n", "BuildPlainLine basic construction");
-        Check(BuildPlainLine(L"line1\r\nline2") == L"line1line2\n",
-            "BuildPlainLine strips embedded CR/LF so one entry never becomes two lines");
+        Check(BuildPlainLine(L"line1\r\nline2") == L"line1\nline2\n",
+            "BuildPlainLine writes a pasted second line as its own line instead of gluing it on");
+        Check(BuildPlainLine(L"first\\n\\n  indented") == L"first\n\n  indented\n",
+            "BuildPlainLine keeps a blank middle line and the extra line's own indentation");
         Check(BuildPlainLine(L"") == L"\n", "BuildPlainLine tolerates empty text");
         Check(BuildPlainLine(L"[[Some Note]] and #tag") == L"[[Some Note]] and #tag\n",
             "BuildPlainLine passes through wikilinks and tags unescaped (valid Markdown as-is)");
@@ -2791,8 +2897,10 @@ int main() {
               line.back() == L'\n',
             "BuildLogLine formats as '- HH:MM: <text>\\n'");
         Check(line.find(L"buy milk") != std::wstring::npos, "BuildLogLine includes the entry text");
-        Check(BuildLogLine(L"line1\r\nline2").find(L"line1line2") != std::wstring::npos,
-            "BuildLogLine strips embedded CR/LF so one entry never becomes two lines");
+        const std::wstring multi = BuildLogLine(L"call with Anna\\ndiscussed launch date");
+        Check(multi.find(L": call with Anna\n  discussed launch date\n") != std::wstring::npos &&
+              std::count(multi.begin(), multi.end(), L'\n') == 2,
+            "BuildLogLine indents a second line under the timestamped bullet");
     }
 
     // --- Log capture: Utf8ToWide / WideToUtf8 ---
