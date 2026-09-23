@@ -613,7 +613,7 @@ private:
                 settings_.checkForUpdates = ReadDword(key, L"CheckForUpdates", 0) != 0;
                 settings_.enableFileSearch = ReadDword(key, L"FileSearchEnabled", 1) != 0;
                 settings_.enableWebSearch = ReadDword(key, L"WebSearchEnabled", 1) != 0;
-                settings_.runAtStartup = ReadDword(key, L"RunAtStartup", 1) != 0;
+                settings_.runAtStartup = ReadDword(key, L"RunAtStartup", 0) != 0;
                 settings_.vaultSearchEnabled = ReadDword(key, L"VaultSearchEnabled", 1) != 0;
                 settings_.taskAddEnabled = ReadDword(key, L"TaskAddEnabled", 1) != 0;
                 settings_.noteAddEnabled = ReadDword(key, L"NoteAddEnabled", 1) != 0;
@@ -698,26 +698,26 @@ private:
                 dailyNoteConfig_ = leanlauncher::obsidian::ResolveDailyNoteConfig(
                     obsidianVaultPath_, settings_.dailyNoteFolderOverride, settings_.dailyNoteFormatOverride);
             }
-            HKEY startup = nullptr;
+            // Read-only (v1.6.1): the toggle shows whether the Run key holds
+            // this exe's own startup command. Launch never writes the key -
+            // silently (re)registering itself on every start is what got
+            // unsigned builds quarantined as Behavior:Win32/Persistence.A!ml.
+            // A missing or foreign entry just shows as off; the user turns
+            // it on in Settings, which is the only place SetRunAtStartup runs.
             bool startupRegistered = false;
+            HKEY startup = nullptr;
             if (RegOpenKeyExW(HKEY_CURRENT_USER, kStartupRegistryPath, 0, KEY_QUERY_VALUE, &startup) == ERROR_SUCCESS) {
                 wchar_t existingCmd[MAX_PATH * 2]{};
                 DWORD size = sizeof(existingCmd);
-                startupRegistered = (RegGetValueW(startup, nullptr, kStartupValueName, RRF_RT_REG_SZ,
-                    nullptr, existingCmd, &size) == ERROR_SUCCESS);
+                wchar_t currentExe[MAX_PATH]{};
+                startupRegistered =
+                    RegGetValueW(startup, nullptr, kStartupValueName, RRF_RT_REG_SZ, nullptr, existingCmd, &size) ==
+                        ERROR_SUCCESS &&
+                    GetModuleFileNameW(nullptr, currentExe, MAX_PATH) &&
+                    quicklaunch::IsStartupCommandFor(existingCmd, currentExe);
                 RegCloseKey(startup);
-                if (settings_.runAtStartup) {
-                    wchar_t currentExe[MAX_PATH]{};
-                    if (GetModuleFileNameW(nullptr, currentExe, MAX_PATH)) {
-                        const std::wstring expectedCmd = L"\"" + std::wstring(currentExe) + L"\" --minimized";
-                        if (!startupRegistered || _wcsicmp(existingCmd, expectedCmd.c_str()) != 0) {
-                            SetRunAtStartup(true);
-                        }
-                    }
-                }
-            } else if (settings_.runAtStartup) {
-                SetRunAtStartup(true);
             }
+            settings_.runAtStartup = startupRegistered;
             LoadRecent();
             LoadPins();
         }
@@ -1068,7 +1068,7 @@ private:
                     RegCloseKey(key);
                     return false;
                 }
-                const std::wstring command = L"\"" + std::wstring(executable) + L"\" --minimized";
+                const std::wstring command = quicklaunch::StartupCommandFor(executable);
                 result = RegSetValueExW(key, kStartupValueName, 0, REG_SZ,
                     reinterpret_cast<const BYTE*>(command.c_str()),
                     static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));

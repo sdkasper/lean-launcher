@@ -35,7 +35,11 @@ struct Settings {
     HotkeyBinding actionsHotkey{kModControl, 'K'};
     HotkeyBinding administratorHotkey{kModControl, 0};
     HotkeyBinding quickLaunchHotkey{kModAlt, 0};
-    bool runAtStartup = true;
+    // Off for new installs (v1.6.1): an unsigned, low-download exe writing
+    // itself into HKCU\...\Run on first launch is exactly what Defender's
+    // Behavior:Win32/Persistence.A!ml model quarantines. The Run key is now
+    // only ever written when the user turns this on in Settings.
+    bool runAtStartup = false;
     bool showTrayIcon = true;
     bool checkForUpdates = false;  // No release pipeline yet; user can opt in via Settings.
     bool enableFileSearch = true;
@@ -103,6 +107,23 @@ struct Settings {
     // 2 append target, 3 log target - see SelectQuickOpenTarget.
     int quickOpenTarget = 0;
 };
+
+// The HKCU\...\Run command this exe registers for "Run at startup".
+inline std::wstring StartupCommandFor(std::wstring_view exePath) {
+    return L"\"" + std::wstring(exePath) + L"\" --minimized";
+}
+
+// Whether an existing Run value is this exe's own startup command
+// (case-insensitive, like Windows paths). Used only to show the toggle's
+// real state - a mismatch is never "repaired" by rewriting the key.
+inline bool IsStartupCommandFor(std::wstring_view existingCommand, std::wstring_view exePath) {
+    const std::wstring expected = StartupCommandFor(exePath);
+    if (existingCommand.size() != expected.size()) return false;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        if (std::towlower(existingCommand[i]) != std::towlower(expected[i])) return false;
+    }
+    return true;
+}
 
 inline std::wstring KeyName(uint16_t vk) {
     switch (vk) {

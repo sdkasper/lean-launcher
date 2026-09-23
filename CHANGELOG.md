@@ -10,6 +10,14 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.6.1] - 2026-09-23
+
+### Fixed
+- **Windows Defender quarantined Lean Launcher as `Behavior:Win32/Persistence.A!ml`** - on every launch the app silently (re)wrote its own `HKCU\...\CurrentVersion\Run` startup entry whenever it didn't match the running exe's path. For a new, unsigned executable that self-registration is exactly what Defender's behavior model treats as malware persistence, and it quarantined the exe within seconds of starting - with or without an update in progress. Lean Launcher now never writes the startup entry on launch; it only reads it, to show the **Run at startup** toggle's real state, and writes it solely when you turn the toggle on in Settings.
+
+### Changed
+- **Run at startup is now off by default** for new installs, and **Reset to defaults** turns it off. Existing installs keep a working startup entry as long as it points at the same exe; if it points elsewhere (for example after moving the exe), the toggle shows off until you turn it on again.
+
 ## [1.6.0] - 2026-09-23
 
 ### Added

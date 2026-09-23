@@ -450,7 +450,7 @@ int main() {
 
     // 3. Settings defaults and toggles
     Settings defaultSettings;
-    Check(defaultSettings.runAtStartup == true, "run at startup enabled by default in settings");
+    Check(defaultSettings.runAtStartup == false, "run at startup off by default in settings (v1.6.1, see settings.h)");
     defaultSettings.runAtStartup = false;
     Check(!defaultSettings.runAtStartup, "run at startup toggle can be disabled");
     Check(defaultSettings.enableFileSearch == true, "file search enabled by default in settings");
@@ -2298,6 +2298,22 @@ int main() {
     Check(SelectQuickOpenTarget(3, L"T", L"A", L"L") == L"L", "SelectQuickOpenTarget 3 = log target");
     Check(SelectQuickOpenTarget(1, L"", L"A", L"L").empty(), "SelectQuickOpenTarget falls back when the target is unset");
     Check(SelectQuickOpenTarget(9, L"T", L"A", L"L").empty(), "SelectQuickOpenTarget out of range = daily note");
+
+    // Startup entry (v1.6.1): the app only reads the Run key to show the
+    // toggle's state; it never rewrites it on launch. These helpers decide
+    // what counts as "registered for this exe".
+    Check(quicklaunch::StartupCommandFor(L"C:\\Apps\\LeanLauncher.exe") ==
+            L"\"C:\\Apps\\LeanLauncher.exe\" --minimized",
+        "StartupCommandFor quotes the path and adds --minimized");
+    Check(quicklaunch::IsStartupCommandFor(L"\"c:\\apps\\leanlauncher.EXE\" --minimized",
+            L"C:\\Apps\\LeanLauncher.exe"),
+        "IsStartupCommandFor matches case-insensitively");
+    Check(!quicklaunch::IsStartupCommandFor(L"\"D:\\Other\\LeanLauncher.exe\" --minimized",
+            L"C:\\Apps\\LeanLauncher.exe"),
+        "IsStartupCommandFor rejects an entry for a different copy of the exe");
+    Check(!quicklaunch::IsStartupCommandFor(L"", L"C:\\Apps\\LeanLauncher.exe"),
+        "IsStartupCommandFor rejects an empty entry");
+    Check(!quicklaunch::Settings{}.runAtStartup, "Run at startup defaults to off for new installs");
 
     // Pins (US-024): toggle, cap, identity, and the pinned-first reorder.
     {
