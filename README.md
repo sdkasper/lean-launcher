@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <b>⚡ &lt; <1 MB binary</b> &nbsp;&bull;&nbsp;
+  <b>⚡ &lt; 1 MB binary</b> &nbsp;&bull;&nbsp;
   <b>🧠 ~10 MB RAM</b> &nbsp;&bull;&nbsp;
   <b>🚀 &lt; 1 ms search</b> &nbsp;&bull;&nbsp;
   <b>🔒 Zero telemetry</b>
@@ -43,7 +43,7 @@
 
 ### Launcher Core
 
-- **Ultra-Lightweight** - Built in pure C++, Win32, and Direct2D. No Electron, no Chromium runtime. The entire executable is ~500 KB and uses just ~10 MB RAM.
+- **Ultra-Lightweight** - Built in pure C++, Win32, and Direct2D. No Electron, no Chromium runtime. The entire executable is under 1 MB and uses just ~10 MB RAM.
 - **Instant Search** - In-memory indexing and weighted fuzzy matching return results in under a millisecond.
 - **Smart Matching** - Finds apps by acronyms and prefixes: `vsc` → Visual Studio Code, `tm` → Task Manager, `wu` → Windows Update, `dev man` → Device Manager
 - **System Tools Included** - Instantly launch Control Panel applets, Windows Settings, Device Manager, and Services alongside desktop apps.
