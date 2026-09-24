@@ -51,7 +51,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>dwmapi.lib;shell32.lib;shlwapi.lib;user32.lib;gdi32.lib;ole32.lib;d2d1.lib;dwrite.lib;windowscodecs.lib;imm32.lib;advapi32.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;shell32.lib;shlwapi.lib;user32.lib;gdi32.lib;ole32.lib;d2d1.lib;dwrite.lib;windowscodecs.lib;imm32.lib;advapi32.lib;winhttp.lib;powrprof.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -69,7 +69,7 @@
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalDependencies>dwmapi.lib;shell32.lib;shlwapi.lib;user32.lib;gdi32.lib;ole32.lib;d2d1.lib;dwrite.lib;windowscodecs.lib;imm32.lib;advapi32.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dwmapi.lib;shell32.lib;shlwapi.lib;user32.lib;gdi32.lib;ole32.lib;d2d1.lib;dwrite.lib;windowscodecs.lib;imm32.lib;advapi32.lib;winhttp.lib;powrprof.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

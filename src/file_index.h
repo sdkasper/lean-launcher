@@ -402,6 +402,18 @@ public:
         }
     }
 
+    // NFR-018: File search turned off at runtime. Stops the worker and its
+    // change monitors, then frees the in-memory index. The cache file stays
+    // on disk, so the next Start() reloads from it instead of re-walking.
+    void StopAndRelease() {
+        Stop();
+        std::lock_guard<std::mutex> lock(mutex_);
+        pool_ = DirectoryPool{};
+        snapshot_.reset();
+        ready_ = false;
+        phase_ = Phase::Idle;
+    }
+
     bool IsReady() const {
         return ready_.load();
     }

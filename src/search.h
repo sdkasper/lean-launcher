@@ -32,7 +32,11 @@ enum class AppCategory : uint8_t {
     NoteJump,
     NoteAdd,
     LogAdd,
-    WebSearch
+    WebSearch,
+    Command,  // US-041 system command (lock, sleep, restart, ...)
+    Url,      // US-042 typed http(s) URL
+    Info,     // non-clickable status row, e.g. "Folder not found" (US-043)
+    Pomodoro  // US-049 timer row (start, stop, replace)
 };
 
 inline std::wstring Normalize(std::wstring_view value) {

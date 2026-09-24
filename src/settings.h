@@ -44,6 +44,22 @@ struct Settings {
     bool checkForUpdates = false;  // No release pipeline yet; user can opt in via Settings.
     bool enableFileSearch = true;
     bool enableWebSearch = true;
+    // US-041: lock/sleep/restart/... command rows. Off = no command rows.
+    bool enableSystemCommands = true;
+    // US-042: an "Open URL" row for typed http(s):// / www. / bare-domain text.
+    bool enableTypedUrls = true;
+    // US-043: completions for typed C:\, \\server\share\, %VAR%\ and ~\ paths.
+    bool enablePathCompletion = true;
+    // US-047: "5 km in mi"-style conversions next to the calculator.
+    bool enableUnitConverter = true;
+    // US-048: "time in Tokyo" / "10am PST in CET" with Windows' zone rules.
+    bool enableTimeZones = true;
+    // US-049: Pomodoro timer. Lengths are stored as text rows (1-180 minutes).
+    bool enablePomodoro = true;
+    bool pomodoroLog = true;
+    std::wstring pomodoroPrefix = L"pomo";
+    std::wstring pomodoroFocusMinutes = L"25";
+    std::wstring pomodoroBreakMinutes = L"5";
     // Default matches the Google preset in search.h's kWebSearchPresets -
     // existing installs with no saved value get identical behavior to
     // before this setting existed (AC: no behavior change for anyone who
@@ -61,6 +77,8 @@ struct Settings {
     std::wstring webSearchPillLabel = L"Web";
     std::wstring fileSearchPrefix = L"f";
     std::wstring appSearchPrefix = L"p";
+    // US-041: "s " lists every system command, "s re" narrows them.
+    std::wstring systemCommandsPrefix = L"s";
 
     // Obsidian integration: master toggle plus one sub-toggle per action.
     // obsidianEnabled's on-disk default is computed at load time (see

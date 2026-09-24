@@ -67,7 +67,13 @@ inline bool DefaultObsidianEnabled(const std::wstring& vaultPath) {
 // unreachable, and an empty prefix would match every input. Takes an
 // arbitrary-length list rather than fixed parameters so the prefix count
 // can keep growing without changing this signature again.
+inline const wchar_t* FindPrefixConflict(const std::vector<std::wstring>& prefixes);
 inline const wchar_t* FindPrefixConflict(std::initializer_list<std::wstring> prefixes) {
+    return FindPrefixConflict(std::vector<std::wstring>(prefixes));
+}
+// Same check over a runtime list - also used by settings import (US-044), so
+// an imported file and the Settings screen can never disagree.
+inline const wchar_t* FindPrefixConflict(const std::vector<std::wstring>& prefixes) {
     for (const auto& prefix : prefixes) {
         if (prefix.empty()) return L"Prefix cannot be empty.";
     }

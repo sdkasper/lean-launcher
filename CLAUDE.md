@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Lean Launcher is a native Windows application launcher (Alt+Space, type, Enter), built as an independent fork of [Takeoff](https://github.com/akiraeng/takeoff-launcher). Pure C++17, Win32, Direct2D/DirectWrite - no Electron, no third-party UI frameworks. Design priorities: <500 KB binary, ~10 MB RAM, <1ms search, zero telemetry.
+Lean Launcher is a native Windows application launcher (Alt+Space, type, Enter), built as an independent fork of [Takeoff](https://github.com/akiraeng/takeoff-launcher). Pure C++17, Win32, Direct2D/DirectWrite - no Electron, no third-party UI frameworks. Design priorities: <1 MB binary (check the size on every release), low RAM measured as private bytes (a turned-off feature must hold no memory - NFR-018), <1ms search, zero telemetry.
 
 **Naming note:** the project is mid-rebrand from "Takeoff" to "Lean Launcher". CMake targets, the repo, and internal identifiers (`LeanLauncher.exe`, `kMutexName`, window title "Lean Launcher") use the new name; the README's `<h1>`, some comments, and `scripts/package.ps1` still say "Takeoff". Don't be surprised by the mismatch - prefer "Lean Launcher"/`LeanLauncher` in new code and treat leftover "Takeoff" references as not-yet-migrated rather than intentional.
 

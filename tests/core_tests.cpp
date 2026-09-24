@@ -7,6 +7,13 @@
 #include "../src/daily_note.h"
 #include "../src/note_index.h"
 #include "../src/pins.h"
+#include "../src/settings_layout.h"
+#include "../src/system_commands.h"
+#include "../src/typed_input.h"
+#include "../src/settings_io.h"
+#include "../src/converter.h"
+#include "../src/timezones.h"
+#include "../src/pomodoro.h"
 #include "reference_scorer.h"
 
 #include <chrono>
@@ -1462,6 +1469,29 @@ int main() {
               "Second Start() with an existing cache loads the same item count");
         Check(reloadElapsed < 2000, "Loading from an existing cache is fast, not a full re-walk");
         FileIndex::Instance().Stop();
+
+        // NFR-018: turning File search off at runtime must free the index,
+        // not just stop the worker - and turning it back on must reload from
+        // the cache the stopped cycle left behind.
+        FileIndex::Instance().Start(nullptr, repoPath.wstring(), testCachePath);
+        for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        Check(FileIndex::Instance().Count() == firstRunCount, "Index is loaded before StopAndRelease");
+        FileIndex::Instance().StopAndRelease();
+        Check(FileIndex::Instance().Count() == 0, "StopAndRelease frees every indexed item");
+        Check(!FileIndex::Instance().IsReady(), "StopAndRelease leaves the index not ready");
+        Check(FileIndex::Instance().GetPhase() == takeoff::FileIndex::Phase::Idle,
+              "StopAndRelease resets the phase to Idle");
+        Check(FileIndex::Instance().Search(L"main", 10).empty(), "A released index returns no results");
+        Check(fs::exists(testCachePath, cacheEc), "StopAndRelease keeps the cache file for the next Start");
+        FileIndex::Instance().Start(nullptr, repoPath.wstring(), testCachePath);
+        for (int w = 0; w < 40 && !FileIndex::Instance().IsReady(); ++w) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        Check(FileIndex::Instance().Count() == firstRunCount,
+              "Start() after StopAndRelease reloads the same item count from the cache");
+        FileIndex::Instance().Stop();
         DeleteFileW(testCachePath.c_str());
     }
 
@@ -2046,6 +2076,28 @@ int main() {
         "the scroll EnsureSettingsVisible needs for the Help row is within Search's max scroll");
     Check(helpRowBottom - helpScrollNeeded < viewportHeight,
         "scrolled Help row bottom is inside the Settings viewport");
+
+    // Settings layout helpers (src/settings_layout.h): the real geometry the
+    // launcher uses, so the Search card can grow without hand-edited offsets.
+    {
+        namespace sl = leanlauncher::settings_layout;
+        // The 8-row Search card of v1.7.0 must lay out exactly as before.
+        Check(sl::AllObsidianHeaderTop(8) == 835.0f, "8 Search rows: All-view Obsidian header stays at 835");
+        Check(sl::AllObsidianCardTop(8) == 855.0f, "8 Search rows: All-view Obsidian card stays at 855");
+        Check(sl::SearchCategoryContentBottom(8) == 428.0f, "8 Search rows: Search tab content bottom stays at 428");
+        Check(sl::AllContentBottom(8, 1) == 918.0f, "8 Search rows + 1 Obsidian row: All content bottom stays at 918");
+        // Each added Search row moves everything below it by one row height.
+        Check(sl::AllObsidianHeaderTop(9) == 882.0f, "9 Search rows: Obsidian header moves down one row");
+        Check(sl::AllObsidianCardTop(9) == 902.0f, "9 Search rows: Obsidian card moves down one row");
+        Check(sl::SearchCategoryContentBottom(9) == 475.0f, "9 Search rows: Search tab grows one row");
+        Check(sl::AllSearchRowTop(0) == 441.0f && sl::AllSearchRowTop(8) == 817.0f,
+              "All-view Search row tops come from their rank");
+        Check(sl::CategoryRowTop(0) == 36.0f && sl::CategoryRowTop(8) == 412.0f,
+              "Single-tab row tops come from their rank");
+        constexpr int rows[] = {7, 8, 9, 47};
+        Check(sl::RowRank(rows, 7) == 0 && sl::RowRank(rows, 47) == 3, "RowRank finds a row's screen position");
+        Check(sl::RowRank(rows, 15) == -1, "RowRank returns -1 for a row not in the list");
+    }
 
     // --- Calculator Tests ---
     // AppCategory::Calculator distinction
@@ -3365,6 +3417,505 @@ int main() {
 
         NoteIndex::Instance().Stop();
         fs::remove_all(tempVault, noteJumpEc);
+    }
+
+    // -----------------------------------------------------------------------------
+    // US-041: system commands (pure logic in src/system_commands.h)
+    // -----------------------------------------------------------------------------
+    {
+        namespace sc = leanlauncher::syscmd;
+        using sc::Command;
+
+        Check(std::size(sc::kCommands) == 7, "seven system commands are defined");
+        const sc::CommandDef* shutDown = sc::FindCommand(Command::ShutDown);
+        Check(shutDown != nullptr && std::wstring(shutDown->name) == L"Shut Down", "Shut Down is in the command table");
+
+        // Confirmation only for commands that can lose work or data.
+        Check(sc::NeedsConfirmation(Command::Restart) && sc::NeedsConfirmation(Command::ShutDown) &&
+              sc::NeedsConfirmation(Command::SignOut) && sc::NeedsConfirmation(Command::EmptyRecycleBin),
+              "restart, shut down, sign out and empty recycle bin need confirmation");
+        Check(!sc::NeedsConfirmation(Command::Lock) && !sc::NeedsConfirmation(Command::Sleep) &&
+              !sc::NeedsConfirmation(Command::Hibernate), "lock, sleep and hibernate run without confirmation");
+        Check(sc::ConfirmPrompt(Command::ShutDown) == L"Press Enter again to shut down", "shut down confirm prompt");
+        Check(sc::ConfirmPrompt(Command::EmptyRecycleBin) == L"Press Enter again to empty the Recycle Bin",
+              "empty recycle bin confirm prompt");
+
+        // The second-Enter gate.
+        sc::ConfirmGate gate;
+        Check(gate.Press(Command::Lock, 1000) == sc::PressResult::Execute, "a command without confirmation runs at once");
+        Check(gate.Press(Command::ShutDown, 1000) == sc::PressResult::AskAgain, "first Enter on shut down asks again");
+        Check(gate.IsPending(Command::ShutDown, 1500), "shut down is pending after the first Enter");
+        Check(gate.Press(Command::ShutDown, 5999) == sc::PressResult::Execute, "second Enter within 5 s runs it");
+        Check(!gate.IsPending(Command::ShutDown, 6000), "running the command clears the pending state");
+        Check(gate.Press(Command::Restart, 10000) == sc::PressResult::AskAgain, "restart asks again");
+        Check(gate.Press(Command::Restart, 15001) == sc::PressResult::AskAgain,
+              "a second Enter after the 5 s timeout asks again instead of running");
+        Check(gate.Press(Command::ShutDown, 15100) == sc::PressResult::AskAgain,
+              "a pending restart doesn't confirm a different command");
+        gate.Cancel();
+        Check(!gate.IsPending(Command::ShutDown, 15200), "Cancel clears a pending confirmation");
+        Check(gate.Press(Command::ShutDown, 15300) == sc::PressResult::AskAgain, "after Cancel the first Enter asks again");
+
+        // Ranking: an exact name or alias beats any app or settings page,
+        // even one boosted by recency (at most 10000 + 800).
+        const std::vector<std::wstring> lockAliases = {L"lock", L"lock pc"};
+        Check(sc::ScoreCommand(L"lock", lockAliases, L"lock") > 10800, "exact 'lock' outranks everything");
+        const std::vector<std::wstring> sleepAliases = {L"sleep", L"suspend"};
+        Check(sc::ScoreCommand(L"sleep", sleepAliases, L"suspend") > 10800, "exact alias 'suspend' outranks everything");
+        const std::vector<std::wstring> shutAliases = {L"shut down", L"shutdown", L"power off"};
+        const int partial = sc::ScoreCommand(L"shut down", shutAliases, L"shut");
+        Check(partial >= 0 && partial < 10000, "a partial match scores like a normal result");
+        Check(sc::ScoreCommand(L"shut down", shutAliases, L"chrome") < 0, "an unrelated query doesn't match");
+
+        // Recycle Bin row subtitle.
+        Check(sc::FormatRecycleBinSummary(0, 0) == L"Recycle Bin is empty", "empty bin summary");
+        Check(sc::FormatRecycleBinSummary(1, 512) == L"1 item, 512 bytes", "single item summary");
+        Check(sc::FormatRecycleBinSummary(3, 2048) == L"3 items, 2.0 KB", "KB summary");
+        Check(sc::FormatRecycleBinSummary(123, 1503238554LL) == L"123 items, 1.4 GB", "GB summary");
+
+        // shutdown.exe arguments: never /f, so apps can still ask to save work.
+        Check(sc::ShutdownArguments(Command::Restart) == L"/r /t 0", "restart runs shutdown /r /t 0");
+        Check(sc::ShutdownArguments(Command::ShutDown) == L"/s /t 0", "shut down runs shutdown /s /t 0");
+
+        // Availability from the machine's power capabilities.
+        Check(!sc::IsAvailable(Command::Sleep, sc::PowerCaps{false, true}), "sleep hidden when unsupported");
+        Check(!sc::IsAvailable(Command::Hibernate, sc::PowerCaps{true, false}), "hibernate hidden when off");
+        Check(sc::IsAvailable(Command::Lock, sc::PowerCaps{false, false}), "lock is always available");
+
+        // Command identity round-trips through the result's path.
+        Check(sc::CommandFromPath(sc::CommandPath(Command::EmptyRecycleBin)) == Command::EmptyRecycleBin,
+              "command path round-trips");
+        Check(!sc::CommandFromPath(L"C:\\Windows\\notepad.exe").has_value(), "a normal path is not a command");
+
+        // The "s" prefix: "s " alone lists every command, "s re" narrows.
+        std::wstring rest;
+        Check(sc::TryParseCommandPrefix(L"s ", L"s", rest) && rest.empty(), "'s ' alone is a command query with no filter");
+        Check(sc::TryParseCommandPrefix(L"s re", L"s", rest) && rest == L"re", "'s re' filters commands by 're'");
+        Check(sc::TryParseCommandPrefix(L"S   lock", L"s", rest) && rest == L"lock",
+              "the prefix is case-insensitive and extra spaces are trimmed");
+        Check(!sc::TryParseCommandPrefix(L"s", L"s", rest), "'s' without a space is a normal query");
+        Check(!sc::TryParseCommandPrefix(L"sleep", L"s", rest), "a word starting with s is a normal query");
+        Check(!sc::TryParseCommandPrefix(L"s lock", L"", rest), "an empty prefix never matches");
+    }
+
+    // -----------------------------------------------------------------------------
+    // US-042: typed URLs (pure logic in src/typed_input.h)
+    // -----------------------------------------------------------------------------
+    {
+        namespace ti = leanlauncher::typed;
+        using ti::UrlKind;
+        // Explicit: a scheme or www. gets the top row.
+        Check(ti::ClassifyUrl(L"https://github.com/sdkasper") == UrlKind::Explicit, "https URL is explicit");
+        Check(ti::ClassifyUrl(L"HTTP://example.com") == UrlKind::Explicit, "scheme is case-insensitive");
+        Check(ti::ClassifyUrl(L"www.example.org") == UrlKind::Explicit, "www. is explicit");
+        Check(ti::ClassifyUrl(L"https://a.b/c?d=1#e") == UrlKind::Explicit, "path, query and fragment are fine");
+        // Bare domains: a secondary row.
+        Check(ti::ClassifyUrl(L"github.com/sdkasper") == UrlKind::BareDomain, "bare domain with path");
+        Check(ti::ClassifyUrl(L"readme.md") == UrlKind::BareDomain, "readme.md looks like a domain (row goes below the file)");
+        Check(ti::ClassifyUrl(L"sub.example.co.uk") == UrlKind::BareDomain, "multi-label domain");
+        // Not URLs.
+        Check(ti::ClassifyUrl(L"javascript:alert(1)") == UrlKind::None, "javascript: is never a URL");
+        Check(ti::ClassifyUrl(L"file:///C:/x") == UrlKind::None, "file: is never a URL");
+        Check(ti::ClassifyUrl(L"ms-settings:display") == UrlKind::None, "ms-settings: is never a URL");
+        Check(ti::ClassifyUrl(L"https://") == UrlKind::None, "a scheme without a host is not a URL");
+        Check(ti::ClassifyUrl(L"visual studio.com") == UrlKind::None, "text with spaces is not a URL");
+        Check(ti::ClassifyUrl(L"notepad") == UrlKind::None, "a plain word is not a URL");
+        Check(ti::ClassifyUrl(L"v1.2") == UrlKind::None, "a domain ending with digits is not a URL");
+        Check(ti::ClassifyUrl(L"example.c") == UrlKind::None, "a one-letter ending is not a URL");
+        Check(ti::ClassifyUrl(L"me@example.com") == UrlKind::None, "an email address is not a bare domain");
+        Check(ti::ClassifyUrl(L".hidden") == UrlKind::None, "a leading dot is not a domain");
+        Check(ti::ClassifyUrl(L"C:\\Users") == UrlKind::None, "a Windows path is not a URL");
+        Check(ti::ClassifyUrl(L"") == UrlKind::None, "empty text is not a URL");
+        // What gets opened.
+        Check(ti::NormalizeUrl(L"github.com/sdkasper") == L"https://github.com/sdkasper", "bare domain opens as https");
+        Check(ti::NormalizeUrl(L"www.example.org") == L"https://www.example.org", "www. opens as https");
+        Check(ti::NormalizeUrl(L"http://example.com") == L"http://example.com", "an explicit http URL is kept as typed");
+        // Where the row goes.
+        Check(ti::UrlRowPosition(UrlKind::Explicit, 5) == 0, "explicit URL row is first");
+        Check(ti::UrlRowPosition(UrlKind::BareDomain, 5) == 1, "bare domain row goes below the top match");
+        Check(ti::UrlRowPosition(UrlKind::BareDomain, 0) == 0, "bare domain row is first when nothing else matches");
+    }
+
+    // -----------------------------------------------------------------------------
+    // US-043: path completion (pure logic in src/typed_input.h)
+    // -----------------------------------------------------------------------------
+    {
+        namespace ti = leanlauncher::typed;
+        // Path mode starts on these shapes only.
+        Check(ti::LooksLikePath(L"C:\\Us") && ti::LooksLikePath(L"d:/x") && ti::LooksLikePath(L"C:\\"),
+              "drive paths with either slash start path mode");
+        Check(ti::LooksLikePath(L"\\\\nas\\share\\") && ti::LooksLikePath(L"%APPDATA%\\Mi") &&
+              ti::LooksLikePath(L"~\\Doc") && ti::LooksLikePath(L"~/Doc"), "UNC, %VAR% and ~ start path mode");
+        Check(!ti::LooksLikePath(L"C:") && !ti::LooksLikePath(L"notepad") && !ti::LooksLikePath(L"readme.md") &&
+              !ti::LooksLikePath(L"~") && !ti::LooksLikePath(L"100%") && !ti::LooksLikePath(L"%%"),
+              "other text is not a path");
+
+        // ~ becomes the profile folder; forward slashes become backslashes.
+        Check(ti::ExpandHome(L"~\\Doc", L"C:\\Users\\sam") == L"C:\\Users\\sam\\Doc", "~ expands to the profile");
+        Check(ti::ExpandHome(L"~/Doc", L"C:\\Users\\sam") == L"C:\\Users\\sam\\Doc", "~/ expands with a backslash");
+        Check(ti::ExpandHome(L"C:/Us", L"C:\\Users\\sam") == L"C:\\Us", "forward slashes are normalised");
+
+        // Folder + partial name.
+        auto q = ti::SplitPathQuery(L"C:\\Users\\sa");
+        Check(q.kind == ti::PathKind::Local && q.folder == L"C:\\Users\\" && q.partial == L"sa", "local split");
+        q = ti::SplitPathQuery(L"C:\\");
+        Check(q.kind == ti::PathKind::Local && q.folder == L"C:\\" && q.partial.empty(), "drive root lists everything");
+        q = ti::SplitPathQuery(L"\\\\nas\\share\\Ph");
+        Check(q.kind == ti::PathKind::Network && q.folder == L"\\\\nas\\share\\" && q.partial == L"Ph", "UNC split");
+        q = ti::SplitPathQuery(L"\\\\nas\\sha");
+        Check(q.kind == ti::PathKind::NeedsShare, "a bare \\\\server is not listed");
+
+        // Filtering: hidden items only with a leading dot; prefix matches first,
+        // then "contains"; folders before files; then by name.
+        const std::vector<ti::PathEntry> entries = {
+            {L"notes.txt", false, false}, {L"Documents", true, false}, {L"docs.md", false, false},
+            {L"MyDocs", true, false}, {L".git", true, true}, {L"desktop.ini", false, true},
+        };
+        auto names = [](const std::vector<ti::PathEntry>& list) {
+            std::wstring joined;
+            for (const auto& e : list) joined += e.name + L"|";
+            return joined;
+        };
+        Check(names(ti::FilterPathEntries(entries, L"doc")) == L"Documents|docs.md|MyDocs|",
+              "prefix matches first (folders, then files), then contains matches");
+        Check(names(ti::FilterPathEntries(entries, L"")) == L"Documents|MyDocs|docs.md|notes.txt|",
+              "no filter: folders then files by name, hidden items left out");
+        Check(names(ti::FilterPathEntries(entries, L".")) == L".git|",
+              "a leading dot shows hidden items");
+
+        // Tab completion keeps what was typed before the partial name.
+        Check(ti::CompleteTypedPath(L"%APPDATA%\\Mi", L"Microsoft", true) == L"%APPDATA%\\Microsoft\\",
+              "completing a folder keeps %VAR% and adds a backslash");
+        Check(ti::CompleteTypedPath(L"~/Doc", L"Documents", true) == L"~/Documents\\", "completing keeps ~/");
+        Check(ti::CompleteTypedPath(L"C:\\Users\\sa", L"sam.txt", false) == L"C:\\Users\\sam.txt",
+              "completing a file adds no backslash");
+        Check(ti::kMaxPathEntries == 2000, "listings are capped at 2,000 entries");
+    }
+
+    // -----------------------------------------------------------------------------
+    // US-044: settings export/import (pure logic in src/settings_io.h)
+    // -----------------------------------------------------------------------------
+    {
+        namespace io = leanlauncher::settings_io;
+        const takeoff::Settings defaults;
+
+        // Round trip: exporting the defaults and importing them changes nothing.
+        const std::string exported = io::ExportJson(defaults, {}, {}, L"1.8.0");
+        Check(exported.find("\"format\": \"lean-launcher-settings\"") != std::string::npos, "export names its format");
+        Check(exported.find("\"schemaVersion\": 1") != std::string::npos, "export has schema version 1");
+        Check(exported.find("RunAtStartup") == std::string::npos, "run-at-startup is never exported");
+        Check(exported.find("VaultPath") == std::string::npos, "the vault path is left out by default");
+        io::ImportResult roundTrip = io::ParseImport(exported, defaults);
+        Check(roundTrip.ok, "the exported file imports");
+        Check(roundTrip.changed == 0 && roundTrip.skipped.empty(), "importing the defaults changes and skips nothing");
+        Check(io::ExportJson(roundTrip.settings, {}, {}, L"1.8.0") == exported, "the imported settings export identically");
+
+        // A changed setting is applied; others are kept.
+        takeoff::Settings custom = defaults;
+        custom.taskPrefix = L"td";
+        custom.enableWebSearch = false;
+        custom.logHeading = L"## Journal";
+        custom.launcherHotkey = {takeoff::kModControl | takeoff::kModAlt, 'L', false};
+        io::ImportResult applied = io::ParseImport(io::ExportJson(custom, {}, {}, L"1.8.0"), defaults);
+        Check(applied.ok && applied.changed == 4, "four changed settings are counted");
+        Check(applied.settings.taskPrefix == L"td" && !applied.settings.enableWebSearch &&
+              applied.settings.logHeading == L"## Journal" && applied.settings.launcherHotkey.key == 'L',
+              "changed settings are applied");
+
+        // Only keys in the file change.
+        io::ImportResult partial = io::ParseImport(
+            R"({"format":"lean-launcher-settings","schemaVersion":1,"settings":{"TaskPrefix":"x"}})", custom);
+        Check(partial.ok && partial.settings.taskPrefix == L"x" && partial.settings.logHeading == L"## Journal",
+              "settings missing from the file keep their current value");
+
+        // Validators - each bad value is skipped with a reason, the rest applies.
+        auto importSetting = [&](const char* key, const char* jsonValue) {
+            const std::string json = std::string(R"({"format":"lean-launcher-settings","schemaVersion":1,"settings":{")") +
+                key + "\":" + jsonValue + ",\"LogHeading\":\"## Done\"}}";
+            return io::ParseImport(json, defaults);
+        };
+        io::ImportResult r = importSetting("TaskTargetNote", "\"..\\\\Windows\\\\x\"");
+        Check(r.ok && r.settings.taskTargetNote.empty() && r.skipped.size() == 1 && r.settings.logHeading == L"## Done",
+              "a target note outside the vault is skipped, other settings still apply");
+        r = importSetting("NoteAddTargetNote", "\"C:\\\\x\"");
+        Check(r.settings.noteAddTargetNote.empty() && r.skipped.size() == 1, "an absolute target note is skipped");
+        r = importSetting("LogTargetNote", "\"CON\"");
+        Check(r.settings.logTargetNote.empty() && r.skipped.size() == 1, "a reserved device name is skipped");
+        r = importSetting("TaskTargetNote", "\"Inbox/Tasks.md\"");
+        Check(r.settings.taskTargetNote == L"Inbox/Tasks" && r.skipped.empty(), "a valid target note is normalised");
+        r = importSetting("WebSearchUrlTemplate", "\"https://example.com/search\"");
+        Check(r.settings.webSearchUrlTemplate == defaults.webSearchUrlTemplate && r.skipped.size() == 1,
+              "a web template without {query} is skipped");
+        r = importSetting("WebSearchUrlTemplate", "\"https://duckduckgo.com/?q={query}\"");
+        Check(r.settings.webSearchUrlTemplate == L"https://duckduckgo.com/?q={query}" && r.skipped.empty(),
+              "a valid web template applies");
+        r = importSetting("TaskPrefix", "\"a\"");  // collides with the note prefix "a"
+        Check(r.settings.taskPrefix == defaults.taskPrefix && r.skipped.size() == 1, "a colliding prefix is skipped");
+        r = importSetting("TaskPrefix", "\"\"");
+        Check(r.settings.taskPrefix == defaults.taskPrefix && r.skipped.size() == 1, "an empty prefix is skipped");
+        r = importSetting("LauncherKey", "115");  // Alt+F4 is reserved by Windows
+        Check(r.settings.launcherHotkey == defaults.launcherHotkey && r.skipped.size() == 1, "a reserved hotkey is skipped");
+        r = importSetting("QuickOpenTarget", "9");
+        Check(r.settings.quickOpenTarget == defaults.quickOpenTarget && r.skipped.size() == 1,
+              "an out-of-range quick-open target is skipped");
+        r = importSetting("TaskPillLabel", ("\"" + std::string(300, 'x') + "\"").c_str());
+        Check(r.settings.taskPillLabel == defaults.taskPillLabel && r.skipped.size() == 1, "an over-long text is skipped");
+        r = importSetting("FileSearchEnabled", "\"yes\"");
+        Check(r.settings.enableFileSearch == defaults.enableFileSearch && r.skipped.size() == 1,
+              "a wrong-type value is skipped");
+        r = importSetting("RunAtStartup", "true");
+        Check(!r.settings.runAtStartup, "an import never turns on run-at-startup (NFR-016)");
+        r = importSetting("SomethingNew", "1");
+        Check(r.ok && r.skipped.empty(), "unknown keys are ignored");
+
+        // One check per text setting, shared by the Settings screen and the import.
+        using Member = std::wstring takeoff::Settings::*;
+        const auto check = [&](Member member, const wchar_t* proposed) {
+            return io::CheckTextSetting(defaults, member, proposed);
+        };
+        Check(io::TextSettingMember(defaults, &defaults.pomodoroPrefix) == &takeoff::Settings::pomodoroPrefix,
+              "a Settings field maps back to its member");
+        Check(io::TextSettingMember(defaults, &custom.taskPrefix) == nullptr,
+              "a field of another Settings object maps to nothing");
+        Check(check(&takeoff::Settings::taskPrefix, L"a").error != nullptr, "the shared check rejects a colliding prefix");
+        Check(check(&takeoff::Settings::pomodoroPrefix, L"").error != nullptr, "the shared check rejects an empty prefix");
+        Check(check(&takeoff::Settings::systemCommandsPrefix, L"zz").error == nullptr,
+              "the shared check accepts a free prefix");
+        Check(check(&takeoff::Settings::pomodoroFocusMinutes, L"181").error != nullptr &&
+              check(&takeoff::Settings::pomodoroBreakMinutes, L"5").error == nullptr,
+              "the shared check applies the minutes range");
+        Check(check(&takeoff::Settings::webSearchUrlTemplate, L"https://example.com/search").error != nullptr,
+              "the shared check rejects a web template without {query}");
+        const io::TextCheck target = check(&takeoff::Settings::logTargetNote, L"Inbox/Log.md");
+        Check(target.error == nullptr && target.value == L"Inbox/Log", "the shared check normalises a target note");
+        Check(check(&takeoff::Settings::logTargetNote, L"  ").value.empty(), "a blank target note clears it");
+        Check(check(&takeoff::Settings::logTargetNote, L"C:\\x").error != nullptr,
+              "the shared check rejects a target note outside the vault");
+        Check(check(&takeoff::Settings::logHeading, L"anything").value == L"anything", "plain text passes unchanged");
+
+        // Whole-file rejections.
+        Check(!io::ParseImport("not json", defaults).ok, "garbage is rejected");
+        Check(!io::ParseImport(R"({"format":"something-else","schemaVersion":1,"settings":{}})", defaults).ok,
+              "another format is rejected");
+        Check(!io::ParseImport(std::string(io::kMaxImportBytes + 1, ' '), defaults).ok, "an oversized file is rejected");
+        Check(!io::ParseImport(std::string(200, '[') + std::string(200, ']'), defaults).ok, "deep nesting is rejected");
+        io::ImportResult newer = io::ParseImport(
+            R"({"format":"lean-launcher-settings","schemaVersion":2,"settings":{"TaskPrefix":"z"}})", defaults);
+        Check(newer.ok && newer.newerSchema && newer.settings.taskPrefix == L"z",
+              "a newer schema is imported where possible and flagged");
+
+        // Optional extras round-trip only when asked for.
+        io::PortableExtras extras;
+        extras.vaultPath = L"D:\\Lean Notes";
+        extras.pins = {L"app|C:\\Windows\\notepad.exe"};
+        extras.exclusions = {L"D:\\Archive", L".iso"};
+        const std::string withExtras = io::ExportJson(defaults, extras, {true, true, true}, L"1.8.0");
+        io::ImportResult extrasBack = io::ParseImport(withExtras, defaults);
+        Check(extrasBack.ok && extrasBack.vaultPath && *extrasBack.vaultPath == L"D:\\Lean Notes", "vault path round-trips");
+        Check(extrasBack.hasPins && extrasBack.pins == extras.pins, "pins round-trip");
+        Check(extrasBack.hasExclusions && extrasBack.exclusions == extras.exclusions, "exclusions round-trip");
+        Check(!io::ParseImport(io::ExportJson(defaults, extras, {}, L"1.8.0"), defaults).vaultPath,
+              "extras are left out unless their checkbox is ticked");
+        Check(io::MergeExclusions({L"D:\\Archive", L".tmp"}, {L".tmp", L".iso"}) ==
+                  std::vector<std::wstring>({L"D:\\Archive", L".tmp", L".iso"}),
+              "exclusions are merged, not replaced, without duplicates");
+        // Unicode and escapes survive.
+        takeoff::Settings unicode = defaults;
+        unicode.logHeading = L"## Tagebuch \u00fc \"quoted\" \\ back";
+        Check(io::ParseImport(io::ExportJson(unicode, {}, {}, L"1.8.0"), defaults).settings.logHeading == unicode.logHeading,
+              "non-ASCII text, quotes and backslashes round-trip");
+    }
+
+    // -----------------------------------------------------------------------------
+    // US-047: offline unit converter (pure logic in src/converter.h)
+    // -----------------------------------------------------------------------------
+    {
+        namespace cv = leanlauncher::convert;
+        auto one = [](const wchar_t* query, wchar_t decimal = L'.') -> std::wstring {
+            const auto rows = cv::EvaluateConversion(query, decimal);
+            return rows.empty() ? L"<none>" : rows[0].text;
+        };
+        auto note = [](const wchar_t* query) -> std::wstring {
+            const auto rows = cv::EvaluateConversion(query, L'.');
+            return rows.empty() ? L"<none>" : rows[0].note;
+        };
+        Check(one(L"5 km in mi") == L"3.107 mi", "5 km in mi");
+        Check(one(L"72 f to c") == L"22.22 °C", "72 f to c (temperature offset)");
+        Check(one(L"72f to c") == L"22.22 °C", "a number glued to its unit");
+        Check(one(L"100 c -> f") == L"212 °F", "exact results show without rounding");
+        Check(one(L"0 k = c") == L"-273.15 °C", "kelvin to celsius, = as separator");
+        Check(one(L"(3+2) km in mi") == L"3.107 mi", "the number part can be an expression");
+        Check(one(L"2^10 bytes in KiB") == L"1 KiB", "bytes to KiB");
+        Check(one(L"3 GB in GiB") == L"2.794 GiB", "GB is 1000-based, GiB 1024-based");
+        Check(note(L"3 GB in GiB").find(L"KB = 1000") != std::wstring::npos, "data sizes explain KB vs KiB");
+        Check(one(L"1 gal in l") == L"3.785 L" && note(L"1 gal in l").find(L"imp gal") != std::wstring::npos,
+              "gal means the US gallon and says how to get imperial");
+        Check(one(L"1 imp gal in l") == L"4.546 L", "imperial gallon");
+        Check(one(L"1 cup in ml") == L"236.6 mL", "US cup");
+        Check(one(L"10 in in cm") == L"25.4 cm", "inches, with 'in' as both unit and separator");
+        Check(one(L"5 m in ft") == L"16.4 ft", "m is the metre");
+        Check(one(L"90 min in h") == L"1.5 h", "minutes are min");
+        Check(one(L"180 lb to kg") == L"81.65 kg", "pounds to kilograms");
+        Check(one(L"2 t in kg") == L"2000 kg", "t after a number is the tonne");
+        Check(one(L"100 kmh in mph") == L"62.14 mph", "speed");
+        Check(one(L"1 acre in m2") == L"4047 m²", "area");
+        Check(one(L"2,5 km in mi", L',') == L"1.553 mi", "a decimal comma works when Windows uses one");
+        Check(one(L"2.5 km in mi", L',') == L"1.553 mi", "a decimal point always works");
+        Check(one(L"2,5 km in mi", L'.') == L"<none>", "a comma is not a decimal where Windows uses a point");
+        Check(one(L"5 km in kg") == L"<none>", "different dimensions don't convert");
+        Check(one(L"t 5 kg in lb") == L"<none>", "a capture prefix is not a number");
+        Check(one(L"hello in there") == L"<none>" && one(L"notepad") == L"<none>" && one(L"5 in") == L"<none>",
+              "ordinary text doesn't convert");
+        // A bare "<number> <unit>" lists common conversions, but only for unambiguous units.
+        const auto bare = cv::EvaluateConversion(L"5 km", L'.');
+        Check(bare.size() >= 2 && bare.size() <= 4 && bare[0].text == L"3.107 mi", "5 km lists up to 4 conversions");
+        Check(cv::EvaluateConversion(L"5 m", L'.').empty(), "single-letter units don't list conversions on their own");
+        Check(cv::EvaluateConversion(L"42", L'.').empty(), "a bare number is not a conversion");
+        // The second copy action's text.
+        Check(cv::EvaluateConversion(L"5 km in mi", L'.')[0].copyText == L"5 km = 3.107 mi", "copy text");
+        Check(cv::EvaluateConversion(L"5 km in mi", L'.')[0].valueText == L"3.107", "Enter copies the value");
+    }
+
+    // -----------------------------------------------------------------------------
+    // US-048: time zones (src/timezones.h; DST cases use Windows' own zone data)
+    // -----------------------------------------------------------------------------
+    {
+        namespace tz = leanlauncher::timezones;
+        // Parsing.
+        auto q = tz::ParseTimeQuery(L"time in Tokyo");
+        Check(q && q->kind == tz::TimeQuery::Kind::Now && q->to && std::wstring(q->to->zoneKey) == L"Tokyo Standard Time",
+              "time in Tokyo");
+        q = tz::ParseTimeQuery(L"10am PST in CET");
+        Check(q && q->kind == tz::TimeQuery::Kind::Convert && q->hour == 10 && q->minute == 0 &&
+              std::wstring(q->from->zoneKey) == L"Pacific Standard Time" &&
+              std::wstring(q->to->zoneKey) == L"W. Europe Standard Time", "10am PST in CET");
+        q = tz::ParseTimeQuery(L"15:00 London in New York");
+        Check(q && q->hour == 15 && std::wstring(q->from->zoneKey) == L"GMT Standard Time" &&
+              std::wstring(q->to->zoneKey) == L"Eastern Standard Time", "15:00 London in New York (multi-word place)");
+        q = tz::ParseTimeQuery(L"3pm in Berlin");
+        Check(q && q->hour == 15 && q->from == nullptr, "3pm in Berlin converts from local time");
+        q = tz::ParseTimeQuery(L"12am utc to tokyo");
+        Check(q && q->hour == 0, "12am is midnight");
+        q = tz::ParseTimeQuery(L"12:30pm utc to tokyo");
+        Check(q && q->hour == 12 && q->minute == 30, "12:30pm is half past noon");
+        Check(!tz::ParseTimeQuery(L"10 in tokyo"), "a time needs am/pm or a colon");
+        Check(!tz::ParseTimeQuery(L"time in atlantis"), "an unknown place gives no row");
+        Check(!tz::ParseTimeQuery(L"25:00 utc in cet") && !tz::ParseTimeQuery(L"13pm utc in cet"), "invalid times");
+        Check(!tz::ParseTimeQuery(L"10 in in cm") && !tz::ParseTimeQuery(L"5 km in mi"), "unit conversions aren't times");
+        // Ambiguous abbreviations have a fixed, stated reading.
+        Check(std::wstring(tz::FindPlace(L"ist")->zoneKey) == L"India Standard Time" &&
+              std::wstring(tz::FindPlace(L"ist")->note).find(L"India") != std::wstring::npos, "IST reads as India");
+        Check(std::wstring(tz::FindPlace(L"cst")->zoneKey) == L"Central Standard Time", "CST reads as US Central");
+        Check(std::wstring(tz::FindPlace(L"bst")->zoneKey) == L"GMT Standard Time", "BST reads as British Summer Time");
+
+        // DST-correct conversion on fixed dates (Windows zone rules).
+        tz::ZoneCache zones;
+        Check(zones.Load() && zones.Find(L"Pacific Standard Time") && zones.Find(L"Tokyo Standard Time"),
+              "Windows time zones load");
+        const auto* pacific = zones.Find(L"Pacific Standard Time");
+        const auto* tokyo = zones.Find(L"Tokyo Standard Time");
+        const auto* europe = zones.Find(L"W. Europe Standard Time");
+        auto at = [](WORD y, WORD mo, WORD d, WORD h, WORD mi) {
+            SYSTEMTIME t{}; t.wYear = y; t.wMonth = mo; t.wDay = d; t.wHour = h; t.wMinute = mi; return t;
+        };
+        SYSTEMTIME utc{}, local{};
+        tz::LocalStatus status{};
+        Check(tz::ZoneLocalToUtc(*pacific, at(2026, 7, 1, 10, 0), utc, status) && status == tz::LocalStatus::Ok &&
+              tz::UtcToZoneLocal(*tokyo, utc, local) && local.wDay == 2 && local.wHour == 2,
+              "10:00 PDT on 1 Jul is 02:00 next day in Tokyo");
+        Check(tz::ZoneLocalToUtc(*pacific, at(2026, 1, 15, 10, 0), utc, status) &&
+              tz::UtcToZoneLocal(*tokyo, utc, local) && local.wDay == 16 && local.wHour == 3,
+              "10:00 PST in January is 03:00 next day in Tokyo");
+        Check(tz::OffsetMinutes(*pacific, at(2026, 7, 1, 17, 0)) == -420 &&
+              tz::OffsetMinutes(*pacific, at(2026, 1, 15, 18, 0)) == -480, "Pacific offset follows DST");
+        Check(tz::ZoneLocalToUtc(*pacific, at(2026, 3, 8, 2, 30), utc, status) && status == tz::LocalStatus::Nonexistent,
+              "02:30 on the US spring-forward day doesn't exist");
+        Check(tz::ZoneLocalToUtc(*pacific, at(2026, 11, 1, 1, 30), utc, status) && status == tz::LocalStatus::Ambiguous,
+              "01:30 on the US fall-back day happens twice");
+        Check(tz::ZoneLocalToUtc(*europe, at(2026, 3, 29, 2, 30), utc, status) && status == tz::LocalStatus::Nonexistent,
+              "02:30 on the EU spring-forward day doesn't exist");
+
+        // The row text.
+        const SYSTEMTIME nowUtc = at(2026, 7, 1, 12, 0);  // a Wednesday
+        auto row = tz::EvaluateTimeQuery(L"10am PST in Tokyo", nowUtc, zones);
+        Check(row && row->text == L"02:00 Tokyo (Thu 2 Jul)", "the answer names the place and a changed date");
+        Check(row && row->note.find(L"PST treated as Pacific Time") != std::wstring::npos &&
+              row->note.find(L"UTC-7") != std::wstring::npos, "the note states the reading and the DST offset");
+        Check(row && row->valueText == L"02:00", "Enter copies the time");
+        row = tz::EvaluateTimeQuery(L"time in Tokyo", nowUtc, zones);
+        Check(row && row->text == L"21:00 Tokyo (Wed 1 Jul)" && row->note.find(L"UTC+9") != std::wstring::npos,
+              "time in Tokyo shows the current time, date and offset");
+        row = tz::EvaluateTimeQuery(L"2:30am pst in utc", at(2026, 3, 8, 12, 0), zones);
+        Check(row && row->note.find(L"doesn't exist") != std::wstring::npos, "a non-existent time says so");
+        zones.Clear();
+        Check(!zones.Find(L"Tokyo Standard Time"), "the zone cache can be freed");
+    }
+
+    // -----------------------------------------------------------------------------
+    // US-049: Pomodoro timer (pure logic in src/pomodoro.h)
+    // -----------------------------------------------------------------------------
+    {
+        namespace pm = leanlauncher::pomodoro;
+        using K = pm::Command::Kind;
+        auto parse = [](const wchar_t* text) { return pm::ParseCommand(text, L"pomo", 25, 5); };
+        Check(parse(L"pomo").kind == K::Menu && parse(L"pomo ").kind == K::Menu, "pomo alone shows the menu row");
+        auto c = parse(L"pomo 25 write intro");
+        Check(c.kind == K::StartFocus && c.minutes == 25 && c.label == L"write intro", "pomo 25 write intro");
+        c = parse(L"POMO 50");
+        Check(c.kind == K::StartFocus && c.minutes == 50 && c.label.empty(), "prefix is case-insensitive");
+        c = parse(L"pomo write intro");
+        Check(c.kind == K::StartFocus && c.minutes == 25 && c.label == L"write intro", "a label alone uses the default length");
+        c = parse(L"pomo break");
+        Check(c.kind == K::StartBreak && c.minutes == 5, "pomo break uses the default break length");
+        c = parse(L"pomo break 10");
+        Check(c.kind == K::StartBreak && c.minutes == 10, "pomo break 10");
+        Check(parse(L"pomo stop").kind == K::Stop, "pomo stop");
+        Check(parse(L"pomo 0").kind == K::Invalid && parse(L"pomo 181").kind == K::Invalid, "1-180 minutes only");
+        Check(parse(L"pomodoro").kind == K::None && parse(L"notepad").kind == K::None, "other text is not a pomodoro command");
+
+        // Remaining time and its labels.
+        const unsigned long long minute = 600000000ULL;  // FILETIME ticks
+        Check(pm::RemainingSeconds(1000 * minute, 1000 * minute - 754ULL * 10000000ULL) == 754, "remaining seconds");
+        Check(pm::RemainingSeconds(1000 * minute, 1001 * minute) == 0, "remaining never goes negative");
+        Check(pm::FormatClock(754) == L"12:34" && pm::FormatClock(5) == L"00:05", "mm:ss clock");
+        Check(pm::FooterLabel(754) == L"\U0001F345 13m" && pm::FooterLabel(30) == L"\U0001F345 1m", "footer rounds up");
+        Check(pm::TooltipText(pm::Kind::Focus, 754, L"write intro") == L"Lean Launcher - \U0001F345 13 min left: write intro",
+              "tooltip with label");
+        Check(pm::TooltipText(pm::Kind::Break, 120, L"") == L"Lean Launcher - break, 2 min left", "tooltip for a break");
+
+        // State survives a restart.
+        pm::State state{pm::Kind::Focus, 123456789ULL, 25, L"a|b label"};
+        auto decoded = pm::DecodeState(pm::EncodeState(state));
+        Check(decoded && decoded->kind == pm::Kind::Focus && decoded->endTicks == 123456789ULL &&
+              decoded->minutes == 25 && decoded->label == L"a|b label", "timer state round-trips, even with | in the label");
+        Check(!pm::DecodeState(L"garbage") && !pm::DecodeState(L""), "a damaged saved state is ignored");
+
+        // Logging: finished focus timers only, and only into a note that exists.
+        Check(pm::LogText(25, L"write intro") == L"\U0001F345 25 min - write intro" && pm::LogText(25, L"") == L"\U0001F345 25 min",
+              "log text");
+        Check(pm::ShouldLog(pm::Kind::Focus, pm::EndReason::Finished, true), "a finished focus timer is logged");
+        Check(!pm::ShouldLog(pm::Kind::Break, pm::EndReason::Finished, true), "breaks aren't logged");
+        Check(!pm::ShouldLog(pm::Kind::Focus, pm::EndReason::EndedWhileAsleep, true), "a timer that ended during sleep isn't logged");
+        Check(!pm::ShouldLog(pm::Kind::Focus, pm::EndReason::EndedWhileClosed, true), "a timer that ended while closed isn't logged");
+        Check(!pm::ShouldLog(pm::Kind::Focus, pm::EndReason::Stopped, true), "a stopped timer isn't logged");
+        Check(!pm::ShouldLog(pm::Kind::Focus, pm::EndReason::Finished, false), "logging can be turned off");
+
+        const fs::path pomoDir = fs::temp_directory_path() / L"ll_pomodoro_test";
+        std::error_code pomoEc;
+        fs::remove_all(pomoDir, pomoEc);
+        fs::create_directories(pomoDir, pomoEc);
+        const std::wstring missingNote = (pomoDir / L"2026-09-24.md").wstring();
+        Check(!pm::AppendToExistingNote(missingNote, pm::LogText(25, L"x"), L"## Log") && !fs::exists(missingNote),
+              "a missing daily note is never created by the timer");
+        {
+            std::ofstream note(missingNote, std::ios::binary);
+            note << "# Today\n\n## Log\n- 09:00: start\n";
+        }
+        Check(pm::AppendToExistingNote(missingNote, pm::LogText(25, L"write intro"), L"## Log"), "an existing note gets the line");
+        const std::string written = leanlauncher::obsidian::ReadFileUtf8(missingNote);
+        Check(written.find("25 min - write intro") != std::string::npos && written.find("- 09:00: start") != std::string::npos,
+              "the line is added under the log heading and nothing else is lost");
+        fs::remove_all(pomoDir, pomoEc);
     }
 
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";

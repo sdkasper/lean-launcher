@@ -8,6 +8,7 @@
 #include <dwrite.h>
 #include <wincodec.h>
 #include <imm.h>
+#include <powrprof.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -36,6 +37,13 @@
 #include "daily_note.h"
 #include "note_index.h"
 #include "pins.h"
+#include "settings_layout.h"
+#include "system_commands.h"
+#include "typed_input.h"
+#include "settings_io.h"
+#include "converter.h"
+#include "timezones.h"
+#include "pomodoro.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -74,11 +82,22 @@ constexpr UINT kShellNotifyMessage = WM_APP + 7;
 // Update worker -> UI: "a newer release was found, downloading it" (US-029).
 // WM_APP + 8 to + 11 are taken by file_index.h, note_index.h, obsidian_config.h.
 constexpr UINT kUpdateProgressMessage = WM_APP + 12;
+// Recycle Bin worker -> UI: item count and size for the Empty Recycle Bin row (US-041).
+constexpr UINT kRecycleBinInfoMessage = WM_APP + 13;
+// Path worker -> UI: a folder listing for path completion (US-043); lParam owns a PathListing.
+constexpr UINT kPathListingMessage = WM_APP + 14;
 constexpr UINT_PTR kCaretTimer = 1;
 constexpr UINT_PTR kHotkeyTimer = 2;
 constexpr UINT_PTR kRenderRetryTimer = 3;
 constexpr UINT_PTR kTrimTimer = 4;
 constexpr UINT_PTR kUpdateCheckTimer = 5;
+// Clears a pending "Press Enter again" system command after its timeout (US-041).
+constexpr UINT_PTR kCommandConfirmTimer = 6;
+// Gives up waiting for a network folder listing after 10 s (US-043).
+constexpr UINT_PTR kPathTimeoutTimer = 7;
+// Pomodoro (US-049): a coarse 30 s refresh plus a one-shot at the exact end.
+constexpr UINT_PTR kPomodoroTickTimer = 8;
+constexpr UINT_PTR kPomodoroEndTimer = 9;
 
 struct AppEntry {
     std::wstring name;
@@ -91,6 +110,8 @@ struct AppEntry {
     // Informational row only - activating it (Enter, click, actions menu)
     // does nothing. E.g. a quick-open note that does not exist yet.
     bool inert = false;
+    // Title for a calculator-style row, e.g. "Conversion - US units ..." (US-047).
+    std::wstring note;
 };
 
 struct RankedResult {
@@ -261,6 +282,33 @@ void ScanAppsFolder(std::vector<AppEntry>& apps) {
                 }
             }
         }
+    }
+}
+
+// US-041: lock, sleep, restart, ... as result rows. Sleep and hibernate are
+// only listed when this machine supports them. The launcher hides every
+// command row while System commands is turned off in Settings.
+void AddSystemCommands(std::vector<AppEntry>& apps) {
+    namespace sc = leanlauncher::syscmd;
+    sc::PowerCaps caps;
+    SYSTEM_POWER_CAPABILITIES power{};
+    if (GetPwrCapabilities(&power)) {
+        caps.canSleep = power.SystemS3 || power.AoAc;
+        caps.canHibernate = power.SystemS4 && power.HiberFilePresent;
+    }
+    for (const auto& def : sc::kCommands) {
+        if (!sc::IsAvailable(def.id, caps)) continue;
+        std::vector<std::wstring> aliases;
+        for (const wchar_t* alias : def.aliases) {
+            if (alias) aliases.push_back(Normalize(alias));
+        }
+        AppEntry entry;
+        entry.name = def.name;
+        entry.normalizedName = Normalize(entry.name);
+        entry.path = sc::CommandPath(def.id);
+        entry.category = AppCategory::Command;
+        entry.aliases = std::move(aliases);
+        apps.push_back(std::move(entry));
     }
 }
 
@@ -452,6 +500,7 @@ void AddSystemItems(std::vector<AppEntry>& apps) {
             });
         }
     }
+    AddSystemCommands(apps);
 }
 
 std::vector<AppEntry> BuildAppIndex() {

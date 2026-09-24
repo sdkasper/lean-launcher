@@ -24,7 +24,7 @@
 
 <p align="center">
   <b>⚡ &lt; 1 MB binary</b> &nbsp;&bull;&nbsp;
-  <b>🧠 ~10 MB RAM</b> &nbsp;&bull;&nbsp;
+  <b>🧠 No Electron, no runtime</b> &nbsp;&bull;&nbsp;
   <b>🚀 &lt; 1 ms search</b> &nbsp;&bull;&nbsp;
   <b>🔒 Zero telemetry</b>
 </p>
@@ -35,15 +35,20 @@
 
 ### Launcher Core
 
-- **Ultra-Lightweight** - Built in pure C++, Win32, and Direct2D. No Electron, no Chromium runtime. The entire executable is under 1 MB and uses just ~10 MB RAM.
+- **Ultra-Lightweight** - Built in pure C++, Win32, and Direct2D. No Electron, no Chromium runtime. The entire executable is under 1 MB. Memory depends on what it indexes: on a test machine with a large vault it used about 70 MB with file search off and about 130 MB with full-disk file search on. Turning File search off frees its index straight away.
 - **Instant Search** - In-memory indexing and weighted fuzzy matching return results in under a millisecond.
 - **Smart Matching** - Finds apps by acronyms and prefixes: `vsc` → Visual Studio Code, `tm` → Task Manager, `wu` → Windows Update, `dev man` → Device Manager
 - **System Tools Included** - Instantly launch Control Panel applets, Windows Settings, Device Manager, and Services alongside desktop apps.
+- **System commands** - type `lock`, `sleep`, `hibernate`, `restart`, `shut down`, `sign out`, or `empty recycle bin` (or `s ` to list them all, `s re` to narrow). Restart, shut down, sign out, and emptying the Recycle Bin ask for a second `Enter` first; the Recycle Bin row shows how many items it holds. Sleep and hibernate only appear if your PC supports them. Commands never show on the empty search box, can't be pinned, and never appear in recent items. Turn them off or change the `s` prefix in Settings > Search.
+- **Typed URLs** - type `https://...`, `www...`, or a bare address like `github.com/sdkasper` and press `Enter` to open it in your browser (bare addresses rank below your top match, so `readme.md` still finds the file). Only http and https are opened, and no URL history is kept.
+- **Path completion** - type `C:\Us`, `%APPDATA%\Mi`, `~\Doc`, or `\\server\share\` to browse that folder right in the results; `Tab` completes, `Enter` opens, `Shift+Enter` opens the typed path. Folders load in the background, so an unreachable share never freezes the launcher.
+- **Unit and time zone converter** - `5 km in mi`, `72 f to c`, `3 GB in GiB`, `time in Tokyo`, `10am PST in CET`. Offline, with daylight saving from Windows' own time zone rules.
+- **Pomodoro timer** - `pomo 25 write intro` starts a focus timer with a tray reminder; finished timers are logged to today's note if it exists (the timer never creates a note or starts Obsidian).
 - **Built-in Calculator** - Instantly evaluate mathematical expressions (e.g. `125 * 8`, `sqrt(144)`, `2^10`, `(10 + 20) * 3`). Press `Enter` to copy the result to the clipboard and close, or `Ctrl+C` to copy directly.
 - **Keyboard-First** - Launch, elevate to admin (`Ctrl+Enter`), and trigger quick-launch slots (`Alt+1`-`8`) without touching your mouse.
 - **Privacy First** - Zero telemetry, zero analytics, and zero background services. Search history is never written to disk.
 - **Pinned results** - pin up to 5 apps, files, or folders from the actions menu (`Ctrl+K` → Pin). Pins stay at the top of the empty search box and jump to the top whenever they match what you type.
-- **About tab** - version, author, a link to the GitHub repo, and how many files and vault notes are currently indexed, right from Settings. A **Check for updates** row checks GitHub on demand (even with automatic checks off); when a newer release has downloaded, a second click installs it and restarts.
+- **About tab** - version, author, a link to the GitHub repo, and how many files and vault notes are currently indexed, right from Settings. **Export settings... / Import settings...** move your setup to another PC; an import shows what will change before applying and keeps a backup of your old settings. A **Check for updates** row checks GitHub on demand (even with automatic checks off); when a newer release has downloaded, a second click installs it and restarts.
 
 ### File Search
 

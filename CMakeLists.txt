@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(LeanLauncher VERSION 1.7.0 LANGUAGES CXX)
+project(LeanLauncher VERSION 1.8.0 LANGUAGES CXX)
 
 function(add_launcher target)
 add_executable(${target} WIN32
@@ -14,6 +14,13 @@ add_executable(${target} WIN32
     src/daily_note.h
     src/note_index.h
     src/pins.h
+    src/settings_layout.h
+    src/system_commands.h
+    src/typed_input.h
+    src/settings_io.h
+    src/converter.h
+    src/timezones.h
+    src/pomodoro.h
     src/LeanLauncher.manifest
     src/LeanLauncher.rc
 )
@@ -34,6 +41,7 @@ target_link_libraries(${target} PRIVATE
     imm32
     advapi32
     winhttp
+    powrprof
 )
 
 set_target_properties(${target} PROPERTIES

@@ -65,12 +65,14 @@ public:
             indexWorkerThread_ = std::thread([this] { IndexWorkerMain(); });
         } catch (const std::system_error&) {}
         if constexpr (!kUiTest) {
-            FileIndex::Instance().Start(hwnd_);
+            // NFR-018: File search off means no index in memory at all.
+            if (settings_.enableFileSearch) FileIndex::Instance().Start(hwnd_);
             if (settings_.obsidianEnabled && !obsidianVaultPath_.empty()) {
                 leanlauncher::obsidian::NoteIndex::Instance().Start(obsidianVaultPath_, hwnd_);
             }
         }
         SetTimer(hwnd_, kHotkeyTimer, 2000, nullptr);
+        RestorePomodoro();
         // Not forced: let the 24h throttle in CheckForUpdatesAsync decide
         // whether a launch actually warrants a network call.
         CheckForUpdatesAsync();
@@ -279,6 +281,29 @@ private:
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
+        case kPathListingMessage: {
+            // US-043: a listing that arrives after the query moved on is dropped.
+            std::unique_ptr<PathListing> listing(reinterpret_cast<PathListing*>(lParam));
+            --pathThreadsRunning_;
+            if (listing && listing->generation == pathGeneration_ && settings_.enablePathCompletion) {
+                KillTimer(hwnd_, kPathTimeoutTimer);
+                pathListedFolder_ = std::move(listing->folder);
+                pathEntries_ = std::move(listing->entries);
+                pathError_ = listing->error;
+                pathTruncated_ = listing->truncated;
+                pathListingReady_ = true;
+                pathTimedOut_ = false;
+                if (IsWindowVisible(hwnd_)) UpdateResults();
+            }
+            return 0;
+        }
+        case kRecycleBinInfoMessage:
+            // US-041: count and size for the Empty Recycle Bin row (x64: both fit).
+            recycleBinQueryPending_ = false;
+            recycleBinItems_ = static_cast<long long>(wParam);
+            recycleBinBytes_ = static_cast<long long>(lParam);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
         case kUpdateProgressMessage: {
             std::unique_ptr<takeoff::UpdateCheckResult> result(reinterpret_cast<takeoff::UpdateCheckResult*>(lParam));
             if (result) updateTag_ = result->tag;
@@ -286,8 +311,12 @@ private:
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
+        case WM_POWERBROADCAST:
+            // US-049: re-check the timer right after waking; never wake the PC for it.
+            if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) CheckPomodoro(true);
+            return TRUE;
         case WM_ACTIVATE:
-            if (LOWORD(wParam) == WA_INACTIVE && IsWindowVisible(hwnd_)) Hide();
+            if (LOWORD(wParam) == WA_INACTIVE && IsWindowVisible(hwnd_) && !modalDialogOpen_) Hide();
             return 0;
         case WM_SETFOCUS:
             // A hidden system caret exposes the insertion point to IME/accessibility.
@@ -302,6 +331,19 @@ private:
         case WM_TIMER:
             if (wParam == kRenderRetryTimer) {
                 KillTimer(hwnd_, kRenderRetryTimer);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (wParam == kPomodoroTickTimer || wParam == kPomodoroEndTimer) {
+                if (wParam == kPomodoroEndTimer) KillTimer(hwnd_, kPomodoroEndTimer);
+                CheckPomodoro(false);
+            } else if (wParam == kPathTimeoutTimer) {
+                KillTimer(hwnd_, kPathTimeoutTimer);
+                if (!pathListingReady_) {
+                    pathTimedOut_ = true;
+                    UpdateResults();
+                }
+            } else if (wParam == kCommandConfirmTimer) {
+                KillTimer(hwnd_, kCommandConfirmTimer);
+                commandGate_.Cancel();
                 InvalidateRect(hwnd_, nullptr, FALSE);
             } else if (wParam == kTrimTimer) {
                 KillTimer(hwnd_, kTrimTimer);
@@ -624,6 +666,13 @@ private:
                 settings_.checkForUpdates = ReadDword(key, L"CheckForUpdates", 0) != 0;
                 settings_.enableFileSearch = ReadDword(key, L"FileSearchEnabled", 1) != 0;
                 settings_.enableWebSearch = ReadDword(key, L"WebSearchEnabled", 1) != 0;
+                settings_.enableSystemCommands = ReadDword(key, L"SystemCommandsEnabled", 1) != 0;
+                settings_.enableTypedUrls = ReadDword(key, L"TypedUrlsEnabled", 1) != 0;
+                settings_.enablePathCompletion = ReadDword(key, L"PathCompletionEnabled", 1) != 0;
+                settings_.enableUnitConverter = ReadDword(key, L"UnitConverterEnabled", 1) != 0;
+                settings_.enableTimeZones = ReadDword(key, L"TimeZonesEnabled", 1) != 0;
+                settings_.enablePomodoro = ReadDword(key, L"PomodoroEnabled", 1) != 0;
+                settings_.pomodoroLog = ReadDword(key, L"PomodoroLog", 1) != 0;
                 settings_.runAtStartup = ReadDword(key, L"RunAtStartup", 0) != 0;
                 settings_.vaultSearchEnabled = ReadDword(key, L"VaultSearchEnabled", 1) != 0;
                 settings_.taskAddEnabled = ReadDword(key, L"TaskAddEnabled", 1) != 0;
@@ -668,6 +717,10 @@ private:
                 readStringSetting(L"WebSearchPillLabel", settings_.webSearchPillLabel);
                 readStringSetting(L"FileSearchPrefix", settings_.fileSearchPrefix);
                 readStringSetting(L"AppSearchPrefix", settings_.appSearchPrefix);
+                readStringSetting(L"SystemCommandsPrefix", settings_.systemCommandsPrefix);
+                readStringSetting(L"PomodoroPrefix", settings_.pomodoroPrefix);
+                readStringSetting(L"PomodoroFocusMinutes", settings_.pomodoroFocusMinutes);
+                readStringSetting(L"PomodoroBreakMinutes", settings_.pomodoroBreakMinutes);
                 readStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
                 readStringSetting(L"VaultSearchPillLabel", settings_.vaultSearchPillLabel);
                 readStringSetting(L"TaskPrefix", settings_.taskPrefix);
@@ -931,6 +984,13 @@ private:
                 {L"CheckForUpdates", settings_.checkForUpdates ? 1u : 0u},
                 {L"FileSearchEnabled", settings_.enableFileSearch ? 1u : 0u},
                 {L"WebSearchEnabled", settings_.enableWebSearch ? 1u : 0u},
+                {L"SystemCommandsEnabled", settings_.enableSystemCommands ? 1u : 0u},
+                {L"TypedUrlsEnabled", settings_.enableTypedUrls ? 1u : 0u},
+                {L"PathCompletionEnabled", settings_.enablePathCompletion ? 1u : 0u},
+                {L"UnitConverterEnabled", settings_.enableUnitConverter ? 1u : 0u},
+                {L"TimeZonesEnabled", settings_.enableTimeZones ? 1u : 0u},
+                {L"PomodoroEnabled", settings_.enablePomodoro ? 1u : 0u},
+                {L"PomodoroLog", settings_.pomodoroLog ? 1u : 0u},
                 {L"RunAtStartup", settings_.runAtStartup ? 1u : 0u},
                 {L"ObsidianEnabled", settings_.obsidianEnabled ? 1u : 0u},
                 {L"VaultSearchEnabled", settings_.vaultSearchEnabled ? 1u : 0u},
@@ -956,6 +1016,10 @@ private:
             writeStringSetting(L"WebSearchPillLabel", settings_.webSearchPillLabel);
             writeStringSetting(L"FileSearchPrefix", settings_.fileSearchPrefix);
             writeStringSetting(L"AppSearchPrefix", settings_.appSearchPrefix);
+            writeStringSetting(L"SystemCommandsPrefix", settings_.systemCommandsPrefix);
+            writeStringSetting(L"PomodoroPrefix", settings_.pomodoroPrefix);
+            writeStringSetting(L"PomodoroFocusMinutes", settings_.pomodoroFocusMinutes);
+            writeStringSetting(L"PomodoroBreakMinutes", settings_.pomodoroBreakMinutes);
             writeStringSetting(L"VaultPath", obsidianVaultPath_);
             writeStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
             writeStringSetting(L"VaultSearchPillLabel", settings_.vaultSearchPillLabel);
@@ -1174,10 +1238,16 @@ private:
 
     void UpdateTrayIcon() {
         if constexpr (!kUiTest) {
-            if (!settings_.showTrayIcon) {
+            if (!settings_.showTrayIcon && !balloonTempIcon_) {
                 RemoveTrayIcon();
                 return;
             }
+            AddTrayIcon();
+        }
+    }
+
+    void AddTrayIcon() {
+        if constexpr (!kUiTest) {
             NOTIFYICONDATAW data{sizeof(data)};
             data.hWnd = hwnd_;
             data.uID = 1;
@@ -1191,7 +1261,11 @@ private:
                 MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
                 GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
             data.hIcon = icon ? icon : LoadIconW(nullptr, IDI_APPLICATION);
-            wcscpy_s(data.szTip, L"Lean Launcher");
+            const std::wstring tip = pomodoro_
+                ? leanlauncher::pomodoro::TooltipText(pomodoro_->kind,
+                    leanlauncher::pomodoro::RemainingSeconds(pomodoro_->endTicks, NowTicks()), pomodoro_->label)
+                : std::wstring(L"Lean Launcher");
+            wcsncpy_s(data.szTip, tip.c_str(), _TRUNCATE);
             if (Shell_NotifyIconW(trayIconAdded_ ? NIM_MODIFY : NIM_ADD, &data)) {
                 trayIconAdded_ = true;
                 data.uVersion = NOTIFYICON_VERSION_4;
@@ -1235,6 +1309,17 @@ private:
     }
 
     void HandleTrayMessage(UINT message) {
+        if (message == NIN_BALLOONUSERCLICK || message == NIN_BALLOONTIMEOUT || message == NIN_BALLOONHIDE) {
+            if (message == NIN_BALLOONUSERCLICK && pomodoroBreakOffer_ && settings_.enablePomodoro && !pomodoro_) {
+                StartPomodoro(leanlauncher::pomodoro::Kind::Break, PomodoroMinutes(settings_.pomodoroBreakMinutes, 5), L"");
+            }
+            pomodoroBreakOffer_ = false;
+            if (balloonTempIcon_) {
+                balloonTempIcon_ = false;
+                if (!settings_.showTrayIcon) RemoveTrayIcon();
+            }
+            return;
+        }
         if (message == WM_LBUTTONUP || message == NIN_SELECT || message == NIN_KEYSELECT) {
             Show();
             return;
@@ -1437,8 +1522,37 @@ private:
     static constexpr int kRowQuickOpenTarget = 43;
     static constexpr int kRowAboutCheckUpdates = 44;
     static constexpr int kRowAboutGithubLink = 45;
-    static constexpr int kSettingsMaxRow = 45;
     static constexpr int kRowResetToDefaults = 46;
+    // 47+: feature toggles (NFR-018), numbered after the Reset sentinel so no
+    // existing row ID shifts; their position comes from kSearchRows.
+    static constexpr int kRowSystemCommandsEnabled = 47;
+    static constexpr int kRowSystemCommandsPrefix = 48;
+    static constexpr int kRowTypedUrlsEnabled = 49;
+    static constexpr int kRowPathCompletionEnabled = 50;
+    static constexpr int kRowAboutExportSettings = 51;  // US-044, About tab BACKUP card
+    static constexpr int kRowAboutImportSettings = 52;
+    static constexpr int kRowUnitConverterEnabled = 53;
+    static constexpr int kRowTimeZonesEnabled = 54;
+    static constexpr int kRowPomodoroEnabled = 55;  // US-049
+    static constexpr int kRowPomodoroPrefix = 56;
+    static constexpr int kRowPomodoroFocusMinutes = 57;
+    static constexpr int kRowPomodoroBreakMinutes = 58;
+    static constexpr int kRowPomodoroLog = 59;
+    static constexpr int kSettingsMaxRow = 59;
+    // SEARCH & FEATURES card rows in screen order. A row's position comes from
+    // its rank here, not its number, so feature toggles (NFR-018) are added by
+    // appending one entry - see settings_layout.h for the geometry.
+    static constexpr int kSearchRows[] = {
+        7, 8, kRowWebSearchEngine, kRowFileSearchPrefix, kRowWebSearchPrefix,
+        kRowAppSearchPrefix, kRowFileSearchEditExclusions, kRowFileSearchHelp,
+        kRowSystemCommandsEnabled, kRowSystemCommandsPrefix, kRowTypedUrlsEnabled, kRowPathCompletionEnabled,
+        kRowUnitConverterEnabled, kRowTimeZonesEnabled,
+        kRowPomodoroEnabled, kRowPomodoroPrefix, kRowPomodoroFocusMinutes, kRowPomodoroBreakMinutes, kRowPomodoroLog,
+    };
+    static constexpr int kSearchRowCount = static_cast<int>(std::size(kSearchRows));
+    static constexpr int SearchRowRank(int row) {
+        return leanlauncher::settings_layout::RowRank(kSearchRows, row);
+    }
 
     // Which of the five Obsidian action blocks is currently expanded, or
     // -1 if all are collapsed. A single int gives accordion behavior for
@@ -1533,14 +1647,17 @@ private:
 
     bool IsRowInCategory(int row, SettingsCategory cat) const {
         if (cat == SettingsCategory::All) {
-            if (row < kRowObsidianEnabled) return row >= 0;
-            return ObsidianRowRank(row) >= 0;
+            if (row >= 0 && row <= 6) return true;
+            return SearchRowRank(row) >= 0 || ObsidianRowRank(row) >= 0;
         }
         if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
         if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
-        if (cat == SettingsCategory::Search) return row >= 7 && row <= kRowFileSearchHelp;
+        if (cat == SettingsCategory::Search) return SearchRowRank(row) >= 0;
         if (cat == SettingsCategory::Obsidian) return ObsidianRowRank(row) >= 0;
-        if (cat == SettingsCategory::About) return row == kRowAboutCheckUpdates || row == kRowAboutGithubLink;
+        if (cat == SettingsCategory::About) {
+            return row == kRowAboutCheckUpdates || row == kRowAboutGithubLink ||
+                row == kRowAboutExportSettings || row == kRowAboutImportSettings;
+        }
         return false;
     }
 
@@ -1556,8 +1673,8 @@ private:
     int LastRowInCategory(SettingsCategory cat) const {
         if (cat == SettingsCategory::Shortcuts) return 3;
         if (cat == SettingsCategory::System) return 6;
-        if (cat == SettingsCategory::Search) return kRowFileSearchHelp;
-        if (cat == SettingsCategory::About) return kRowAboutGithubLink;
+        if (cat == SettingsCategory::Search) return kSearchRows[kSearchRowCount - 1];
+        if (cat == SettingsCategory::About) return kRowAboutImportSettings;
         // Obsidian, and the fallback used for "All" (whose last row is
         // whatever the Obsidian section's current last row is).
         const auto& rows = ObsidianVisibleRows();
@@ -1565,8 +1682,19 @@ private:
     }
 
     int NextSettingsRow(int current, int delta) const {
+        // Screen order, not row-number order: Search and Obsidian rows are
+        // positioned by rank, and later rows (e.g. 40-43, 47+) sit mid-card.
+        std::vector<int> screenOrder;
+        for (int r = 0; r <= 6; ++r) screenOrder.push_back(r);
+        screenOrder.insert(screenOrder.end(), std::begin(kSearchRows), std::end(kSearchRows));
+        const auto& obsidianRows = ObsidianVisibleRows();
+        screenOrder.insert(screenOrder.end(), obsidianRows.begin(), obsidianRows.end());
+        screenOrder.push_back(kRowAboutCheckUpdates);
+        screenOrder.push_back(kRowAboutGithubLink);
+        screenOrder.push_back(kRowAboutExportSettings);
+        screenOrder.push_back(kRowAboutImportSettings);
         std::vector<int> activeRows;
-        for (int r = 0; r <= kSettingsMaxRow; ++r) {
+        for (int r : screenOrder) {
             if (IsRowInCategory(r, settingsCategory_)) {
                 activeRows.push_back(r);
             }
@@ -1612,24 +1740,20 @@ private:
 
     float SettingsContentBottom() const {
         if (settingsCategory_ == SettingsCategory::All) {
-            // 855 = fixed header offset for the OBSIDIAN card in the All view
-            // (Search card start 441 + 8 rows * 47 + 38 gap, see the Search
-            // branch below); +16 bottom padding.
-            return 855.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
+            // Obsidian is the last card; its top follows the Search card's size.
+            return leanlauncher::settings_layout::AllContentBottom(kSearchRowCount, ObsidianRowCount());
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 240.0f;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 193.0f;
         } else if (settingsCategory_ == SettingsCategory::Search) {
-            // 8 rows (File search, Web search, Search engine - US-016; File/Web/App
-            // search prefix - US-017; Edit exclusions, Help - US-019) + 16 bottom padding.
-            return 428.0f;
+            return leanlauncher::settings_layout::SearchCategoryContentBottom(kSearchRowCount);
         } else if (settingsCategory_ == SettingsCategory::Obsidian) {
             // 36 header offset + N rows + 16 bottom padding.
             return 36.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
         } else if (settingsCategory_ == SettingsCategory::About) {
-            // INDEX card (US-027) sits below the one-row LINKS card; 2 rows + 16 bottom padding.
-            return AboutIndexCardTop() + 2 * kSettingsRowHeight + 16.0f;
+            // BACKUP card (US-044) is last, below INDEX; 2 rows + 16 bottom padding.
+            return AboutBackupCardTop() + 2 * kSettingsRowHeight + 16.0f;
         }
         return 200.0f;
     }
@@ -1643,6 +1767,8 @@ private:
     static constexpr float AboutLinksCardTop() { return AboutLinksHeaderTop() + 20.0f; }
     static constexpr float AboutIndexHeaderTop() { return AboutLinksCardTop() + kSettingsRowHeight + 18.0f; }
     static constexpr float AboutIndexCardTop() { return AboutIndexHeaderTop() + 20.0f; }
+    static constexpr float AboutBackupHeaderTop() { return AboutIndexCardTop() + 2 * kSettingsRowHeight + 18.0f; }
+    static constexpr float AboutBackupCardTop() { return AboutBackupHeaderTop() + 20.0f; }
 
     // "482113" -> "482,113" for the About tab's index counts.
     static std::wstring FormatCount(size_t value) {
@@ -1669,19 +1795,24 @@ private:
         if (settingsCategory_ == SettingsCategory::All) {
             if (row < 4) return 36.0f + row * kSettingsRowHeight;
             if (row < 7) return 262.0f + (row - 4) * kSettingsRowHeight;
-            if (row < kRowObsidianEnabled) return 441.0f + (row - 7) * kSettingsRowHeight;
-            // Obsidian section, All-view only: header@835, card@855.
-            return 855.0f + ObsidianRowRank(row) * kSettingsRowHeight;
+            const int searchRank = SearchRowRank(row);
+            if (searchRank >= 0) return leanlauncher::settings_layout::AllSearchRowTop(searchRank);
+            // Obsidian section, All-view only: directly below the Search card.
+            return leanlauncher::settings_layout::AllObsidianCardTop(kSearchRowCount) +
+                ObsidianRowRank(row) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
             return 36.0f + row * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::System) {
             return 36.0f + (row - 4) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::Search) {
-            return 36.0f + (row - 7) * kSettingsRowHeight;
+            return leanlauncher::settings_layout::CategoryRowTop(SearchRowRank(row));
         } else if (settingsCategory_ == SettingsCategory::Obsidian) {
             return 36.0f + ObsidianRowRank(row) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::About) {
-            return row == kRowAboutCheckUpdates ? AboutUpdatesCardTop() : AboutLinksCardTop();
+            if (row == kRowAboutCheckUpdates) return AboutUpdatesCardTop();
+            if (row == kRowAboutExportSettings) return AboutBackupCardTop();
+            if (row == kRowAboutImportSettings) return AboutBackupCardTop() + kSettingsRowHeight;
+            return AboutLinksCardTop();
         }
         return 0.0f;
     }
@@ -1725,8 +1856,8 @@ private:
         if (settingsCategory_ == SettingsCategory::All) {
             if (row == 0) sectionHeaderTop = 16.0f;
             else if (row == 4) sectionHeaderTop = 242.0f;
-            else if (row == 7) sectionHeaderTop = 421.0f;
-            else if (row == kRowObsidianEnabled) sectionHeaderTop = 835.0f;
+            else if (row == 7) sectionHeaderTop = leanlauncher::settings_layout::kAllSearchHeaderTop;
+            else if (row == kRowObsidianEnabled) sectionHeaderTop = leanlauncher::settings_layout::AllObsidianHeaderTop(kSearchRowCount);
         } else {
             if (row == 0 || row == 4 || row == 7 || row == kRowObsidianEnabled || row == kRowAboutCheckUpdates) sectionHeaderTop = 16.0f;
         }
@@ -1813,6 +1944,9 @@ private:
         actionsOpen_ = false;
         adminActionHovered_ = false;
         dragging_ = false;
+        CancelCommandConfirm();
+        recycleBinItems_ = -1;  // re-query next time the row shows
+        ReleasePathCompletion();
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
         ShowWindow(hwnd_, SW_HIDE);
@@ -1840,6 +1974,7 @@ private:
         selected_ = firstVisible_ = 0;
         status_.clear();
         actionsOpen_ = false;
+        CancelCommandConfirm();
         ResetCaret();
         UpdateResults();
     }
@@ -1857,6 +1992,21 @@ private:
         // search for "f"; "p" has no toggle) - otherwise the raw text is
         // scored normally below, same as Task/Note/Log when their own
         // toggle is off.
+        // US-041: "s " lists every system command, "s re" narrows them;
+        // nothing else is shown while the prefix is typed.
+        std::wstring commandFilter;
+        if (settings_.enableSystemCommands && leanlauncher::syscmd::TryParseCommandPrefix(
+                input_.text, settings_.systemCommandsPrefix, commandFilter)) {
+            ShowCommandResults(Normalize(commandFilter));
+            return;
+        }
+        // US-049: "pomo ..." shows only timer rows.
+        if (settings_.enablePomodoro && ShowPomodoroResults()) return;
+        // US-043: a typed path shows only completions for that folder.
+        if (settings_.enablePathCompletion && leanlauncher::typed::LooksLikePath(TrimmedQuery())) {
+            ShowPathResults();
+            return;
+        }
         std::wstring scopedText = input_.text;
         bool fileSearchOnly = false;
         bool appSearchOnly = false;
@@ -1890,6 +2040,8 @@ private:
                 if (index < appCount && PinRank(index) < 0) results_.push_back(index);
             }
             for (size_t i = 0; i < appCount; ++i) {
+                // US-041: commands only appear when typed, never in the empty view.
+                if (apps_[i].category == takeoff::AppCategory::Command) continue;
                 if (std::find(recent_.begin(), recent_.end(), i) == recent_.end() && PinRank(i) < 0) {
                     results_.push_back(i);
                 }
@@ -1899,6 +2051,14 @@ private:
             ranked.reserve(apps_.size());
             if (!fileSearchOnly) {
                 for (size_t i = 0; i < apps_.size(); ++i) {
+                    if (apps_[i].category == takeoff::AppCategory::Command) {
+                        // US-041: exact name or alias outranks settings pages.
+                        if (!settings_.enableSystemCommands) continue;
+                        const int commandScore = leanlauncher::syscmd::ScoreCommand(
+                            apps_[i].normalizedName, apps_[i].aliases, query);
+                        if (commandScore >= 0) ranked.push_back({i, commandScore});
+                        continue;
+                    }
                     int recencyRank = -1;
                     auto it = std::find(recent_.begin(), recent_.end(), i);
                     if (it != recent_.end()) {
@@ -1973,6 +2133,9 @@ private:
                 const size_t calcIdx = apps_.size();
                 apps_.push_back(std::move(entry));
                 results_.insert(results_.begin(), calcIdx);
+            } else if (!fileSearchOnly && !appSearchOnly) {
+                if (settings_.enableUnitConverter) AddConversionRows(topAppScore);
+                if (settings_.enableTimeZones) AddTimeZoneRow();
             }
         }
         std::wstring taskText;
@@ -2129,10 +2292,779 @@ private:
                 results_.insert(results_.begin(), noteIndices.begin(), noteIndices.end());
             }
         }
+        if (settings_.enableTypedUrls && !fileSearchOnly && !appSearchOnly) AddTypedUrlRow();
         selected_ = std::clamp(selected_, 0, (std::max)(0, static_cast<int>(results_.size()) - 1));
         EnsureVisible();
         PrepareVisibleIcons();
         InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    // Command rows for the system commands prefix: table order when there's
+    // no filter, best match first otherwise.
+    void ShowCommandResults(const std::wstring& filter) {
+        std::vector<RankedResult> ranked;
+        for (size_t i = 0; i < apps_.size(); ++i) {
+            if (apps_[i].category != takeoff::AppCategory::Command) continue;
+            const int score = filter.empty() ? 0
+                : leanlauncher::syscmd::ScoreCommand(apps_[i].normalizedName, apps_[i].aliases, filter);
+            if (score >= 0) ranked.push_back({i, score});
+        }
+        if (filter.empty()) {
+            const auto tableIndex = [this](size_t appIndex) {
+                const auto command = leanlauncher::syscmd::CommandFromPath(apps_[appIndex].path);
+                return command ? static_cast<int>(*command) : 0;
+            };
+            std::sort(ranked.begin(), ranked.end(), [&](const RankedResult& a, const RankedResult& b) {
+                return tableIndex(a.appIndex) < tableIndex(b.appIndex);
+            });
+        } else {
+            std::stable_sort(ranked.begin(), ranked.end(),
+                [](const RankedResult& a, const RankedResult& b) { return a.score > b.score; });
+        }
+        for (const auto& r : ranked) results_.push_back(r.appIndex);
+        selected_ = std::clamp(selected_, 0, (std::max)(0, static_cast<int>(results_.size()) - 1));
+        EnsureVisible();
+        PrepareVisibleIcons();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    // US-042: "Open URL" row for typed http(s):// / www. (first) or a bare
+    // domain (below the top match, so a file like readme.md stays first).
+    // US-047: conversion rows in the calculator's row style. A bare
+    // "<number> <unit>" (several rows) doesn't push past a strong app match.
+    void AddConversionRows(int topAppScore) {
+        wchar_t decimal[8] = L".";
+        GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_SDECIMAL, decimal, static_cast<int>(std::size(decimal)));
+        const auto rows = leanlauncher::convert::EvaluateConversion(input_.text, decimal[0] ? decimal[0] : L'.');
+        if (rows.empty() || (rows.size() > 1 && topAppScore >= 9000)) return;
+        size_t insertAt = 0;
+        for (const auto& row : rows) {
+            AppEntry entry;
+            entry.name = row.text;
+            entry.path = row.valueText;       // Enter copies the value
+            entry.parameters = row.source;    // shown as "5 km ="; "Copy calculation" gives "5 km = 3.107 mi"
+            entry.note = row.note;
+            entry.normalizedName = Normalize(entry.name);
+            entry.category = takeoff::AppCategory::Calculator;
+            entry.iconPath = L"calc.exe";
+            results_.insert(results_.begin() + static_cast<std::ptrdiff_t>(insertAt++), apps_.size());
+            apps_.push_back(std::move(entry));
+        }
+    }
+
+    // US-048: one calculator-style row; Windows' zone list loads on the first
+    // time query only.
+    void AddTimeZoneRow() {
+        SYSTEMTIME nowUtc{};
+        GetSystemTime(&nowUtc);
+        const auto row = leanlauncher::timezones::EvaluateTimeQuery(input_.text, nowUtc, timeZones_);
+        if (!row) return;
+        AppEntry entry;
+        entry.name = row->text;
+        entry.path = row->valueText;
+        entry.parameters = row->source;
+        entry.note = row->note;
+        entry.normalizedName = Normalize(entry.name);
+        entry.category = takeoff::AppCategory::Calculator;
+        entry.iconPath = L"calc.exe";
+        results_.insert(results_.begin(), apps_.size());
+        apps_.push_back(std::move(entry));
+    }
+
+    void AddTypedUrlRow() {
+        const std::wstring text = TrimmedQuery();
+        const auto kind = leanlauncher::typed::ClassifyUrl(text);
+        if (kind == leanlauncher::typed::UrlKind::None) return;
+        AppEntry entry;
+        entry.category = AppCategory::Url;
+        entry.name = text;
+        entry.normalizedName = Normalize(text);
+        entry.path = leanlauncher::typed::NormalizeUrl(text);
+        const size_t idx = apps_.size();
+        apps_.push_back(std::move(entry));
+        const size_t pos = leanlauncher::typed::UrlRowPosition(kind, results_.size());
+        results_.insert(results_.begin() + static_cast<std::ptrdiff_t>((std::min)(pos, results_.size())), idx);
+    }
+
+    std::wstring TrimmedQuery() const {
+        const size_t start = input_.text.find_first_not_of(L" \t");
+        if (start == std::wstring::npos) return {};
+        const size_t end = input_.text.find_last_not_of(L" \t");
+        return input_.text.substr(start, end - start + 1);
+    }
+
+    // ---- US-044 settings export/import ---------------------------------------
+    static std::wstring LocalAppDataFolder() {
+        PWSTR path = nullptr;
+        std::wstring folder;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &path))) {
+            folder = std::wstring(path) + L"\\LeanLauncher";
+        }
+        if (path) CoTaskMemFree(path);
+        return folder;
+    }
+
+    static std::vector<std::wstring> ReadExclusionLines(const std::wstring& path) {
+        std::vector<std::wstring> lines;
+        std::ifstream file(path, std::ios::binary);
+        if (!file) return lines;
+        std::ostringstream ss;
+        ss << file.rdbuf();
+        std::wstring content = leanlauncher::obsidian::Utf8ToWide(ss.str());
+        if (!content.empty() && content[0] == static_cast<wchar_t>(0xFEFF)) content.erase(0, 1);
+        size_t pos = 0;
+        while (pos <= content.size()) {
+            const size_t nl = content.find(L'\n', pos);
+            std::wstring line = content.substr(pos, nl == std::wstring::npos ? std::wstring::npos : nl - pos);
+            pos = nl == std::wstring::npos ? content.size() + 1 : nl + 1;
+            const size_t start = line.find_first_not_of(L" \t\r");
+            if (start == std::wstring::npos) continue;
+            line = line.substr(start, line.find_last_not_of(L" \t\r") - start + 1);
+            if (line[0] != L'#') lines.push_back(line);
+        }
+        return lines;
+    }
+
+    leanlauncher::settings_io::PortableExtras CurrentExtras() const {
+        leanlauncher::settings_io::PortableExtras extras;
+        extras.vaultPath = obsidianVaultPath_;
+        for (const auto& pin : pins_) extras.pins.push_back(leanlauncher::pins::EncodePin(pin));
+        extras.exclusions = ReadExclusionLines(takeoff::FileIndex::DefaultExclusionsPath());
+        return extras;
+    }
+
+    static bool WriteUtf8File(const std::wstring& path, const std::string& content) {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        out << content;
+        return static_cast<bool>(out);
+    }
+
+    // File dialogs are modal on this window: keep it from hiding when the
+    // dialog takes focus, and keep the global hotkey from firing meanwhile.
+    struct ModalDialogScope {
+        LauncherWindow& self;
+        explicit ModalDialogScope(LauncherWindow& owner) : self(owner) {
+            self.modalDialogOpen_ = true;
+            if (self.hotkeyRegistered_) {
+                UnregisterHotKey(self.hwnd_, kHotkeyId);
+                self.hotkeyRegistered_ = false;
+            }
+        }
+        ~ModalDialogScope() {
+            self.modalDialogOpen_ = false;
+            self.RegisterShortcut();
+            SetForegroundWindow(self.hwnd_);
+        }
+    };
+
+    void ExportSettings() {
+        ComPtr<IFileSaveDialog> dialog;
+        if (FAILED(CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+            settingsStatus_ = L"Couldn't open the save dialog.";
+            return;
+        }
+        const COMDLG_FILTERSPEC types[] = {{L"Lean Launcher settings (*.json)", L"*.json"}};
+        dialog->SetFileTypes(1, types);
+        dialog->SetDefaultExtension(L"json");
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        wchar_t name[64];
+        swprintf(name, std::size(name), L"LeanLauncher-settings-%04u-%02u-%02u.json", now.wYear, now.wMonth, now.wDay);
+        dialog->SetFileName(name);
+        PWSTR documents = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &documents))) {
+            ComPtr<IShellItem> folder;
+            if (SUCCEEDED(SHCreateItemFromParsingName(documents, nullptr, IID_PPV_ARGS(&folder)))) {
+                dialog->SetFolder(folder.Get());
+            }
+        }
+        if (documents) CoTaskMemFree(documents);
+        enum : DWORD { kVaultBox = 1, kPinsBox = 2, kExclusionsBox = 3 };
+        ComPtr<IFileDialogCustomize> customize;
+        if (SUCCEEDED(dialog.As(&customize))) {
+            customize->AddCheckButton(kVaultBox, L"Include vault path", FALSE);
+            customize->AddCheckButton(kPinsBox, L"Include pins", FALSE);
+            customize->AddCheckButton(kExclusionsBox, L"Include file-search exclusions", FALSE);
+        }
+        HRESULT shown = E_FAIL;
+        {
+            ModalDialogScope scope(*this);
+            shown = dialog->Show(hwnd_);
+        }
+        if (FAILED(shown)) return;  // cancelled
+        ComPtr<IShellItem> item;
+        PWSTR path = nullptr;
+        if (FAILED(dialog->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+            settingsStatus_ = L"Couldn't save the settings file.";
+            return;
+        }
+        const std::wstring target(path);
+        CoTaskMemFree(path);
+        leanlauncher::settings_io::ExportOptions options;
+        if (customize) {
+            BOOL checked = FALSE;
+            options.includeVaultPath = SUCCEEDED(customize->GetCheckButtonState(kVaultBox, &checked)) && checked;
+            options.includePins = SUCCEEDED(customize->GetCheckButtonState(kPinsBox, &checked)) && checked;
+            options.includeExclusions = SUCCEEDED(customize->GetCheckButtonState(kExclusionsBox, &checked)) && checked;
+        }
+        const std::string json = leanlauncher::settings_io::ExportJson(settings_, CurrentExtras(), options,
+            takeoff::kAppVersion);
+        settingsStatus_ = WriteUtf8File(target, json) ? L"Settings exported." : L"Couldn't save the settings file.";
+    }
+
+    void ImportSettings() {
+        namespace io = leanlauncher::settings_io;
+        ComPtr<IFileOpenDialog> dialog;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+            settingsStatus_ = L"Couldn't open the file dialog.";
+            return;
+        }
+        const COMDLG_FILTERSPEC types[] = {{L"Lean Launcher settings (*.json)", L"*.json"}};
+        dialog->SetFileTypes(1, types);
+        HRESULT shown = E_FAIL;
+        {
+            ModalDialogScope scope(*this);
+            shown = dialog->Show(hwnd_);
+        }
+        if (FAILED(shown)) return;
+        ComPtr<IShellItem> item;
+        PWSTR path = nullptr;
+        if (FAILED(dialog->GetResult(&item)) || FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) return;
+        const std::wstring source(path);
+        CoTaskMemFree(path);
+
+        std::error_code ec;
+        const auto size = std::filesystem::file_size(source, ec);
+        if (ec || size > io::kMaxImportBytes) {
+            settingsStatus_ = ec ? L"Couldn't read that file." : L"That file is too large to be a settings file.";
+            return;
+        }
+        std::ifstream file(source, std::ios::binary);
+        std::ostringstream ss;
+        ss << file.rdbuf();
+        io::ImportResult result = io::ParseImport(ss.str(), settings_);
+        if (!result.ok) {
+            settingsStatus_ = result.error;
+            return;
+        }
+
+        // Machine-specific extras only apply where they fit this PC.
+        std::optional<std::wstring> vault;
+        if (result.vaultPath && std::filesystem::is_directory(*result.vaultPath + L"\\.obsidian", ec)) {
+            if (_wcsicmp(result.vaultPath->c_str(), obsidianVaultPath_.c_str()) != 0) vault = result.vaultPath;
+        } else if (result.vaultPath) {
+            result.skipped.push_back(L"Vault path: " + *result.vaultPath + L" isn't an Obsidian vault on this PC");
+        }
+        std::vector<leanlauncher::pins::Pin> pins;
+        for (const auto& encoded : result.pins) {
+            leanlauncher::pins::Pin pin;
+            if (!leanlauncher::pins::DecodePin(encoded, pin)) continue;
+            if (!std::filesystem::exists(pin.path, ec)) {
+                result.skipped.push_back(L"Pin: " + pin.path + L" doesn't exist on this PC");
+                continue;
+            }
+            if (leanlauncher::pins::FindPin(pins, pin.path) < 0 && pins.size() < leanlauncher::pins::kMaxPins) {
+                pins.push_back(std::move(pin));
+            }
+        }
+        const std::wstring exclusionsPath = takeoff::FileIndex::DefaultExclusionsPath();
+        const std::vector<std::wstring> currentExclusions = ReadExclusionLines(exclusionsPath);
+        std::vector<std::wstring> newExclusions;
+        for (const auto& line : io::MergeExclusions(currentExclusions, result.exclusions)) {
+            if (std::find(currentExclusions.begin(), currentExclusions.end(), line) == currentExclusions.end()) {
+                newExclusions.push_back(line);
+            }
+        }
+
+        const std::wstring backupFolder = LocalAppDataFolder();
+        const std::wstring backupPath = backupFolder + L"\\settings-before-import.json";
+        std::wstring summary = std::to_wstring(result.changed) +
+            (result.changed == 1 ? L" setting will change" : L" settings will change");
+        if (vault) summary += L", the vault becomes " + *vault;
+        if (result.hasPins) summary += L", " + std::to_wstring(pins.size()) + L" pin(s) will replace your pins";
+        if (!newExclusions.empty()) summary += L", " + std::to_wstring(newExclusions.size()) + L" exclusion(s) will be added";
+        summary += L".";
+        if (result.newerSchema) summary += L"\n\nThis file comes from a newer Lean Launcher. Settings it knows are imported.";
+        if (!result.skipped.empty()) {
+            summary += L"\n\n" + std::to_wstring(result.skipped.size()) + L" skipped:";
+            for (size_t i = 0; i < result.skipped.size() && i < 12; ++i) summary += L"\n- " + result.skipped[i];
+            if (result.skipped.size() > 12) summary += L"\n- ...";
+        }
+        summary += L"\n\nYour current settings are saved first to\n" + backupPath + L"\nImport that file to undo.";
+        int answer = IDCANCEL;
+        {
+            ModalDialogScope scope(*this);
+            answer = MessageBoxW(hwnd_, summary.c_str(), L"Import settings", MB_OKCANCEL | MB_ICONQUESTION);
+        }
+        if (answer != IDOK) return;
+
+        std::filesystem::create_directories(backupFolder, ec);
+        const std::string backup = io::ExportJson(settings_, CurrentExtras(), {true, true, true}, takeoff::kAppVersion);
+        if (backupFolder.empty() || !WriteUtf8File(backupPath, backup)) {
+            settingsStatus_ = L"Couldn't save a backup of your current settings, so nothing was imported.";
+            return;
+        }
+
+        const quicklaunch::Settings before = settings_;
+        const std::wstring vaultBefore = obsidianVaultPath_;
+        settings_ = result.settings;
+        if (vault) obsidianVaultPath_ = *vault;
+        if (result.hasPins) {
+            pins_ = std::move(pins);
+            SavePins();
+            RefreshPins();
+        }
+        if (!newExclusions.empty() && takeoff::FileIndex::EnsureExclusionsFileWithHeader(exclusionsPath)) {
+            std::ofstream out(exclusionsPath, std::ios::binary | std::ios::app);
+            for (const auto& line : newExclusions) out << "\r\n" << leanlauncher::obsidian::WideToUtf8(line);
+        }
+        SaveSettings();
+        ApplyRuntimeSettings(before, vaultBefore);
+        settingsStatus_ = L"Imported " + std::to_wstring(result.changed) + L" setting(s)" +
+            (result.skipped.empty() ? L"." : L", skipped " + std::to_wstring(result.skipped.size()) + L".");
+    }
+
+    // After settings change wholesale (import, reset): bring every running
+    // part in line - hotkeys, tray icon, file index (NFR-018), note index,
+    // daily-note config, and the per-feature caches.
+    void ApplyRuntimeSettings(const quicklaunch::Settings& before, const std::wstring& vaultBefore) {
+        RegisterShortcut();
+        UpdateTrayIcon();
+        dailyNoteConfig_ = leanlauncher::obsidian::ResolveDailyNoteConfig(
+            obsidianVaultPath_, settings_.dailyNoteFolderOverride, settings_.dailyNoteFormatOverride);
+        if constexpr (!kUiTest) {
+            if (settings_.enableFileSearch != before.enableFileSearch) {
+                if (settings_.enableFileSearch) FileIndex::Instance().Start(hwnd_);
+                else FileIndex::Instance().StopAndRelease();
+            }
+            auto& notes = leanlauncher::obsidian::NoteIndex::Instance();
+            const bool wantNotes = settings_.obsidianEnabled && !obsidianVaultPath_.empty();
+            if (!wantNotes) notes.Stop();
+            else if (!before.obsidianEnabled || vaultBefore.empty()) notes.Start(obsidianVaultPath_, hwnd_);
+            else if (_wcsicmp(vaultBefore.c_str(), obsidianVaultPath_.c_str()) != 0) notes.Restart(obsidianVaultPath_, hwnd_);
+        }
+        if (!settings_.enablePathCompletion) ReleasePathCompletion();
+        if (!settings_.enableSystemCommands) CancelCommandConfirm();
+        if (!settings_.enableTimeZones) timeZones_.Clear();
+        if (!settings_.enablePomodoro) EndPomodoro(leanlauncher::pomodoro::EndReason::Stopped);
+        UpdateResults();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    // ---- US-049 Pomodoro ------------------------------------------------------
+    static unsigned long long NowTicks() {
+        FILETIME ft{};
+        GetSystemTimeAsFileTime(&ft);
+        return (static_cast<unsigned long long>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    }
+
+    int PomodoroMinutes(const std::wstring& text, int fallback) const {
+        return leanlauncher::settings_io::detail::IsMinutes(text) ? std::stoi(text) : fallback;
+    }
+
+    void AddPomodoroRow(std::wstring name, std::wstring path, std::wstring label, bool inert = false) {
+        AppEntry entry;
+        entry.category = inert ? AppCategory::Info : AppCategory::Pomodoro;
+        entry.name = std::move(name);
+        entry.path = std::move(path);
+        entry.parameters = std::move(label);
+        entry.inert = inert;
+        results_.push_back(apps_.size());
+        apps_.push_back(std::move(entry));
+    }
+
+    // Rows for "pomo ..." - nothing else is shown while the prefix is typed.
+    bool ShowPomodoroResults() {
+        namespace pm = leanlauncher::pomodoro;
+        const int focus = PomodoroMinutes(settings_.pomodoroFocusMinutes, 25);
+        const int rest = PomodoroMinutes(settings_.pomodoroBreakMinutes, 5);
+        const pm::Command command = pm::ParseCommand(input_.text, settings_.pomodoroPrefix, focus, rest);
+        using K = pm::Command::Kind;
+        if (command.kind == K::None) return false;
+        const bool running = pomodoro_.has_value();
+        const long long left = running ? pm::RemainingSeconds(pomodoro_->endTicks, NowTicks()) : 0;
+        const std::wstring runningText = running
+            ? std::wstring(pm::kTomato) + L" " + pm::FormatClock(left) + L" left" +
+                (pomodoro_->kind == pm::Kind::Break ? L" - break" : (pomodoro_->label.empty() ? L"" : L" - " + pomodoro_->label))
+            : std::wstring();
+        const auto startRow = [&](bool isBreak, int minutes, const std::wstring& label) {
+            std::wstring name = isBreak ? L"Start " + std::to_wstring(minutes) + L"-min break"
+                                        : L"Start " + std::to_wstring(minutes) + L"-min focus" + (label.empty() ? L"" : L": " + label);
+            const std::wstring path = std::wstring(isBreak ? L"pomo:break:" : L"pomo:focus:") + std::to_wstring(minutes);
+            if (running && pomodoroReplacePending_ && pomodoroReplacePath_ == path + L"|" + label &&
+                GetTickCount64() - pomodoroReplaceAt_ <= 5000) {
+                name = L"Press Enter again to replace the running timer";
+            } else if (running) {
+                name = L"Replace running timer: " + name;
+            }
+            AddPomodoroRow(std::move(name), path, label);
+        };
+        switch (command.kind) {
+        case K::Menu:
+            if (running) AddPomodoroRow(runningText, L"pomo:stop", L"");
+            else startRow(false, focus, L"");
+            break;
+        case K::StartFocus: startRow(false, command.minutes, command.label); break;
+        case K::StartBreak: startRow(true, command.minutes, L""); break;
+        case K::Stop:
+            if (running) AddPomodoroRow(L"Stop timer (" + pm::FormatClock(left) + L" left)", L"pomo:stop", L"");
+            else AddPomodoroRow(L"No timer is running", L"", L"", true);
+            break;
+        case K::Invalid:
+            AddPomodoroRow(L"Use 1-180 minutes, like " + settings_.pomodoroPrefix + L" 25 write intro", L"", L"", true);
+            break;
+        case K::None: break;
+        }
+        selected_ = std::clamp(selected_, 0, (std::max)(0, static_cast<int>(results_.size()) - 1));
+        EnsureVisible();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return true;
+    }
+
+    void RunPomodoroRow(const AppEntry& app) {
+        namespace pm = leanlauncher::pomodoro;
+        if (app.path == L"pomo:stop") {
+            EndPomodoro(pm::EndReason::Stopped);
+            Hide();
+            return;
+        }
+        const bool isBreak = app.path.rfind(L"pomo:break:", 0) == 0;
+        const bool isFocus = app.path.rfind(L"pomo:focus:", 0) == 0;
+        if (!isBreak && !isFocus) return;
+        const int minutes = std::stoi(app.path.substr(11));
+        if (pomodoro_) {
+            // Replacing a running timer needs a second Enter within 5 s.
+            const std::wstring key = app.path + L"|" + app.parameters;
+            if (!(pomodoroReplacePending_ && pomodoroReplacePath_ == key && GetTickCount64() - pomodoroReplaceAt_ <= 5000)) {
+                pomodoroReplacePending_ = true;
+                pomodoroReplacePath_ = key;
+                pomodoroReplaceAt_ = GetTickCount64();
+                UpdateResults();
+                return;
+            }
+            EndPomodoro(pm::EndReason::Stopped);
+        }
+        StartPomodoro(isBreak ? pm::Kind::Break : pm::Kind::Focus, minutes, app.parameters);
+        Hide();
+    }
+
+    void StartPomodoro(leanlauncher::pomodoro::Kind kind, int minutes, const std::wstring& label) {
+        pomodoroReplacePending_ = false;
+        pomodoroBreakOffer_ = false;
+        pomodoro_ = leanlauncher::pomodoro::State{kind, NowTicks() + static_cast<unsigned long long>(minutes) * 600000000ULL,
+            minutes, label};
+        SavePomodoroState();
+        SchedulePomodoroTimers();
+        UpdateTrayIcon();
+    }
+
+    // The coarse tick refreshes the tooltip and footer; in the last minute a
+    // one-shot fires at the exact end. Computed from the stored end time, so
+    // sleep and clock changes can't drift it.
+    void SchedulePomodoroTimers() {
+        KillTimer(hwnd_, kPomodoroEndTimer);
+        if (!pomodoro_) {
+            KillTimer(hwnd_, kPomodoroTickTimer);
+            return;
+        }
+        const long long left = leanlauncher::pomodoro::RemainingSeconds(pomodoro_->endTicks, NowTicks());
+        if (left <= 0) {
+            CheckPomodoro(false);
+            return;
+        }
+        SetTimer(hwnd_, kPomodoroTickTimer, 30000, nullptr);
+        if (left <= 60) SetTimer(hwnd_, kPomodoroEndTimer, static_cast<UINT>(left * 1000), nullptr);
+    }
+
+    void CheckPomodoro(bool resumedFromSleep) {
+        if (!pomodoro_) return;
+        const long long left = leanlauncher::pomodoro::RemainingSeconds(pomodoro_->endTicks, NowTicks());
+        if (left > 0) {
+            SchedulePomodoroTimers();
+            UpdateTrayIcon();
+            if (IsWindowVisible(hwnd_)) InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        EndPomodoro(resumedFromSleep ? leanlauncher::pomodoro::EndReason::EndedWhileAsleep
+                                     : leanlauncher::pomodoro::EndReason::Finished);
+    }
+
+    void EndPomodoro(leanlauncher::pomodoro::EndReason reason) {
+        namespace pm = leanlauncher::pomodoro;
+        if (!pomodoro_) return;
+        const pm::State ended = *pomodoro_;
+        pomodoro_.reset();
+        pomodoroReplacePending_ = false;
+        KillTimer(hwnd_, kPomodoroTickTimer);
+        KillTimer(hwnd_, kPomodoroEndTimer);
+        SavePomodoroState();
+        UpdateTrayIcon();
+        if (reason == pm::EndReason::Stopped) return;
+        std::wstring title, text;
+        if (ended.kind == pm::Kind::Break) {
+            title = L"Break over";
+            text = L"Time to get back to it.";
+        } else if (reason == pm::EndReason::EndedWhileAsleep) {
+            title = std::wstring(pm::kTomato) + L" Focus ended while your PC was asleep";
+            text = ended.label.empty() ? L"Not logged." : ended.label + L" - not logged.";
+        } else if (reason == pm::EndReason::EndedWhileClosed) {
+            title = std::wstring(pm::kTomato) + L" Pomodoro ended while Lean Launcher wasn't running";
+            text = L"Not logged.";
+        } else {
+            title = std::wstring(pm::kTomato) + L" Focus done" + (ended.label.empty() ? L"" : L": " + ended.label);
+            text = L"Click to start a " + std::to_wstring(PomodoroMinutes(settings_.pomodoroBreakMinutes, 5)) + L"-min break";
+            pomodoroBreakOffer_ = true;
+            if (pm::ShouldLog(ended.kind, reason, settings_.pomodoroLog) && settings_.obsidianEnabled &&
+                !obsidianVaultPath_.empty()) {
+                // Only into a note that already exists: the timer never creates
+                // a daily note and never starts Obsidian.
+                if (!pm::AppendToExistingNote(CaptureTargetPath(settings_.logTargetNote),
+                        pm::LogText(ended.minutes, ended.label), settings_.logHeading)) {
+                    text += L"\n(not logged: today's note doesn't exist yet)";
+                }
+            }
+        }
+        ShowBalloon(title, text);
+    }
+
+    void ShowBalloon(const std::wstring& title, const std::wstring& text) {
+        if constexpr (kUiTest) return;
+        if (!trayIconAdded_) {
+            balloonTempIcon_ = true;  // tray icon is off: show one just for the balloon
+            AddTrayIcon();
+        }
+        NOTIFYICONDATAW data{sizeof(data)};
+        data.hWnd = hwnd_;
+        data.uID = 1;
+        data.uFlags = NIF_INFO;
+        wcsncpy_s(data.szInfoTitle, title.c_str(), _TRUNCATE);
+        wcsncpy_s(data.szInfo, text.c_str(), _TRUNCATE);
+        data.dwInfoFlags = NIIF_INFO;
+        Shell_NotifyIconW(NIM_MODIFY, &data);
+    }
+
+    void SavePomodoroState() {
+        if constexpr (kUiTest) return;
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsRegistryPath, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key,
+                nullptr) != ERROR_SUCCESS) return;
+        if (pomodoro_) {
+            const std::wstring value = leanlauncher::pomodoro::EncodeState(*pomodoro_);
+            RegSetValueExW(key, L"PomodoroState", 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+        } else {
+            RegDeleteValueW(key, L"PomodoroState");
+        }
+        RegCloseKey(key);
+    }
+
+    // A timer running when Lean Launcher closed (e.g. Restart to update) carries on.
+    void RestorePomodoro() {
+        if constexpr (kUiTest) return;
+        if (!settings_.enablePomodoro) return;
+        wchar_t buffer[512]{};
+        DWORD size = sizeof(buffer);
+        if (RegGetValueW(HKEY_CURRENT_USER, kSettingsRegistryPath, L"PomodoroState", RRF_RT_REG_SZ, nullptr, buffer,
+                &size) != ERROR_SUCCESS) return;
+        pomodoro_ = leanlauncher::pomodoro::DecodeState(buffer);
+        if (!pomodoro_) {
+            SavePomodoroState();  // drop a damaged value
+            return;
+        }
+        if (leanlauncher::pomodoro::RemainingSeconds(pomodoro_->endTicks, NowTicks()) <= 0) {
+            EndPomodoro(leanlauncher::pomodoro::EndReason::EndedWhileClosed);
+            return;
+        }
+        SchedulePomodoroTimers();
+        UpdateTrayIcon();
+    }
+
+    // ---- US-043 path completion -------------------------------------------
+    struct PathListing {
+        unsigned generation = 0;
+        std::wstring folder;
+        std::vector<leanlauncher::typed::PathEntry> entries;
+        DWORD error = 0;
+        bool truncated = false;
+    };
+
+    // Runs on a short-lived background thread: FindFirstFileEx can't be
+    // cancelled, so a stuck network lookup must never hold up the next one.
+    static PathListing ListFolder(const std::wstring& folder) {
+        PathListing listing;
+        listing.folder = folder;
+        std::wstring pattern = folder;
+        if (pattern.size() >= MAX_PATH - 12) {
+            pattern = (pattern.rfind(L"\\\\", 0) == 0) ? L"\\\\?\\UNC\\" + pattern.substr(2)
+                                                      : L"\\\\?\\" + pattern;
+        }
+        pattern += L"*";
+        WIN32_FIND_DATAW data{};
+        HANDLE find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &data, FindExSearchNameMatch,
+            nullptr, FIND_FIRST_EX_LARGE_FETCH);
+        if (find == INVALID_HANDLE_VALUE) {
+            listing.error = GetLastError();
+            return listing;
+        }
+        do {
+            if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
+            if (listing.entries.size() >= leanlauncher::typed::kMaxPathEntries) {
+                listing.truncated = true;
+                break;
+            }
+            listing.entries.push_back({data.cFileName, (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+                (data.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0});
+        } while (FindNextFileW(find, &data));
+        FindClose(find);
+        return listing;
+    }
+
+    static bool IsNetworkFolder(const std::wstring& folder) {
+        if (folder.rfind(L"\\\\", 0) == 0) return true;
+        if (folder.size() >= 3 && folder[1] == L':') {
+            return GetDriveTypeW(folder.substr(0, 3).c_str()) == DRIVE_REMOTE;
+        }
+        return false;
+    }
+
+    // "\\nas" for "\\nas\share\", "Z:" for a mapped drive.
+    static std::wstring NetworkHostLabel(const std::wstring& folder) {
+        if (folder.rfind(L"\\\\", 0) == 0) {
+            const size_t end = folder.find(L'\\', 2);
+            return folder.substr(0, end);
+        }
+        return folder.substr(0, 2);
+    }
+
+    std::wstring ExpandTypedPath(const std::wstring& typed) const {
+        std::wstring expanded = typed;
+        if (typed.find(L'%') != std::wstring::npos) {
+            wchar_t buffer[4096];
+            const DWORD len = ExpandEnvironmentStringsW(typed.c_str(), buffer, static_cast<DWORD>(std::size(buffer)));
+            if (len > 0 && len <= std::size(buffer)) expanded.assign(buffer);
+        }
+        std::wstring profile;
+        if (expanded.rfind(L"~", 0) == 0) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Profile, KF_FLAG_DEFAULT, nullptr, &path))) profile = path;
+            if (path) CoTaskMemFree(path);
+        }
+        return leanlauncher::typed::ExpandHome(expanded, profile);
+    }
+
+    void RequestPathListing(const std::wstring& folder) {
+        if (_wcsicmp(folder.c_str(), pathRequestedFolder_.c_str()) == 0) return;  // already in flight or cached
+        if (pathThreadsRunning_ >= 4) return;  // several lookups stuck; the next keystroke retries
+        ++pathGeneration_;
+        pathRequestedFolder_ = folder;
+        pathListingReady_ = false;
+        pathTimedOut_ = false;
+        pathEntries_.clear();
+        if (IsNetworkFolder(folder)) SetTimer(hwnd_, kPathTimeoutTimer, 10000, nullptr);
+        const HWND hwnd = hwnd_;
+        const unsigned generation = pathGeneration_;
+        try {
+            std::thread([hwnd, folder, generation] {
+                auto listing = std::make_unique<PathListing>(ListFolder(folder));
+                listing->generation = generation;
+                if (PostMessageW(hwnd, kPathListingMessage, 0, reinterpret_cast<LPARAM>(listing.get()))) {
+                    listing.release();
+                }
+            }).detach();
+            ++pathThreadsRunning_;
+        } catch (const std::system_error&) {
+            pathRequestedFolder_.clear();
+        }
+    }
+
+    // NFR-018: nothing is kept once the launcher hides or the feature is off.
+    void ReleasePathCompletion() {
+        KillTimer(hwnd_, kPathTimeoutTimer);
+        ++pathGeneration_;  // drop listings still in flight
+        pathRequestedFolder_.clear();
+        pathListedFolder_.clear();
+        std::vector<leanlauncher::typed::PathEntry>().swap(pathEntries_);
+        pathListingReady_ = false;
+        pathTimedOut_ = false;
+        pathError_ = 0;
+        pathTruncated_ = false;
+    }
+
+    void AddInfoRow(std::wstring text) {
+        AppEntry entry;
+        entry.category = AppCategory::Info;
+        entry.name = std::move(text);
+        entry.inert = true;
+        results_.push_back(apps_.size());
+        apps_.push_back(std::move(entry));
+    }
+
+    void ShowPathResults() {
+        namespace ti = leanlauncher::typed;
+        const ti::PathQuery query = ti::SplitPathQuery(ExpandTypedPath(TrimmedQuery()));
+        if (query.kind == ti::PathKind::NeedsShare) {
+            AddInfoRow(L"Type a share name, like \\\\server\\share\\");
+        } else if (query.kind != ti::PathKind::None) {
+            const bool cached = pathListingReady_ && _wcsicmp(query.folder.c_str(), pathListedFolder_.c_str()) == 0;
+            if (!cached) RequestPathListing(query.folder);
+            if (!cached) {
+                if (pathTimedOut_) AddInfoRow(L"Can't reach " + NetworkHostLabel(query.folder));
+                else if (IsNetworkFolder(query.folder)) AddInfoRow(L"Looking up " + NetworkHostLabel(query.folder) + L"\u2026");
+                else AddInfoRow(L"Reading folder\u2026");
+            } else if (pathError_ == ERROR_ACCESS_DENIED) {
+                AddInfoRow(L"Access denied");
+            } else if (pathError_ != 0 && pathError_ != ERROR_FILE_NOT_FOUND) {
+                AddInfoRow(L"Folder not found");
+            } else {
+                for (const auto& entry : ti::FilterPathEntries(pathEntries_, query.partial)) {
+                    AppEntry row;
+                    row.category = entry.isDirectory ? AppCategory::Folder : AppCategory::File;
+                    row.name = entry.name;
+                    row.normalizedName = Normalize(entry.name);
+                    row.path = query.folder + entry.name;
+                    results_.push_back(apps_.size());
+                    apps_.push_back(std::move(row));
+                }
+                if (results_.empty()) AddInfoRow(L"No matches in this folder");
+                if (pathTruncated_) AddInfoRow(L"Showing first 2,000 - keep typing");
+            }
+        }
+        selected_ = std::clamp(selected_, 0, (std::max)(0, static_cast<int>(results_.size()) - 1));
+        EnsureVisible();
+        PrepareVisibleIcons();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    bool PathModeActive() const {
+        return settings_.enablePathCompletion && page_ == Page::Launcher &&
+            leanlauncher::typed::LooksLikePath(TrimmedQuery());
+    }
+
+    // Tab in path mode: complete the selected folder or file into the query.
+    bool CompleteSelectedPath() {
+        if (!PathModeActive() || !HasResult()) return false;
+        const AppEntry& app = apps_[results_[selected_]];
+        if (app.inert) return true;  // path mode owns Tab even on a status row
+        const bool isFolder = app.category == takeoff::AppCategory::Folder;
+        input_.text = leanlauncher::typed::CompleteTypedPath(TrimmedQuery(), app.name, isFolder);
+        input_.caret = input_.anchor = input_.text.size();
+        OnQueryChanged();
+        return true;
+    }
+
+    // Shift+Enter in path mode: open the typed path itself (its folder part if
+    // the full path doesn't exist yet).
+    bool OpenTypedPath() {
+        if (!PathModeActive()) return false;
+        std::wstring target = ExpandTypedPath(TrimmedQuery());
+        if (GetFileAttributesW(target.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            target = leanlauncher::typed::SplitPathQuery(target).folder;
+        }
+        if (target.empty()) return true;
+        Hide();
+        ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return true;
     }
 
     void EnsureVisible() {
@@ -2145,6 +3077,7 @@ private:
     void MoveSelection(int delta, bool wrap) {
         const int count = static_cast<int>(results_.size());
         if (count == 0 || delta == 0) return;
+        CancelCommandConfirm();
         LockHoverAtPointer();
         selected_ = wrap ? (selected_ + delta + count) % count
                          : std::clamp(selected_ + delta, 0, count - 1);
@@ -2164,6 +3097,7 @@ private:
         quickOpenDropdownHighlight_ = -1;
         obsidianExpandedSection_ = -1;
         settingsStatus_.clear();
+        const quicklaunch::Settings before = settings_;
         settings_ = quicklaunch::Settings{};
         obsidianVaultPath_.clear();
         // Same staleness gap as CommitEditingRow: settings_.dailyNote*Override
@@ -2175,9 +3109,8 @@ private:
             leanlauncher::obsidian::NoteIndex::Instance().Stop();
         }
         SetRunAtStartup(settings_.runAtStartup);
-        RegisterShortcut();
         SaveSettings();
-        UpdateTrayIcon();
+        ApplyRuntimeSettings(before, L"");  // also restarts the file index if it was off (NFR-018)
         settingsStatus_ = L"Settings reset to default.";
         CheckForUpdatesAsync(true);
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -2441,6 +3374,10 @@ private:
         case kRowFileSearchPrefix: return &settings_.fileSearchPrefix;
         case kRowWebSearchPrefix: return &settings_.webSearchPrefix;
         case kRowAppSearchPrefix: return &settings_.appSearchPrefix;
+        case kRowSystemCommandsPrefix: return &settings_.systemCommandsPrefix;
+        case kRowPomodoroPrefix: return &settings_.pomodoroPrefix;
+        case kRowPomodoroFocusMinutes: return &settings_.pomodoroFocusMinutes;
+        case kRowPomodoroBreakMinutes: return &settings_.pomodoroBreakMinutes;
         case kRowVaultSearchPrefix: return &settings_.vaultSearchPrefix;
         case kRowVaultSearchPillLabel: return &settings_.vaultSearchPillLabel;
         case kRowTaskPrefix: return &settings_.taskPrefix;
@@ -2462,16 +3399,6 @@ private:
         }
     }
 
-    bool IsPrefixRow(int row) const {
-        return row == kRowVaultSearchPrefix || row == kRowTaskPrefix || row == kRowNoteAddPrefix ||
-            row == kRowLogPrefix || row == kRowWebSearchPrefix || row == kRowFileSearchPrefix ||
-            row == kRowAppSearchPrefix;
-    }
-
-    bool IsTargetNoteRow(int row) const {
-        return row == kRowTaskTargetNote || row == kRowNoteAddTargetNote || row == kRowLogTargetNote;
-    }
-
     void BeginEditingRow(int row, const std::wstring& currentValue) {
         if (editingRow_ == row) return;
         editingRow_ = row;
@@ -2489,51 +3416,18 @@ private:
             editingRow_ = -1;
             return;
         }
-        if (IsPrefixRow(editingRow_)) {
-            std::wstring vaultSearchCandidate = settings_.vaultSearchPrefix;
-            std::wstring taskCandidate = settings_.taskPrefix;
-            std::wstring noteAddCandidate = settings_.noteAddPrefix;
-            std::wstring logCandidate = settings_.logPrefix;
-            std::wstring webSearchCandidate = settings_.webSearchPrefix;
-            std::wstring fileSearchCandidate = settings_.fileSearchPrefix;
-            std::wstring appSearchCandidate = settings_.appSearchPrefix;
-            if (editingRow_ == kRowVaultSearchPrefix) vaultSearchCandidate = settingsEdit_.text;
-            else if (editingRow_ == kRowTaskPrefix) taskCandidate = settingsEdit_.text;
-            else if (editingRow_ == kRowNoteAddPrefix) noteAddCandidate = settingsEdit_.text;
-            else if (editingRow_ == kRowLogPrefix) logCandidate = settingsEdit_.text;
-            else if (editingRow_ == kRowWebSearchPrefix) webSearchCandidate = settingsEdit_.text;
-            else if (editingRow_ == kRowFileSearchPrefix) fileSearchCandidate = settingsEdit_.text;
-            else if (editingRow_ == kRowAppSearchPrefix) appSearchCandidate = settingsEdit_.text;
-            if (const wchar_t* error = leanlauncher::obsidian::FindPrefixConflict(
-                    {vaultSearchCandidate, taskCandidate, noteAddCandidate, logCandidate,
-                     webSearchCandidate, fileSearchCandidate, appSearchCandidate})) {
-                settingsStatus_ = error;
-                InvalidateRect(hwnd_, nullptr, FALSE);
-                return;  // stay in edit mode so the user can fix it
-            }
-        }
-        if (editingRow_ == kRowWebSearchEngine) {
-            if (const wchar_t* error = takeoff::FindWebSearchUrlError(settingsEdit_.text)) {
-                settingsStatus_ = error;
-                InvalidateRect(hwnd_, nullptr, FALSE);
-                return;  // stay in edit mode so the user can fix it
-            }
-        }
-        // Target notes (US-025): empty/whitespace clears the target (back to
-        // the daily note); anything else must normalize to a note inside the
-        // vault, or the edit is rejected rather than silently falling back.
-        const bool isTargetNoteRow = IsTargetNoteRow(editingRow_);
-        std::wstring normalizedTarget;
-        if (isTargetNoteRow &&
-            settingsEdit_.text.find_first_not_of(L" \t") != std::wstring::npos &&
-            !leanlauncher::obsidian::NormalizeTargetNoteRef(settingsEdit_.text, normalizedTarget)) {
-            settingsStatus_ = L"Use a note path inside the vault, e.g. Inbox/Tasks";
+        // US-044: the same per-field check the import uses (prefix conflicts,
+        // minutes, web template, target notes inside the vault - US-025).
+        const leanlauncher::settings_io::TextCheck checked = leanlauncher::settings_io::CheckTextSetting(
+            settings_, leanlauncher::settings_io::TextSettingMember(settings_, field), settingsEdit_.text);
+        if (checked.error) {
+            settingsStatus_ = checked.error;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;  // stay in edit mode so the user can fix it
         }
         const bool wasLogHeadingRow = (editingRow_ == kRowLogHeading);
         const bool wasWebSearchEngineRow = (editingRow_ == kRowWebSearchEngine);
-        *field = isTargetNoteRow ? normalizedTarget : settingsEdit_.text;
+        *field = checked.value;
         editingRow_ = -1;
         if (wasWebSearchEngineRow) {
             settings_.webSearchEngineName = takeoff::DeriveSearchEngineName(*field);
@@ -2594,6 +3488,16 @@ private:
         }
         if (row == kRowQuickOpenTarget) {
             OpenQuickOpenDropdown();
+            return;
+        }
+        if (row == kRowAboutExportSettings) {
+            ExportSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowAboutImportSettings) {
+            ImportSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
         if (row == kRowAboutGithubLink) {
@@ -2659,6 +3563,58 @@ private:
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
+        if (row == kRowPomodoroEnabled) {
+            settings_.enablePomodoro = !settings_.enablePomodoro;
+            SaveSettings();
+            if (!settings_.enablePomodoro) EndPomodoro(leanlauncher::pomodoro::EndReason::Stopped);  // NFR-018
+            UpdateResults();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowPomodoroLog) {
+            settings_.pomodoroLog = !settings_.pomodoroLog;
+            SaveSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowTimeZonesEnabled) {
+            settings_.enableTimeZones = !settings_.enableTimeZones;
+            SaveSettings();
+            if (!settings_.enableTimeZones) timeZones_.Clear();  // NFR-018
+            UpdateResults();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowUnitConverterEnabled) {
+            settings_.enableUnitConverter = !settings_.enableUnitConverter;
+            SaveSettings();
+            UpdateResults();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowPathCompletionEnabled) {
+            settings_.enablePathCompletion = !settings_.enablePathCompletion;
+            SaveSettings();
+            if (!settings_.enablePathCompletion) ReleasePathCompletion();
+            UpdateResults();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowTypedUrlsEnabled) {
+            settings_.enableTypedUrls = !settings_.enableTypedUrls;
+            SaveSettings();
+            UpdateResults();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowSystemCommandsEnabled) {
+            settings_.enableSystemCommands = !settings_.enableSystemCommands;
+            SaveSettings();
+            CancelCommandConfirm();
+            UpdateResults();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
         if (std::wstring* field = SettingsTextFieldForRow(row)) {
             BeginEditingRow(row, *field);
             return;
@@ -2702,6 +3658,15 @@ private:
         case 7:
             settings_.enableFileSearch = !settings_.enableFileSearch;
             SaveSettings();
+            if constexpr (!kUiTest) {
+                // NFR-018: off frees the index now, not at the next restart;
+                // on reloads it from the cache the stopped cycle left behind.
+                if (settings_.enableFileSearch) {
+                    FileIndex::Instance().Start(hwnd_);
+                } else {
+                    FileIndex::Instance().StopAndRelease();
+                }
+            }
             UpdateResults();
             break;
         case 8:
@@ -3099,10 +4064,16 @@ private:
                 }
                 return 0;
             }
+            if (shift && !control && !alt && !MatchesAdministratorHotkey(control, shift, alt) && OpenTypedPath()) return 0;
             LaunchSelected(MatchesAdministratorHotkey(control, shift, alt)); return 0;
         case VK_UP: MoveSelection(-1, true); return 0;
         case VK_DOWN: MoveSelection(1, true); return 0;
-        case VK_TAB: MoveSelection(shift ? -1 : 1, true); return 0;
+        case VK_TAB:
+            // US-043: in path mode Tab completes the selected entry; elsewhere
+            // it keeps moving the selection.
+            if (!shift && CompleteSelectedPath()) return 0;
+            MoveSelection(shift ? -1 : 1, true);
+            return 0;
         case VK_PRIOR: MoveSelection(-visibleRows_, false); return 0;
         case VK_NEXT: MoveSelection(visibleRows_, false); return 0;
         case VK_LEFT: input_.Move(false, shift, control); ResetCaret(); return 0;
@@ -3213,6 +4184,27 @@ private:
         const size_t index = results_[selected_];
         const AppEntry& app = apps_[index];
         if (app.inert) return;  // informational row, e.g. a quick-open note that doesn't exist yet
+        if (app.category == takeoff::AppCategory::Command) {
+            // US-041: every route (Enter, click, Ctrl+Enter, Alt+1-8, Ctrl+K)
+            // lands here, so none can skip the second-Enter confirmation.
+            namespace sc = leanlauncher::syscmd;
+            const auto command = sc::CommandFromPath(app.path);
+            if (!command || !settings_.enableSystemCommands) return;
+            if (*command == sc::Command::EmptyRecycleBin && recycleBinItems_ == 0) return;
+            if (commandGate_.Press(*command, GetTickCount64()) == sc::PressResult::AskAgain) {
+                SetTimer(hwnd_, kCommandConfirmTimer, static_cast<UINT>(sc::kConfirmTimeoutMs), nullptr);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return;
+            }
+            Hide();
+            if (!RunSystemCommand(*command)) {
+                Show();
+                status_ = L"Could not run this command.";
+                ResetCaret();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return;
+        }
         if (app.category == takeoff::AppCategory::Calculator) {
             CopyText(app.path);
             Hide();
@@ -3276,6 +4268,23 @@ private:
         }
         if (app.category == takeoff::AppCategory::WebSearch) {
             OpenWebSearch(app.parameters);
+            return;
+        }
+        if (app.category == takeoff::AppCategory::Pomodoro) {
+            RunPomodoroRow(app);
+            return;
+        }
+        if (app.category == takeoff::AppCategory::Url) {
+            // Re-check the scheme: only http(s) is ever handed to the shell.
+            if (leanlauncher::typed::ClassifyUrl(app.path) != leanlauncher::typed::UrlKind::Explicit) return;
+            Hide();
+            if (reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", app.path.c_str(), nullptr, nullptr,
+                    SW_SHOWNORMAL)) <= 32) {
+                Show();
+                status_ = L"Could not open this URL.";
+                ResetCaret();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
             return;
         }
         if (app.category == takeoff::AppCategory::NoteJump) {
@@ -3381,6 +4390,82 @@ private:
         }
     }
 
+    // Result-row title for a system command: the confirmation prompt while
+    // it's pending, the Recycle Bin's contents once known; otherwise the name.
+    std::wstring CommandRowText(const AppEntry& app) const {
+        namespace sc = leanlauncher::syscmd;
+        if (app.category != takeoff::AppCategory::Command) return app.name;
+        const auto command = sc::CommandFromPath(app.path);
+        if (!command) return app.name;
+        if (commandGate_.IsPending(*command, GetTickCount64())) return sc::ConfirmPrompt(*command);
+        if (*command == sc::Command::EmptyRecycleBin && recycleBinItems_ >= 0) {
+            if (recycleBinItems_ == 0) return sc::FormatRecycleBinSummary(0, 0);
+            return app.name + L" (" + sc::FormatRecycleBinSummary(recycleBinItems_, recycleBinBytes_) + L")";
+        }
+        return app.name;
+    }
+
+    // The Empty Recycle Bin row is greyed out (and does nothing) when the bin is empty.
+    bool CommandRowDimmed(const AppEntry& app) const {
+        return app.category == takeoff::AppCategory::Command && recycleBinItems_ == 0 &&
+            app.path == leanlauncher::syscmd::CommandPath(leanlauncher::syscmd::Command::EmptyRecycleBin);
+    }
+
+    void CancelCommandConfirm() {
+        if (!commandGate_.Pending()) return;
+        commandGate_.Cancel();
+        KillTimer(hwnd_, kCommandConfirmTimer);
+    }
+
+    // US-041. Restart and shut down go through shutdown.exe without /f, so no
+    // privilege-raising code lives in this unsigned exe and apps can still
+    // ask to save work.
+    static bool RunSystemCommand(leanlauncher::syscmd::Command command) {
+        using leanlauncher::syscmd::Command;
+        switch (command) {
+        case Command::Lock:
+            return LockWorkStation() != FALSE;
+        case Command::Sleep:
+            return SetSuspendState(FALSE, FALSE, FALSE) != FALSE;
+        case Command::Hibernate:
+            return SetSuspendState(TRUE, FALSE, FALSE) != FALSE;
+        case Command::Restart:
+        case Command::ShutDown: {
+            wchar_t systemDirectory[MAX_PATH]{};
+            if (!GetSystemDirectoryW(systemDirectory, MAX_PATH)) return false;
+            const std::wstring exe = std::wstring(systemDirectory) + L"\\shutdown.exe";
+            const std::wstring args = leanlauncher::syscmd::ShutdownArguments(command);
+            return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", exe.c_str(), args.c_str(),
+                nullptr, SW_HIDE)) > 32;
+        }
+        case Command::SignOut:
+            return ExitWindowsEx(EWX_LOGOFF, SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_FLAG_PLANNED) != FALSE;
+        case Command::EmptyRecycleBin:
+            return SUCCEEDED(SHEmptyRecycleBinW(nullptr, nullptr, SHERB_NOCONFIRMATION));
+        }
+        return false;
+    }
+
+    // Fetches the Recycle Bin's item count and size off the UI thread the
+    // first time its row is visible after the launcher shows (it can take a
+    // moment with several drives).
+    void RequestRecycleBinInfo() {
+        if (recycleBinItems_ >= 0 || recycleBinQueryPending_) return;
+        recycleBinQueryPending_ = true;
+        const HWND hwnd = hwnd_;
+        try {
+            std::thread([hwnd] {
+                SHQUERYRBINFO info{};
+                info.cbSize = sizeof(info);
+                if (FAILED(SHQueryRecycleBinW(nullptr, &info))) info.i64NumItems = info.i64Size = 0;
+                PostMessageW(hwnd, kRecycleBinInfoMessage, static_cast<WPARAM>(info.i64NumItems),
+                    static_cast<LPARAM>(info.i64Size));
+            }).detach();
+        } catch (const std::system_error&) {
+            recycleBinQueryPending_ = false;
+        }
+    }
+
     bool OpenWebSearch(std::wstring_view query) {
         if (query.empty()) return false;
         const std::wstring url = takeoff::BuildSearchUrl(settings_.webSearchUrlTemplate, query);
@@ -3424,6 +4509,10 @@ private:
         actionsOpen_ = false;
         actionsPositioned_ = false;
         const AppEntry& app = apps_[results_[selected_]];
+        if (app.category == takeoff::AppCategory::Command || app.category == takeoff::AppCategory::Pomodoro) {
+            LaunchSelected(false);  // "Run", through the same confirmation
+            return;
+        }
         if (app.category == takeoff::AppCategory::Calculator) {
             if (action == 0) {
                 CopyText(app.path);
@@ -3493,6 +4582,17 @@ private:
                 Hide();
                 return;
             }
+        }
+        if (app.category == takeoff::AppCategory::Url) {
+            if (action == 0) {
+                LaunchSelected(false);
+            } else {
+                const bool copied = CopyText(app.path);
+                status_ = copied ? L"URL copied" : L"Clipboard is busy. Try again.";
+                ResetCaret();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return;
         }
         if (app.category == takeoff::AppCategory::WebSearch) {
             if (action == 0) {
@@ -3568,6 +4668,9 @@ private:
     // 3 actions for most rows; pinnable rows (apps, files, folders) add
     // Pin/Unpin as a 4th (US-024).
     int ActionCount() const {
+        if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Command) return 1;
+        if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Pomodoro) return 1;
+        if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Url) return 2;
         return (HasResult() && IsPinnable(apps_[results_[selected_]])) ? 4 : 3;
     }
 
@@ -4004,6 +5107,15 @@ private:
         const int end = (std::min)(firstVisible_ + visibleRows_, static_cast<int>(results_.size()));
         for (int i = firstVisible_; i < end; ++i) {
             const AppEntry& app = apps_[results_[i]];
+            if (app.category == takeoff::AppCategory::Url) continue;  // a web address has no file icon
+            if (app.category == takeoff::AppCategory::Info) continue;  // status text only
+            if (app.category == takeoff::AppCategory::Pomodoro) continue;
+            if (app.category == takeoff::AppCategory::Command) {
+                if (app.path == leanlauncher::syscmd::CommandPath(leanlauncher::syscmd::Command::EmptyRecycleBin)) {
+                    RequestRecycleBinInfo();
+                }
+                continue;  // no file to take an icon from
+            }
             const std::wstring& lookupPath = !app.iconPath.empty() ? app.iconPath : app.path;
             if (iconCache_.find(lookupPath) != iconCache_.end() || iconPending_.count(lookupPath)) continue;
             iconPending_.insert(lookupPath);
@@ -4551,7 +5663,8 @@ private:
                 const float rightAnswerWidth = 320.0f;
                 const float leftTextRight = (std::max)(textLeft + 100.0f, width_ - rightAnswerWidth - 16.0f);
 
-                Text(L"Calculation", D2D1::RectF(textLeft, top + 8, leftTextRight, top + 26),
+                Text(app.note.empty() ? std::wstring(L"Calculation") : app.note,
+                    D2D1::RectF(textLeft, top + 8, leftTextRight, top + 26),
                     resultFormat_.Get(), textColor);
 
                 std::wstring exprDisplay = app.parameters;
@@ -4592,11 +5705,16 @@ private:
                             DWRITE_TEXT_ALIGNMENT_CENTER);
                     }
                 }
-                Text(app.name, D2D1::RectF(60, top, width_ - 158, top + 40), resultFormat_.Get(), textColor);
+                Text(CommandRowText(app), D2D1::RectF(60, top, width_ - 158, top + 40), resultFormat_.Get(),
+                    CommandRowDimmed(app) && !(highContrast_ && selected) ? Muted() : textColor);
                 const bool pinned = PinRank(results_[i]) >= 0;
                 const bool recent = input_.text.empty() &&
                     std::find(recent_.begin(), recent_.end(), results_[i]) != recent_.end();
                 const wchar_t* categoryLabel = pinned ? L"Pinned" : recent ? L"Recent"
+                    : (app.category == takeoff::AppCategory::Command ? L"Command"
+                    : (app.category == takeoff::AppCategory::Url ? L"URL"
+                    : (app.category == takeoff::AppCategory::Info ? L""
+                    : (app.category == takeoff::AppCategory::Pomodoro ? L"Timer"
                     : (app.category == takeoff::AppCategory::System ? L"System"
                     : (app.category == takeoff::AppCategory::Folder ? L"Folder"
                     : (app.category == takeoff::AppCategory::File ? L"File"
@@ -4604,7 +5722,7 @@ private:
                     : (app.category == takeoff::AppCategory::NoteAdd ? settings_.noteAddPillLabel.c_str()
                     : (app.category == takeoff::AppCategory::LogAdd ? settings_.logPillLabel.c_str()
                     : (app.category == takeoff::AppCategory::NoteJump ? settings_.vaultSearchPillLabel.c_str()
-                    : (app.category == takeoff::AppCategory::WebSearch ? settings_.webSearchPillLabel.c_str() : L"Application"))))))));
+                    : (app.category == takeoff::AppCategory::WebSearch ? settings_.webSearchPillLabel.c_str() : L"Application"))))))))))));
                 Text(categoryLabel,
                     D2D1::RectF(width_ - 154, top, width_ - 28, top + 40), hintFormat_.Get(),
                     highContrast_ && selected ? textColor : Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -4874,6 +5992,14 @@ private:
                 Text(L"Open in Obsidian", D2D1::RectF(24, top, 156, height_),
                     hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
                 Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
+            } else if (app.category == takeoff::AppCategory::Url) {
+                Text(L"Open URL", D2D1::RectF(24, top, 156, height_),
+                    hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
+                Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
+            } else if (app.category == takeoff::AppCategory::Command) {
+                Text(L"Run command", D2D1::RectF(24, top, 156, height_),
+                    hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
+                Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
             } else if (app.category == takeoff::AppCategory::WebSearch) {
                 Text(L"Search in browser", D2D1::RectF(24, top, 156, height_),
                     hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
@@ -4911,6 +6037,10 @@ private:
         }
         if (updateAvailable_) {
             DrawUpdateIndicator();
+        } else if (pomodoro_ && page_ == Page::Launcher) {
+            const long long left = leanlauncher::pomodoro::RemainingSeconds(pomodoro_->endTicks, NowTicks());
+            Text(leanlauncher::pomodoro::FooterLabel(left), D2D1::RectF(width_ / 2 - 60, top, width_ / 2 + 60, height_),
+                hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
         }
     }
 
@@ -4943,7 +6073,12 @@ private:
         const wchar_t* logAddLabels[] = {L"Add log entry", L"Copy text", L"Open today's note"};
         const wchar_t* noteLabels[] = {L"Open in Obsidian", L"Copy note title", L"Reveal in Explorer"};
         const wchar_t* webSearchLabels[] = {L"Search in browser", L"Copy query text", L"Copy search URL"};
-        const wchar_t** labels = isCalc ? calcLabels
+        const wchar_t* commandLabels[] = {L"Run"};
+        const wchar_t* urlLabels[] = {L"Open URL", L"Copy URL"};
+        const bool isCommand = (app.category == takeoff::AppCategory::Command ||
+                                app.category == takeoff::AppCategory::Pomodoro);
+        const bool isUrl = (app.category == takeoff::AppCategory::Url);
+        const wchar_t** labels = isCommand ? commandLabels : isUrl ? urlLabels : isCalc ? calcLabels
             : (isTaskAdd ? taskLabels
             : (isNoteAdd ? noteAddLabels
             : (isLogAdd ? logAddLabels
@@ -5389,39 +6524,77 @@ private:
         }
 
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Search) {
-            const float hY = (settingsCategory_ == SettingsCategory::All) ? 421.0f : 16.0f;
-            const float cY = (settingsCategory_ == SettingsCategory::All) ? 441.0f : 36.0f;
-            drawCard(L"SEARCH & FEATURES", hY, cY, 8);
+            const float hY = (settingsCategory_ == SettingsCategory::All) ? leanlauncher::settings_layout::kAllSearchHeaderTop : 16.0f;
+            const float cY = (settingsCategory_ == SettingsCategory::All) ? leanlauncher::settings_layout::kAllSearchCardTop : 36.0f;
+            drawCard(L"SEARCH & FEATURES", hY, cY, kSearchRowCount);
+            const auto searchRowY = [&](int row) {
+                return cY + SearchRowRank(row) * kSettingsRowHeight + offsetY;
+            };
 
-            DrawSettingsRow(7, cY + offsetY, L"File search",
+            DrawSettingsRow(7, searchRowY(7), L"File search",
                 L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
-            DrawSettingsRow(8, cY + kSettingsRowHeight + offsetY, L"Web search",
+            DrawSettingsRow(8, searchRowY(8), L"Web search",
                 L"Open " + settings_.webSearchEngineName + L" when no results match your query",
                 {}, true, settings_.enableWebSearch);
-            DrawSettingsRow(kRowWebSearchEngine, cY + 2 * kSettingsRowHeight + offsetY, L"Search engine",
+            DrawSettingsRow(kRowWebSearchEngine, searchRowY(kRowWebSearchEngine), L"Search engine",
                 webSearchDropdownOpen_ ? L"Tap to collapse"
                     : L"Search engine used for the \"Web search\" fallback",
                 settings_.webSearchEngineName, false, false, false, true);
-            DrawSettingsRow(kRowFileSearchPrefix, cY + 3 * kSettingsRowHeight + offsetY, L"File search prefix",
+            DrawSettingsRow(kRowFileSearchPrefix, searchRowY(kRowFileSearchPrefix), L"File search prefix",
                 L"Type this followed by a space to show only files and folders",
                 settings_.fileSearchPrefix, false, false, false, true);
-            DrawSettingsRow(kRowWebSearchPrefix, cY + 4 * kSettingsRowHeight + offsetY, L"Web search prefix",
+            DrawSettingsRow(kRowWebSearchPrefix, searchRowY(kRowWebSearchPrefix), L"Web search prefix",
                 L"Type this followed by a space to force a \"" + settings_.webSearchEngineName + L"\" search",
                 settings_.webSearchPrefix, false, false, false, true);
-            DrawSettingsRow(kRowAppSearchPrefix, cY + 5 * kSettingsRowHeight + offsetY, L"App search prefix",
+            DrawSettingsRow(kRowAppSearchPrefix, searchRowY(kRowAppSearchPrefix), L"App search prefix",
                 L"Type this followed by a space to show only installed apps",
                 settings_.appSearchPrefix, false, false, false, true);
-            DrawSettingsRow(kRowFileSearchEditExclusions, cY + 6 * kSettingsRowHeight + offsetY, L"Edit exclusions...",
+            DrawSettingsRow(kRowFileSearchEditExclusions, searchRowY(kRowFileSearchEditExclusions), L"Edit exclusions...",
                 L"Add your own folder and file-type exclusions on top of the built-in list",
                 {}, false, false, true);
-            DrawSettingsRow(kRowFileSearchHelp, cY + 7 * kSettingsRowHeight + offsetY, L"Help",
+            DrawSettingsRow(kRowFileSearchHelp, searchRowY(kRowFileSearchHelp), L"Help",
                 L"Learn how file search exclusions work",
                 {}, false, false, true);
+            DrawSettingsRow(kRowSystemCommandsEnabled, searchRowY(kRowSystemCommandsEnabled), L"System commands",
+                L"Lock, sleep, restart, shut down, sign out, and empty the Recycle Bin",
+                {}, true, settings_.enableSystemCommands);
+            DrawSettingsRow(kRowSystemCommandsPrefix, searchRowY(kRowSystemCommandsPrefix), L"System commands prefix",
+                L"Type this followed by a space to list system commands",
+                settings_.systemCommandsPrefix, false, false, false, true);
+            DrawSettingsRow(kRowTypedUrlsEnabled, searchRowY(kRowTypedUrlsEnabled), L"Typed URLs",
+                L"Open web addresses you type, like github.com or https://...",
+                {}, true, settings_.enableTypedUrls);
+            DrawSettingsRow(kRowPathCompletionEnabled, searchRowY(kRowPathCompletionEnabled), L"Path completion",
+                L"Complete folder paths as you type, like C:\\Us or %APPDATA%\\",
+                {}, true, settings_.enablePathCompletion);
+            DrawSettingsRow(kRowUnitConverterEnabled, searchRowY(kRowUnitConverterEnabled), L"Unit converter",
+                L"Convert units offline, like 5 km in mi or 72 f to c",
+                {}, true, settings_.enableUnitConverter);
+            DrawSettingsRow(kRowTimeZonesEnabled, searchRowY(kRowTimeZonesEnabled), L"Time zone converter",
+                L"Times in other places, like time in Tokyo or 10am PST in CET",
+                {}, true, settings_.enableTimeZones);
+            DrawSettingsRow(kRowPomodoroEnabled, searchRowY(kRowPomodoroEnabled), L"Pomodoro timer",
+                L"Focus timers with a tray reminder, like pomo 25 write intro",
+                {}, true, settings_.enablePomodoro);
+            DrawSettingsRow(kRowPomodoroPrefix, searchRowY(kRowPomodoroPrefix), L"Pomodoro prefix",
+                L"Type this followed by a space to start or check a timer",
+                settings_.pomodoroPrefix, false, false, false, true);
+            DrawSettingsRow(kRowPomodoroFocusMinutes, searchRowY(kRowPomodoroFocusMinutes), L"Focus length",
+                L"Minutes for a focus timer when you don't type a number",
+                settings_.pomodoroFocusMinutes, false, false, false, true);
+            DrawSettingsRow(kRowPomodoroBreakMinutes, searchRowY(kRowPomodoroBreakMinutes), L"Break length",
+                L"Minutes for a break",
+                settings_.pomodoroBreakMinutes, false, false, false, true);
+            DrawSettingsRow(kRowPomodoroLog, searchRowY(kRowPomodoroLog), L"Log finished Pomodoros",
+                L"Add finished focus timers to your log heading - only if today's note exists",
+                {}, true, settings_.pomodoroLog);
         }
 
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Obsidian) {
-            const float hY = (settingsCategory_ == SettingsCategory::All) ? 835.0f : 16.0f;
-            const float cY = (settingsCategory_ == SettingsCategory::All) ? 855.0f : 36.0f;
+            const float hY = (settingsCategory_ == SettingsCategory::All)
+                ? leanlauncher::settings_layout::AllObsidianHeaderTop(kSearchRowCount) : 16.0f;
+            const float cY = (settingsCategory_ == SettingsCategory::All)
+                ? leanlauncher::settings_layout::AllObsidianCardTop(kSearchRowCount) : 36.0f;
             const auto& visibleRows = ObsidianVisibleRows();
             drawCard(L"OBSIDIAN", hY, cY, static_cast<int>(visibleRows.size()));
             for (size_t i = 0; i < visibleRows.size(); ++i) {
@@ -5472,6 +6645,13 @@ private:
                 Text(indexLines[i].first, lineRect, resultFormat_.Get(), Foreground());
                 Text(*indexLines[i].second, lineRect, hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
             }
+
+            drawCard(L"BACKUP", AboutBackupHeaderTop(), AboutBackupCardTop(), 2);
+            DrawSettingsRow(kRowAboutExportSettings, AboutBackupCardTop() + offsetY, L"Export settings...",
+                L"Save your settings to a file, to move them to another PC", {}, false, false, true);
+            DrawSettingsRow(kRowAboutImportSettings, AboutBackupCardTop() + kSettingsRowHeight + offsetY,
+                L"Import settings...", L"Load settings from a file - you see what changes before anything is applied",
+                {}, false, false, true);
         }
 
         target_->PopAxisAlignedClip();
@@ -5625,6 +6805,33 @@ private:
     std::mutex iconMutex_;
     std::condition_variable iconCv_;
     std::deque<IconRequest> iconQueue_;
+    // US-041 system commands: the second-Enter gate and the Recycle Bin
+    // row's count/size (-1 = not fetched since the launcher last showed).
+    leanlauncher::syscmd::ConfirmGate commandGate_;
+    long long recycleBinItems_ = -1;
+    long long recycleBinBytes_ = 0;
+    bool recycleBinQueryPending_ = false;
+    bool modalDialogOpen_ = false;  // an export/import dialog is open (US-044)
+    leanlauncher::timezones::ZoneCache timeZones_;  // US-048, empty until the first time query
+    // US-049 Pomodoro: the running timer (none = no timers set), the pending
+    // "replace running timer" confirmation, and the break offer on the balloon.
+    std::optional<leanlauncher::pomodoro::State> pomodoro_;
+    bool pomodoroReplacePending_ = false;
+    std::wstring pomodoroReplacePath_;
+    unsigned long long pomodoroReplaceAt_ = 0;
+    bool pomodoroBreakOffer_ = false;
+    bool balloonTempIcon_ = false;
+    // US-043 path completion: the one cached folder listing (freed on Hide()
+    // and when the feature is turned off) and the request in flight.
+    std::wstring pathListedFolder_;
+    std::vector<leanlauncher::typed::PathEntry> pathEntries_;
+    DWORD pathError_ = 0;
+    bool pathTruncated_ = false;
+    bool pathListingReady_ = false;
+    bool pathTimedOut_ = false;
+    std::wstring pathRequestedFolder_;
+    unsigned pathGeneration_ = 0;
+    int pathThreadsRunning_ = 0;
     std::unordered_set<std::wstring> iconPending_;
     std::vector<AppEntry> apps_;
     std::vector<size_t> results_, recent_;
