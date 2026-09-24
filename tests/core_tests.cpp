@@ -401,6 +401,36 @@ int main() {
           IsUpdateRowClickable(UpdateCheckState::Failed) && !IsUpdateRowClickable(UpdateCheckState::Checking) &&
           !IsUpdateRowClickable(UpdateCheckState::Downloading),
           "update row: clicks are ignored only while a check or download runs");
+    Check(NextUpdateState(0, false, false) == UpdateCheckState::UpToDate &&
+          NextUpdateState(1, false, false) == UpdateCheckState::Available &&
+          NextUpdateState(2, false, true) == UpdateCheckState::Ready &&
+          NextUpdateState(3, false, false) == UpdateCheckState::Failed,
+          "update row: each verdict maps to its state");
+    Check(NextUpdateState(3, true, true) == UpdateCheckState::Ready &&
+          NextUpdateState(3, false, true) == UpdateCheckState::Available,
+          "update row: a failed re-check keeps an update that is already ready or available");
+    Check(NextUpdateState(0, true, true) == UpdateCheckState::UpToDate,
+          "update row: only a failed check keeps the earlier update");
+
+    // US-029: the release page URL comes from the GitHub API response and is
+    // opened with ShellExecute, so only this repo's https pages are allowed.
+    Check(ReleasePageUrlOrDefault(L"https://github.com/sdkasper/lean-launcher/releases/tag/v1.7.0") ==
+              L"https://github.com/sdkasper/lean-launcher/releases/tag/v1.7.0",
+          "release page URL: the repo's own release page is opened as-is");
+    {
+        const std::wstring fallback = kDefaultReleasesUrl;
+        Check(ReleasePageUrlOrDefault(L"") == fallback &&
+              ReleasePageUrlOrDefault(L"file:///C:/Windows/System32/calc.exe") == fallback &&
+              ReleasePageUrlOrDefault(L"\\\\attacker.example.com\\share\\x.exe") == fallback &&
+              ReleasePageUrlOrDefault(L"http://github.com/sdkasper/lean-launcher/releases") == fallback &&
+              ReleasePageUrlOrDefault(L"https://github.com.evil.example/sdkasper/lean-launcher/x") == fallback &&
+              ReleasePageUrlOrDefault(L"https://github.com/other/repo/releases") == fallback &&
+              ReleasePageUrlOrDefault(L"https://github.com/sdkasper/lean-launcher-evil/releases") == fallback &&
+              ReleasePageUrlOrDefault(L"https://github.com/sdkasper/lean-launcher/../../evil") == fallback &&
+              ReleasePageUrlOrDefault(L"https://github.com/sdkasper/lean-launcher/x\" --arg") == fallback &&
+              ReleasePageUrlOrDefault(L"ms-settings:") == fallback,
+              "release page URL: any other scheme, host, repo, traversal, or odd character opens the default page");
+    }
     Check(FormatLastUpdateCheck(0) == L"Last checked: never", "update row: never checked");
     {
         const std::wstring when = FormatLastUpdateCheck(1790000000); // 2026-09-21 (UTC)
@@ -2375,6 +2405,58 @@ int main() {
     Check(IsUnsafeVaultRelativePath(L"/Daily"), "IsUnsafeVaultRelativePath rejects a leading forward slash");
     Check(IsUnsafeVaultRelativePath(L"C:Daily"), "IsUnsafeVaultRelativePath rejects a drive-relative path");
     Check(!IsUnsafeVaultRelativePath(L"06 BJ/10 Daily"), "IsUnsafeVaultRelativePath accepts a plain relative folder");
+    Check(!IsUnsafeVaultRelativePath(L"06 BJ/10 Daily/") && !IsUnsafeVaultRelativePath(L"./Daily") &&
+          !IsUnsafeVaultRelativePath(L"2026/09-September/2026-09-23-Wednesday") &&
+          !IsUnsafeVaultRelativePath(L"v1.2 notes") && !IsUnsafeVaultRelativePath(L"Console/Conference") &&
+          !IsUnsafeVaultRelativePath(L"COM10") && !IsUnsafeVaultRelativePath(L"...notes"),
+        "IsUnsafeVaultRelativePath accepts trailing slashes, ./, dotted names, and names that only start like a device");
+    // NFR-009 (2026-09-24): colons, reserved device names, and dots-only
+    // segments Win32 would trim into ".." are unsafe too.
+    Check(IsUnsafeVaultRelativePath(L"Daily/C:x") && IsUnsafeVaultRelativePath(L"2026-09-23:hidden"),
+        "IsUnsafeVaultRelativePath rejects a colon anywhere (drive-relative or alternate data stream)");
+    Check(IsUnsafeVaultRelativePath(L"CON") && IsUnsafeVaultRelativePath(L"Daily/nul.md") &&
+          IsUnsafeVaultRelativePath(L"com1") && IsUnsafeVaultRelativePath(L"LPT9.txt") &&
+          IsUnsafeVaultRelativePath(L"AUX /x") && IsUnsafeVaultRelativePath(L"CONOUT$") &&
+          IsUnsafeVaultRelativePath(L"COM\u00B9"),
+        "IsUnsafeVaultRelativePath rejects reserved device names in any segment, with or without an extension");
+    Check(IsUnsafeVaultRelativePath(L".. /x") && IsUnsafeVaultRelativePath(L"a/.../b") &&
+          IsUnsafeVaultRelativePath(L"a/ /b") && IsUnsafeVaultRelativePath(L"a/..\\b"),
+        "IsUnsafeVaultRelativePath rejects segments made only of dots and spaces");
+    {
+        // NFR-009 regression (found 2026-09-24 in c1d2cf4): [literal] text is
+        // unwrapped after the safety check, so the *expanded* name must be
+        // checked - otherwise these escape the vault or replace its root.
+        const wchar_t* const escapes[] = {
+            L"[..]/[..]/[..]/[Users]/[Public]/YYYY",
+            L"[C:]/[Windows]/[pwn]",
+            L"[/][Windows]/YYYY",
+            L"[\\\\attacker.example.com\\share]\\[x]",
+            L"[..] /x-YYYY",
+            L"YYYY-MM-DD[:hidden]",
+            L"[CON]",
+            L"YYYY/[..]",
+        };
+        for (const wchar_t* format : escapes) {
+            DailyNoteConfig config;
+            config.folder = L"_Daily_notes";
+            config.format = format;
+            Check(ResolveTodayPath(config, L"D:\\Vault", 2026, 9, 23) == L"D:\\Vault\\_Daily_notes\\2026-09-23.md" &&
+                      TodayNoteRef(config, 2026, 9, 23) == L"_Daily_notes/2026-09-23",
+                "ResolveTodayPath/TodayNoteRef fall back to YYYY-MM-DD in the folder when a [literal] expands to an unsafe path");
+        }
+    }
+    Check(!IsDateFormatFullySupported(L"YYYY-MM-DD[") && !IsDateFormatFullySupported(L"[a]]YYYY") &&
+          !IsDateFormatFullySupported(L"YYYY]"),
+        "IsDateFormatFullySupported false for an unclosed [ or a stray ] (a bracket in the note name breaks wikilinks)");
+    {
+        DailyNoteConfig config;
+        config.format = L"YYYY-MM-DD[";
+        Check(TodayNoteRef(config, 2026, 9, 23) == L"2026-09-23",
+            "TodayNoteRef falls back instead of writing a bracket into the note name");
+        config.format = L"[Daily]/YYYY/[..notes]";
+        Check(TodayNoteRef(config, 2026, 9, 23) == L"Daily/2026/..notes",
+            "TodayNoteRef keeps a safe literal that merely contains dots");
+    }
 
     // NormalizeTargetNoteRef (US-025): user-entered capture target -> the
     // vault-relative, forward-slash, extension-less ref NoteIndex uses.

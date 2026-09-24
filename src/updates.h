@@ -118,6 +118,37 @@ inline bool IsUpdateRowClickable(UpdateCheckState state) {
     return state != UpdateCheckState::Checking && state != UpdateCheckState::Downloading;
 }
 
+// The row state a finished check leads to. wParam-style verdict: 0 up to
+// date, 1 newer release but download failed, 2 downloaded and validated,
+// 3 check failed. A failed check (e.g. a network blip on the 24-hour
+// re-check) keeps an update that is already downloaded or available rather
+// than hiding it behind "Check failed".
+inline UpdateCheckState NextUpdateState(uintptr_t verdict, bool hadDownloaded, bool hadAvailable) {
+    switch (verdict) {
+    case 2: return UpdateCheckState::Ready;
+    case 1: return UpdateCheckState::Available;
+    case 0: return UpdateCheckState::UpToDate;
+    default:
+        if (hadDownloaded) return UpdateCheckState::Ready;
+        if (hadAvailable) return UpdateCheckState::Available;
+        return UpdateCheckState::Failed;
+    }
+}
+
+// The release page the "available" row opens. `htmlUrl` comes from the
+// GitHub API response, so it is untrusted: ShellExecute would happily run a
+// file:, UNC, or custom-protocol URL. Only a plain https URL under this
+// repo is used; anything else opens the default releases page.
+inline std::wstring ReleasePageUrlOrDefault(std::wstring_view htmlUrl) {
+    static constexpr std::wstring_view kPrefix = L"https://github.com/sdkasper/lean-launcher/";
+    const bool safe = htmlUrl.size() > kPrefix.size() && htmlUrl.substr(0, kPrefix.size()) == kPrefix &&
+        htmlUrl.find(L"..") == std::wstring_view::npos &&
+        std::all_of(htmlUrl.begin(), htmlUrl.end(), [](wchar_t ch) {
+            return ch > L' ' && ch < 0x7F && ch != L'"' && ch != L'\\' && ch != L'<' && ch != L'>';
+        });
+    return safe ? std::wstring(htmlUrl) : std::wstring(kDefaultReleasesUrl);
+}
+
 // "Last checked: 23 Sep 2026, 17:40" in local time, or "never" for 0.
 inline std::wstring FormatLastUpdateCheck(uint64_t seconds) {
     if (seconds == 0) return L"Last checked: never";

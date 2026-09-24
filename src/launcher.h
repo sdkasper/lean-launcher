@@ -261,26 +261,21 @@ private:
             // wParam: 0 up to date, 1 newer release but download failed,
             // 2 downloaded and validated, 3 check failed (no usable answer).
             std::unique_ptr<takeoff::UpdateCheckResult> result(reinterpret_cast<takeoff::UpdateCheckResult*>(lParam));
-            if (result) {
+            const takeoff::UpdateCheckState next =
+                takeoff::NextUpdateState(wParam, updateDownloaded_, updateAvailable_);
+            // A failed check that keeps an earlier update carries no tag or
+            // URL of its own - keep the earlier ones too.
+            const bool keptEarlierUpdate = wParam == 3 && next != takeoff::UpdateCheckState::Failed;
+            if (result && !keptEarlierUpdate) {
                 updateTag_ = result->tag;
                 updateReleaseUrl_ = result->htmlUrl;
             }
-            if (wParam == 2) {
-                updateDownloaded_ = true;
-                updateAvailable_ = true;
-                if (result && !result->path.empty()) {
-                    downloadedUpdatePath_ = result->path;
-                }
-                updateState_ = takeoff::UpdateCheckState::Ready;
-            } else if (wParam == 1) {
-                updateAvailable_ = true;
-                updateDownloaded_ = false;
-                updateState_ = takeoff::UpdateCheckState::Available;
-            } else {
-                updateAvailable_ = false;
-                updateDownloaded_ = false;
-                updateState_ = wParam == 3 ? takeoff::UpdateCheckState::Failed : takeoff::UpdateCheckState::UpToDate;
+            if (wParam == 2 && result && !result->path.empty()) {
+                downloadedUpdatePath_ = result->path;
             }
+            updateDownloaded_ = next == takeoff::UpdateCheckState::Ready;
+            updateAvailable_ = updateDownloaded_ || next == takeoff::UpdateCheckState::Available;
+            updateState_ = next;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
@@ -1014,7 +1009,15 @@ private:
             return;
         }
         if (updateInProgress_->exchange(true)) {
-            return; // Already checking or downloading, do not block UI
+            // Already checking or downloading, do not block UI. The one
+            // exception: the worker has already posted its result (the row
+            // no longer reads Checking/Downloading) and is only unwinding, so
+            // a manual click would be silently dropped - wait for it instead.
+            const bool workerFinishing = updateState_ != takeoff::UpdateCheckState::Checking &&
+                updateState_ != takeoff::UpdateCheckState::Downloading;
+            if (!manual || !workerFinishing || !updateThread_.joinable()) return;
+            updateThread_.join();
+            *updateInProgress_ = true; // the worker's guard cleared it on exit
         }
         if (updateThread_.joinable()) {
             updateThread_.join();
@@ -1072,6 +1075,9 @@ private:
             });
         } catch (const std::system_error&) {
             *updateInProgress_ = false;
+            // Don't leave the row stuck on "Checking…" (unclickable).
+            updateState_ = takeoff::NextUpdateState(3, updateDownloaded_, updateAvailable_);
+            InvalidateRect(hwnd_, nullptr, FALSE);
         }
     }
 
@@ -2599,8 +2605,7 @@ private:
             if (updateState_ == takeoff::UpdateCheckState::Ready) {
                 RestartToUpdate();
             } else if (updateState_ == takeoff::UpdateCheckState::Available) {
-                const std::wstring& url = updateReleaseUrl_.empty()
-                    ? std::wstring(takeoff::kDefaultReleasesUrl) : updateReleaseUrl_;
+                const std::wstring url = takeoff::ReleasePageUrlOrDefault(updateReleaseUrl_);
                 ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             } else {
                 CheckForUpdatesAsync(true, true);
@@ -2682,9 +2687,14 @@ private:
             settings_.checkForUpdates = !settings_.checkForUpdates;
             SaveSettings();
             if (!settings_.checkForUpdates) {
-                updateAvailable_ = false;
-                updateDownloaded_ = false;
-                updateState_ = takeoff::UpdateCheckState::Idle;
+                // A check that is already running still reports its result
+                // (the setting only gates automatic checks) - resetting the
+                // row now would show "Check now" while it keeps running.
+                if (!*updateInProgress_) {
+                    updateAvailable_ = false;
+                    updateDownloaded_ = false;
+                    updateState_ = takeoff::UpdateCheckState::Idle;
+                }
             } else {
                 CheckForUpdatesAsync(true);
             }

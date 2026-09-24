@@ -61,6 +61,11 @@ inline bool ExpandDateFormat(const std::wstring& format, int year, int month, in
                 i = close + 1;
                 continue;
             }
+            // Unclosed "[": the bracket would end up in the note name, which
+            // breaks wikilinks - treat it as unsupported, like a stray "]".
+            supported = false;
+        } else if (ch == L']') {
+            supported = false;
         }
         if (!std::iswalpha(ch)) {
             out.push_back(ch);
@@ -115,12 +120,36 @@ inline bool IsDateFormatFullySupported(const std::wstring& format) {
 // without a drive ("\Windows") and drive-relative ones ("C:Daily") aren't
 // is_absolute() on Windows, but joining either onto the vault path discards
 // the vault's own root - so any root name/directory counts as unsafe too.
+//
+// A ":" anywhere is rejected as well ("x/C:y" is drive-relative once joined,
+// "note:x" writes an NTFS alternate data stream), as is any segment that is a
+// reserved device name (CON, NUL, COM1, ... with or without an extension) or
+// made only of dots and spaces - Win32 trims trailing dots/spaces, so ".. "
+// becomes a ".." traversal after this check (NFR-009).
+inline bool IsReservedDeviceName(std::wstring_view segment) {
+    std::wstring_view stem = segment.substr(0, segment.find(L'.'));
+    while (!stem.empty() && stem.back() == L' ') stem.remove_suffix(1);
+    static constexpr std::wstring_view kNames[] = {L"CON", L"PRN", L"AUX", L"NUL", L"CONIN$", L"CONOUT$"};
+    for (const std::wstring_view name : kNames) {
+        if (stem.size() == name.size() && _wcsnicmp(stem.data(), name.data(), name.size()) == 0) return true;
+    }
+    if (stem.size() == 4 && (_wcsnicmp(stem.data(), L"COM", 3) == 0 || _wcsnicmp(stem.data(), L"LPT", 3) == 0)) {
+        const wchar_t n = stem[3];
+        return (n >= L'1' && n <= L'9') || n == L'¹' || n == L'²' || n == L'³';
+    }
+    return false;
+}
+
 inline bool IsUnsafeVaultRelativePath(const std::wstring& value) {
     if (value.empty()) return false;
+    if (value.find(L':') != std::wstring::npos) return true;
     const fs::path p(value);
     if (p.is_absolute() || p.has_root_name() || p.has_root_directory()) return true;
     for (const auto& part : p) {
-        if (part == L"..") return true;
+        const std::wstring& segment = part.native();
+        if (segment.empty() || segment == L".") continue; // "Daily/" ends in an empty element
+        if (segment.find_first_not_of(L". ") == std::wstring::npos) return true;
+        if (IsReservedDeviceName(segment)) return true;
     }
     return false;
 }
@@ -128,14 +157,17 @@ inline bool IsUnsafeVaultRelativePath(const std::wstring& value) {
 // Today's daily-note name (no extension) under config.format. Falls back to
 // the safe default format whenever the configured format contains anything
 // ExpandDateFormat can't fully account for (e.g. a Moment.js token like
-// "ww" or "Do"), or is itself unsafe (e.g. "../../secret"), rather than
-// silently producing a garbled or traversal-y filename.
+// "ww" or "Do"), or expands to something unsafe, rather than silently
+// producing a garbled or traversal-y filename. The *expanded* name is what
+// gets checked: a [literal] can spell "..", "C:" or "/" that the raw format
+// doesn't contain ("[..]/[..]/x"), so checking the format alone isn't enough.
 inline std::wstring FormatTodayNoteName(const DailyNoteConfig& config, int year, int month, int day) {
-    const bool formatIsSafe = !IsUnsafeVaultRelativePath(config.format);
-    const std::wstring& formatToUse =
-        (formatIsSafe && IsDateFormatFullySupported(config.format)) ? config.format
-                                                                     : std::wstring(L"YYYY-MM-DD");
-    return FormatDateTokens(formatToUse, year, month, day);
+    std::wstring name;
+    if (ExpandDateFormat(config.format, year, month, day, name) && !name.empty() &&
+        name.back() != L'/' && name.back() != L'\\' && !IsUnsafeVaultRelativePath(name)) {
+        return name;
+    }
+    return FormatDateTokens(L"YYYY-MM-DD", year, month, day);
 }
 
 inline std::wstring ResolveTodayPath(const DailyNoteConfig& config, const std::wstring& vaultPath,
@@ -209,9 +241,11 @@ inline void GetTodayYmd(int& year, int& month, int& day) {
 // so a break is written as `\n` or ` // ` (spaces around it are dropped);
 // real CR/LF/CRLF also count in case one arrives some other way. `\\n` is the
 // escape for a literal backslash-n; every other backslash is kept, so
-// `C:\temp` survives. Trailing spaces are trimmed from each line (two of them
-// would be a Markdown hard break), then empty lines at the start and end are
-// dropped - so a capture that is only breaks comes back empty.
+// `C:\temp` survives - but `C:\notes` splits at its `\n`, typed or pasted, by
+// design (US-028); `C:\\notes` keeps it. Trailing spaces are trimmed from
+// each line (two of them would be a Markdown hard break), then empty lines
+// at the start and end are dropped - so a capture that is only breaks comes
+// back empty.
 inline std::vector<std::wstring> SplitCaptureLines(std::wstring_view text) {
     std::vector<std::wstring> lines(1);
     auto breakLine = [&lines] { lines.emplace_back(); };
