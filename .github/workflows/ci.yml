@@ -24,7 +24,7 @@ jobs:
         run: cmake --build cmake --config Release
 
       - name: Run Core Tests (CTest)
-        run: ctest --test-dir cmake -C Release --output-on-failure
+        run: ctest --test-dir cmake -C Release -V --output-on-failure
 
       - name: Verify Visual Studio Solution Build
         run: msbuild LeanLauncher.sln /p:Configuration=Release /p:Platform=x64 /v:m
