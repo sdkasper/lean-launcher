@@ -48,3 +48,8 @@ Thumbs.db
 # Claude Code loop config/state and local agent workspace - stays local, not published
 /LOOP.md
 /.claude/
+
+# Signing keys - never commit (US-040)
+*.key
+*.minisig
+minisign.key

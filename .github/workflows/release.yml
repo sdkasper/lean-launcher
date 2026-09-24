@@ -22,6 +22,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Refuse tracked signing keys
+        shell: pwsh
+        run: |
+          $tracked = git ls-files -- '*.key' '*.minisig'
+          if ($tracked) {
+            Write-Error "Signing key material must never be committed: $($tracked -join ', ')"
+            exit 1
+          }
+
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
