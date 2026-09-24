@@ -10,7 +10,7 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
-## [Unreleased]
+## [1.7.0] - 2026-09-24
 
 ### Added
 - **Multi-line captures** - `\n` or ` // ` in a task (`t`), note (`a`), or log (`l`) capture starts a new line, e.g. `t buy milk // oat, 1 litre`. Extra lines of a task or log entry are indented two spaces under its bullet so Obsidian keeps it one list item (blank extra lines are dropped); note captures keep each line, including blank ones in the middle. The capture preview shows each break as `⏎`. `\\n` writes a literal `\n`; every other backslash is kept as typed. A capture that is only line breaks is treated as empty.
