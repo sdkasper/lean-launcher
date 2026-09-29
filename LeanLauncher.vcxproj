@@ -80,6 +80,8 @@
     <ClInclude Include="src\search.h" />
     <ClInclude Include="src\settings.h" />
     <ClInclude Include="src\updates.h" />
+    <ClInclude Include="src\sha256.h" />
+    <ClInclude Include="src\update_apply.h" />
     <ClInclude Include="src\calculator.h" />
     <ClInclude Include="src\preview.h" />
   </ItemGroup>

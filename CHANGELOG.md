@@ -10,6 +10,14 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.9.1] - 2026-09-29
+
+### Fixed
+- **Restart to Update in a protected folder** - when Lean Launcher is installed somewhere it cannot write to, such as `C:\Program Files\LeanLauncher`, Restart to Update now asks for administrator permission once (a single Windows prompt) and installs the update, instead of closing the launcher without updating and leaving the old version to start again. The administrator prompt appears once, the downloaded file is checked against its download-time checksum and against the checksum published for the release on GitHub before it is installed (if GitHub cannot be reached, nothing is installed and the launcher restarts unchanged), the launcher starts again as your normal user, and if you choose No at the prompt it stays open and tells you how to retry. A background loop that could keep running after a failed update is gone.
+
+### Notes
+- If you installed Lean Launcher in a protected folder such as C:\Program Files and are on 1.9.0 or older, download 1.9.1 manually once: those versions cannot update themselves there.
+
 ## [1.9.0] - 2026-09-29
 
 ### Added

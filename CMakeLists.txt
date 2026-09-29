@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(LeanLauncher VERSION 1.9.0 LANGUAGES CXX)
+project(LeanLauncher VERSION 1.9.1 LANGUAGES CXX)
 
 function(add_launcher target)
 add_executable(${target} WIN32
@@ -9,6 +9,8 @@ add_executable(${target} WIN32
     src/search.h
     src/settings.h
     src/updates.h
+    src/sha256.h
+    src/update_apply.h
     src/calculator.h
     src/obsidian_config.h
     src/daily_note.h

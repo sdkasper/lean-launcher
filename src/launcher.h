@@ -275,6 +275,12 @@ private:
             }
             if (wParam == 2 && result && !result->path.empty()) {
                 downloadedUpdatePath_ = result->path;
+                downloadedUpdateSha256_ = result->sha256;
+            } else if (wParam == 0 || wParam == 1) {
+                // Up to date, or the re-download failed after the old staged file was
+                // deleted: never leave a path or hash pointing at a file that is gone.
+                downloadedUpdatePath_.clear();
+                downloadedUpdateSha256_.clear();
             }
             updateDownloaded_ = next == takeoff::UpdateCheckState::Ready;
             updateAvailable_ = updateDownloaded_ || next == takeoff::UpdateCheckState::Available;
@@ -1149,9 +1155,10 @@ private:
                 // The handler takes ownership of the posted result, so only
                 // release it once the post is known to have succeeded - it
                 // fails if shutdown got there first.
-                auto post = [hwnd, &tag, &htmlUrl](UINT message, WPARAM verdict, std::wstring stagedPath = {}) {
+                auto post = [hwnd, &tag, &htmlUrl](UINT message, WPARAM verdict, std::wstring stagedPath = {},
+                                                   std::string sha256 = {}) {
                     auto p = std::make_unique<takeoff::UpdateCheckResult>(
-                        takeoff::UpdateCheckResult{tag, htmlUrl, std::move(stagedPath)});
+                        takeoff::UpdateCheckResult{tag, htmlUrl, std::move(stagedPath), std::move(sha256)});
                     if (PostMessageW(hwnd, message, verdict, reinterpret_cast<LPARAM>(p.get()))) {
                         p.release();
                     }
@@ -1162,14 +1169,15 @@ private:
                 }
                 if (takeoff::IsNewerVersion(tag, takeoff::kAppVersion)) {
                     const std::wstring stagingPath = takeoff::GetUpdateStagingPath(tag);
-                    if (!stagingPath.empty() && takeoff::ValidateExecutableFile(stagingPath)) {
-                        post(kUpdateCheckCompletedMessage, 2, stagingPath);
-                        return;
-                    }
+                    // A file left in the staging folder by an earlier session has no
+                    // hash pinned by this session (the folder is user-writable), so
+                    // it is downloaded again rather than trusted for an elevated install.
                     if (!assetUrl.empty() && !stagingPath.empty()) {
+                        DeleteFileW(stagingPath.c_str());
                         post(kUpdateProgressMessage, 0);
-                        if (takeoff::DownloadUpdateFile(assetUrl, stagingPath)) {
-                            post(kUpdateCheckCompletedMessage, 2, stagingPath);
+                        std::string sha256;
+                        if (takeoff::DownloadUpdateFile(assetUrl, stagingPath, &sha256)) {
+                            post(kUpdateCheckCompletedMessage, 2, stagingPath, std::move(sha256));
                             return;
                         }
                     }
@@ -1342,11 +1350,25 @@ private:
                 }
             }
         }
-        if (!targetPath.empty() && takeoff::ApplyUpdateAndRestart(targetPath)) {
+        // The pinned hash only belongs to the file it was computed for.
+        const std::string expectedSha256 = targetPath == downloadedUpdatePath_ ? downloadedUpdateSha256_ : std::string();
+        const takeoff::ApplyResult result = targetPath.empty()
+            ? takeoff::ApplyResult::Failed
+            : takeoff::ApplyUpdateAndRestart(targetPath, expectedSha256, hwnd_);
+        switch (takeoff::RestartReactionFor(result)) {
+        case takeoff::RestartReaction::ExitLauncher:
             DestroyWindow(hwnd_);
             return;
+        case takeoff::RestartReaction::StayWithMessage:
+            MessageBoxW(hwnd_, takeoff::RestartMessageFor(result), L"Lean Launcher update",
+                        MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+            return;
+        case takeoff::RestartReaction::StayMessageAndOpenReleases:
+            MessageBoxW(hwnd_, takeoff::RestartMessageFor(result), L"Lean Launcher update",
+                        MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+            ShellExecuteW(nullptr, L"open", releasesUrl_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            return;
         }
-        ShellExecuteW(nullptr, L"open", releasesUrl_.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     }
 
     void HandleTrayMessage(UINT message) {
@@ -7599,6 +7621,9 @@ private:
     bool updateAvailable_ = false;
     bool updateDownloaded_ = false;
     std::wstring downloadedUpdatePath_;
+    // SHA-256 of the bytes received when downloadedUpdatePath_ was downloaded in
+    // this session; empty when unknown. The elevated update helper checks it.
+    std::string downloadedUpdateSha256_;
     // About tab update row (US-029). updateTag_/updateReleaseUrl_ come from
     // the latest check that reached GitHub.
     takeoff::UpdateCheckState updateState_ = takeoff::UpdateCheckState::Idle;

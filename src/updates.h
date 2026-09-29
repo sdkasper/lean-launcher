@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <ctime>
 #include <cwchar>
 #include <filesystem>
@@ -16,12 +17,14 @@
 #include <winhttp.h>
 #include <shellapi.h>
 
+#include "sha256.h"
+
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shell32.lib")
 
 namespace takeoff {
 
-inline constexpr wchar_t kAppVersion[] = L"1.9.0";
+inline constexpr wchar_t kAppVersion[] = L"1.9.1";
 inline constexpr wchar_t kRepoUrl[] = L"https://github.com/sdkasper/lean-launcher";
 inline constexpr wchar_t kDefaultReleasesUrl[] = L"https://github.com/sdkasper/lean-launcher/releases";
 inline constexpr wchar_t kDefaultApiHost[] = L"api.github.com";
@@ -93,6 +96,8 @@ struct UpdateCheckResult {
     std::wstring tag;
     std::wstring htmlUrl;
     std::wstring path;
+    // Lowercase SHA-256 of the bytes received when `path` was downloaded.
+    std::string sha256;
 };
 
 inline std::wstring DisplayTag(std::wstring_view tag) {
@@ -278,6 +283,23 @@ inline bool ValidateExecutableFile(const std::wstring& filePath) {
     return (fileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 || fileHeader.Machine == IMAGE_FILE_MACHINE_I386);
 }
 
+// The same sanity check as ValidateExecutableFile, on bytes already in memory:
+// the elevated update helper validates the exact buffer it hashed and installs.
+inline bool ValidateExecutableBuffer(const uint8_t* data, size_t size) {
+    if (!data || size < 65536) return false;
+    IMAGE_DOS_HEADER dosHeader{};
+    std::memcpy(&dosHeader, data, sizeof(dosHeader));
+    if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE || dosHeader.e_lfanew <= 0) return false;
+    const size_t ntOffset = static_cast<size_t>(dosHeader.e_lfanew);
+    if (ntOffset > size || size - ntOffset < sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER)) return false;
+    DWORD ntSignature = 0;
+    std::memcpy(&ntSignature, data + ntOffset, sizeof(ntSignature));
+    if (ntSignature != IMAGE_NT_SIGNATURE) return false;
+    IMAGE_FILE_HEADER fileHeader{};
+    std::memcpy(&fileHeader, data + ntOffset + sizeof(ntSignature), sizeof(fileHeader));
+    return fileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 || fileHeader.Machine == IMAGE_FILE_MACHINE_I386;
+}
+
 inline std::wstring GetUpdateStagingPath(std::wstring_view tag) {
     wchar_t localAppData[MAX_PATH]{};
     if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH) > 0 && localAppData[0]) {
@@ -303,8 +325,13 @@ inline std::wstring GetUpdateStagingPath(std::wstring_view tag) {
     return {};
 }
 
-inline bool DownloadUpdateFile(std::wstring_view initialUrl, const std::wstring& destPath) {
+// `outSha256`, when given, receives the lowercase SHA-256 of exactly the bytes
+// received from the network (only meaningful when the call returns true).
+inline bool DownloadUpdateFile(std::wstring_view initialUrl, const std::wstring& destPath,
+                               std::string* outSha256 = nullptr) {
     if (initialUrl.empty() || destPath.empty()) return false;
+    if (outSha256) outSha256->clear();
+    Sha256 hasher;
 
     std::wstring currentUrl(initialUrl);
     int redirectsRemaining = 5;
@@ -417,6 +444,7 @@ inline bool DownloadUpdateFile(std::wstring_view initialUrl, const std::wstring&
                         readOk = false;
                         break;
                     }
+                    hasher.Update(buffer.data(), bytesRead);
                     totalDownloaded += bytesRead;
                 } else {
                     readOk = false;
@@ -441,6 +469,7 @@ inline bool DownloadUpdateFile(std::wstring_view initialUrl, const std::wstring&
         // Retry move in case antivirus scanner is momentarily scanning the file
         for (int attempt = 0; attempt < 5; ++attempt) {
             if (MoveFileExW(tempPath.c_str(), destPath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+                if (outSha256) *outSha256 = hasher.FinalHex();
                 return true;
             }
             Sleep(100);
@@ -537,43 +566,318 @@ inline bool QueryLatestReleaseTag(std::wstring_view host, std::wstring_view path
     return QueryLatestReleaseInfo(host, path, outTag, outHtmlUrl, dummyAssetUrl);
 }
 
-// cmd.exe parses .bat files byte-wise in the console codepage, so the updater
-// script has to be narrow text - a UTF-16LE file is not understood and fails on
-// the first token. Interpolating a raw long path into narrow text corrupts it
-// for any username outside that codepage, so the directory (which is where a
-// non-ASCII username shows up) is replaced by its 8.3 short name: that is pure
-// ASCII and therefore representable in every single-byte codepage.
-//
-// Only the directory is shortened, never the file name: `move` creates the
-// destination under exactly the name it is given, so a short destination name
-// would leave the updated executable permanently called LEANLA~1.EXE.
-inline std::wstring ShortenPathDirectory(const std::wstring& path) {
-    const size_t slash = path.find_last_of(L"\\/");
-    if (slash == std::wstring::npos || slash < 3) {
-        return path;
+// ---- Published-digest confirmation (used by the elevated update helper) -----
+
+namespace detail {
+
+// A strict little JSON reader that only answers one question: does some asset
+// object of the release (a direct member of an element of the top-level
+// "assets" array) carry a "digest" string equal to "sha256:<hash>"? The whole
+// document must be valid JSON. Keys are only recognised when written without
+// escapes, so a crafted name cannot forge or hide a digest field.
+class ReleaseDigestScanner {
+public:
+    ReleaseDigestScanner(std::string_view json, std::string_view wantedHex) : s_(json), wanted_(wantedHex) {}
+
+    bool Run() {
+        if (!IsSha256Hex(wanted_)) return false;
+        SkipWs();
+        if (!Value(0, Mode::Root)) return false;
+        SkipWs();
+        return i_ == s_.size() && found_;
     }
-    const std::wstring directory = path.substr(0, slash);
-    const DWORD needed = GetShortPathNameW(directory.c_str(), nullptr, 0);
-    if (needed == 0) {
-        return path;
+
+private:
+    enum class Mode { Other, Root, Assets, Asset };
+
+    void SkipWs() {
+        while (i_ < s_.size() && (s_[i_] == ' ' || s_[i_] == '\t' || s_[i_] == '\r' || s_[i_] == '\n')) ++i_;
     }
-    std::wstring shortDirectory(needed, L'\0');
-    const DWORD written = GetShortPathNameW(directory.c_str(), shortDirectory.data(), needed);
-    if (written == 0 || written >= needed) {
-        return path;
+
+    bool Literal(std::string_view word) {
+        if (s_.substr(i_, word.size()) != word) return false;
+        i_ += word.size();
+        return true;
     }
-    shortDirectory.resize(written);
-    return shortDirectory + path.substr(slash);
+
+    // `plain` is false when the string used any escape sequence.
+    bool String(std::string& out, bool& plain) {
+        if (i_ >= s_.size() || s_[i_] != '"') return false;
+        ++i_;
+        out.clear();
+        plain = true;
+        while (i_ < s_.size()) {
+            const unsigned char ch = static_cast<unsigned char>(s_[i_++]);
+            if (ch == '"') return true;
+            if (ch < 0x20) return false;
+            if (ch != '\\') {
+                out.push_back(static_cast<char>(ch));
+                continue;
+            }
+            plain = false;
+            if (i_ >= s_.size()) return false;
+            const char esc = s_[i_++];
+            if (esc == 'u') {
+                if (s_.size() - i_ < 4) return false;
+                for (int k = 0; k < 4; ++k) {
+                    const char h = s_[i_++];
+                    if (!((h >= '0' && h <= '9') || (h >= 'a' && h <= 'f') || (h >= 'A' && h <= 'F'))) return false;
+                }
+                out.push_back('?');
+            } else if (std::string_view("\"\\/bfnrt").find(esc) != std::string_view::npos) {
+                out.push_back('?');
+            } else {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    bool Number() {
+        const size_t start = i_;
+        if (i_ < s_.size() && s_[i_] == '-') ++i_;
+        auto digits = [&] {
+            const size_t from = i_;
+            while (i_ < s_.size() && s_[i_] >= '0' && s_[i_] <= '9') ++i_;
+            return i_ > from;
+        };
+        if (!digits()) return false;
+        if (i_ < s_.size() && s_[i_] == '.') {
+            ++i_;
+            if (!digits()) return false;
+        }
+        if (i_ < s_.size() && (s_[i_] == 'e' || s_[i_] == 'E')) {
+            ++i_;
+            if (i_ < s_.size() && (s_[i_] == '+' || s_[i_] == '-')) ++i_;
+            if (!digits()) return false;
+        }
+        return i_ > start;
+    }
+
+    bool Value(int depth, Mode mode) {
+        if (depth > 32 || i_ >= s_.size()) return false;
+        const char ch = s_[i_];
+        if (ch == '{') return Object(depth, mode);
+        if (ch == '[') return Array(depth, mode);
+        if (ch == '"') {
+            std::string ignored;
+            bool plain = false;
+            return String(ignored, plain);
+        }
+        if (ch == 't') return Literal("true");
+        if (ch == 'f') return Literal("false");
+        if (ch == 'n') return Literal("null");
+        return Number();
+    }
+
+    bool Array(int depth, Mode mode) {
+        ++i_; // [
+        SkipWs();
+        if (i_ < s_.size() && s_[i_] == ']') {
+            ++i_;
+            return true;
+        }
+        while (true) {
+            SkipWs();
+            if (!Value(depth + 1, mode == Mode::Assets ? Mode::Asset : Mode::Other)) return false;
+            SkipWs();
+            if (i_ >= s_.size()) return false;
+            if (s_[i_] == ',') {
+                ++i_;
+                continue;
+            }
+            if (s_[i_] == ']') {
+                ++i_;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    bool Object(int depth, Mode mode) {
+        ++i_; // {
+        SkipWs();
+        if (i_ < s_.size() && s_[i_] == '}') {
+            ++i_;
+            return true;
+        }
+        // An asset counts only when this one element has both the exact name and
+        // the matching digest (keys may come in either order, each at most once).
+        int nameKeys = 0, digestKeys = 0;
+        bool nameExact = false, digestMatches = false;
+        auto finishAsset = [&] {
+            if (mode == Mode::Asset && nameKeys == 1 && digestKeys == 1 && nameExact && digestMatches) found_ = true;
+        };
+        while (true) {
+            SkipWs();
+            std::string key;
+            bool keyPlain = false;
+            if (!String(key, keyPlain)) return false;
+            SkipWs();
+            if (i_ >= s_.size() || s_[i_] != ':') return false;
+            ++i_;
+            SkipWs();
+            const bool plainKey = keyPlain;
+            const bool stringValue = i_ < s_.size() && s_[i_] == '"';
+            if (mode == Mode::Asset && plainKey && (key == "digest" || key == "name")) {
+                std::string value;
+                bool valuePlain = false;
+                if (stringValue) {
+                    if (!String(value, valuePlain)) return false;
+                } else if (!Value(depth + 1, Mode::Other)) {
+                    return false;
+                }
+                if (key == "name") {
+                    ++nameKeys;
+                    nameExact = stringValue && valuePlain && value == "LeanLauncher.exe";
+                } else {
+                    ++digestKeys;
+                    static constexpr std::string_view kPrefix = "sha256:";
+                    digestMatches = stringValue && valuePlain && value.size() == kPrefix.size() + 64 &&
+                        _strnicmp(value.c_str(), kPrefix.data(), kPrefix.size()) == 0 &&
+                        Sha256HexMatches(std::string_view(value).substr(kPrefix.size()), wanted_);
+                }
+            } else {
+                Mode child = Mode::Other;
+                if (mode == Mode::Root && plainKey && key == "assets") child = Mode::Assets;
+                if (!Value(depth + 1, child)) return false;
+            }
+            SkipWs();
+            if (i_ >= s_.size()) return false;
+            if (s_[i_] == ',') {
+                ++i_;
+                continue;
+            }
+            if (s_[i_] == '}') {
+                ++i_;
+                finishAsset();
+                return true;
+            }
+            return false;
+        }
+    }
+
+    std::string_view s_;
+    std::string_view wanted_;
+    size_t i_ = 0;
+    bool found_ = false;
+};
+
+} // namespace detail
+
+inline bool ReleaseJsonHasAssetDigest(std::string_view json, std::string_view sha256Hex) {
+    return detail::ReleaseDigestScanner(json, sha256Hex).Run();
 }
 
-inline bool ApplyUpdateAndRestart(const std::wstring& updateExePath) {
+inline bool DeadlineExceeded(uint64_t startMs, uint64_t nowMs, uint64_t limitMs) {
+    return nowMs < startMs || nowMs - startMs >= limitMs;
+}
+
+// Fetches the LATEST release JSON from the compile-time endpoint only (NFR-009:
+// nothing from the registry, the command line, or the launcher's settings picks
+// the host, path, or release). Bounded: 10 s per network step, 60 s in total,
+// 1 MB body, no redirects.
+inline bool FetchLatestReleaseJson(std::string& outJson) {
+    outJson.clear();
+    constexpr uint64_t kTotalLimitMs = 60000;
+    const uint64_t startMs = GetTickCount64();
+    const auto late = [&] { return DeadlineExceeded(startMs, GetTickCount64(), kTotalLimitMs); };
+    HINTERNET session = WinHttpOpen(L"LeanLauncher/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) return false;
+    WinHttpSetTimeouts(session, 10000, 10000, 10000, 10000);
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+    WinHttpSetOption(session, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
+
+    bool success = false;
+    HINTERNET connect = WinHttpConnect(session, kDefaultApiHost, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET request = connect ? WinHttpOpenRequest(connect, L"GET", kDefaultApiPath, nullptr, WINHTTP_NO_REFERER,
+                                                     WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
+                                : nullptr;
+    if (request) {
+        const wchar_t headers[] = L"Accept: application/vnd.github.v3+json\r\n";
+        DWORD statusCode = 0;
+        DWORD statusSize = sizeof(statusCode);
+        if (!late() && WinHttpSendRequest(request, headers, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+            !late() && WinHttpReceiveResponse(request, nullptr) && !late() &&
+            WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX) &&
+            statusCode == 200) {
+            constexpr size_t kMaxBody = 1024 * 1024;
+            bool complete = true;
+            DWORD available = 0;
+            while (true) {
+                if (late() || !WinHttpQueryDataAvailable(request, &available)) {
+                    complete = false;
+                    break;
+                }
+                if (available == 0) break;
+                if (outJson.size() + available > kMaxBody) {
+                    complete = false;
+                    break;
+                }
+                std::vector<char> buffer(available);
+                DWORD got = 0;
+                if (late() || !WinHttpReadData(request, buffer.data(), available, &got) || got == 0) {
+                    complete = false;
+                    break;
+                }
+                outJson.append(buffer.data(), got);
+            }
+            success = complete && !late() && !outJson.empty();
+        }
+    }
+    if (request) WinHttpCloseHandle(request);
+    if (connect) WinHttpCloseHandle(connect);
+    WinHttpCloseHandle(session);
+    if (!success) outJson.clear();
+    return success;
+}
+
+// Outcome of "Restart to Update". Started: the update was swapped in place, or
+// the elevated helper was launched (either way the launcher should exit).
+enum class ApplyResult { Started, UacDeclined, NeedsFreshCheck, Failed };
+
+enum class RestartReaction { ExitLauncher, StayWithMessage, StayMessageAndOpenReleases };
+
+inline RestartReaction RestartReactionFor(ApplyResult result) {
+    switch (result) {
+    case ApplyResult::Started: return RestartReaction::ExitLauncher;
+    case ApplyResult::UacDeclined:
+    case ApplyResult::NeedsFreshCheck: return RestartReaction::StayWithMessage;
+    case ApplyResult::Failed: break;
+    }
+    return RestartReaction::StayMessageAndOpenReleases;
+}
+
+inline const wchar_t* RestartMessageFor(ApplyResult result) {
+    switch (result) {
+    case ApplyResult::Started: return L"";
+    case ApplyResult::UacDeclined:
+        return L"The update needs administrator permission. Restart to Update again and choose Yes, "
+               L"or download it from the releases page.";
+    case ApplyResult::NeedsFreshCheck:
+        return L"This update file has not been verified in this session. Use Check for updates in "
+               L"Settings > About to download it again, then Restart to Update.";
+    case ApplyResult::Failed: break;
+    }
+    return L"The update could not be installed. The releases page will open so you can download it.";
+}
+
+// `expectedSha256` is the hash of the bytes received when the update was
+// downloaded. It is only needed for the elevated fallback; when it is not
+// known the fallback is refused rather than trusting whatever file is on disk.
+// `owner` is the launcher window, so the UAC prompt comes to the front.
+inline ApplyResult ApplyUpdateAndRestart(const std::wstring& updateExePath, const std::string& expectedSha256,
+                                         HWND owner) {
     if (!ValidateExecutableFile(updateExePath)) {
-        return false;
+        return ApplyResult::Failed;
     }
 
     wchar_t currentExe[MAX_PATH]{};
-    if (!GetModuleFileNameW(nullptr, currentExe, MAX_PATH)) {
-        return false;
+    const DWORD exeLength = GetModuleFileNameW(nullptr, currentExe, MAX_PATH);
+    if (exeLength == 0 || exeLength >= MAX_PATH) {
+        return ApplyResult::Failed;
     }
 
     const std::wstring currentExeStr(currentExe);
@@ -597,87 +901,60 @@ inline bool ApplyUpdateAndRestart(const std::wstring& updateExePath) {
 
     if (swapped) {
         HINSTANCE inst = ShellExecuteW(nullptr, L"open", currentExeStr.c_str(), L"--replace", nullptr, SW_SHOWNORMAL);
-        return reinterpret_cast<INT_PTR>(inst) > 32;
+        return reinterpret_cast<INT_PTR>(inst) > 32 ? ApplyResult::Started : ApplyResult::Failed;
     }
 
-    // 2. Fallback: Write a robust batch updater script in %TEMP%
-    // Waits for the current PID to exit, retries the move, launches the new executable, and cleans up.
-    wchar_t tempDir[MAX_PATH]{};
-    if (GetTempPathW(MAX_PATH, tempDir) > 0) {
-        const std::wstring batPath = std::wstring(tempDir) + L"leanlauncher_updater.bat";
-        const DWORD pid = GetCurrentProcessId();
+    // 2. The install folder is not writable (for example Program Files). Re-run
+    // this exe elevated in its apply-update mode: one UAC prompt, and the
+    // helper re-checks the file against the hash verified at download time.
+    if (!IsSha256Hex(expectedSha256)) {
+        return ApplyResult::NeedsFreshCheck;
+    }
+    const std::wstring hash(expectedSha256.begin(), expectedSha256.end());
+    const std::wstring parameters = L"--apply-update \"" + updateExePath + L"\" " + hash + L" " +
+        std::to_wstring(GetCurrentProcessId());
 
-        HANDLE batFile = CreateFileW(batPath.c_str(), GENERIC_WRITE, 0, nullptr,
-                                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (batFile != INVALID_HANDLE_VALUE) {
-            wchar_t pidStr[16]{};
-            swprintf_s(pidStr, L"%lu", pid);
+    SHELLEXECUTEINFOW sei{sizeof(sei)};
+    sei.fMask = SEE_MASK_FLAG_NO_UI;
+    sei.hwnd = owner;
+    sei.lpVerb = L"runas";
+    sei.lpFile = currentExeStr.c_str();
+    sei.lpParameters = parameters.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    if (ShellExecuteExW(&sei)) {
+        return ApplyResult::Started;
+    }
+    return GetLastError() == ERROR_CANCELLED ? ApplyResult::UacDeclined : ApplyResult::Failed;
+}
 
-            // See ShortenPathDirectory: the script must be plain narrow text, so
-            // only ASCII-safe paths are interpolated into it.
-            const std::wstring shortUpdatePath = ShortenPathDirectory(updateExePath);
-            const std::wstring shortCurrentPath = ShortenPathDirectory(currentExeStr);
+// Files the download step leaves in %LOCALAPPDATA%\LeanLauncher\updates:
+// LeanLauncher_v<tag>.exe and its .tmp. Nothing else in that folder is touched.
+inline bool IsStaleUpdateFileName(std::wstring_view name) {
+    std::wstring lower(name);
+    for (wchar_t& ch : lower) ch = static_cast<wchar_t>(towlower(ch));
+    const auto endsWith = [&](std::wstring_view suffix) {
+        return lower.size() > suffix.size() && lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) == 0;
+    };
+    return lower.rfind(L"leanlauncher_v", 0) == 0 && (endsWith(L".exe") || endsWith(L".exe.tmp"));
+}
 
-            const std::wstring batContent =
-                L"@echo off\r\n"
-                L":wait_pid\r\n"
-                L"tasklist /fi \"pid eq " + std::wstring(pidStr) + L"\" 2>nul | find \"" +
-                    pidStr + L"\" >nul\r\n"
-                L"if not errorlevel 1 (\r\n"
-                L"    ping 127.0.0.1 -n 2 >nul\r\n"
-                L"    goto wait_pid\r\n"
-                L")\r\n"
-                L":move_loop\r\n"
-                L"move /y \"" + shortUpdatePath + L"\" \"" + shortCurrentPath + L"\" >nul 2>&1\r\n"
-                L"if errorlevel 1 (\r\n"
-                L"    ping 127.0.0.1 -n 2 >nul\r\n"
-                L"    goto move_loop\r\n"
-                L")\r\n"
-                L"start \"\" \"" + shortCurrentPath + L"\" --replace\r\n"
-                L"del \"%~f0\"\r\n";
-
-            const int narrowLen = WideCharToMultiByte(CP_OEMCP, 0, batContent.c_str(),
-                static_cast<int>(batContent.size()), nullptr, 0, nullptr, nullptr);
-            if (narrowLen <= 0) {
-                CloseHandle(batFile);
-                DeleteFileW(batPath.c_str());
-                return false;
-            }
-            std::string narrowContent(static_cast<size_t>(narrowLen), '\0');
-            WideCharToMultiByte(CP_OEMCP, 0, batContent.c_str(),
-                static_cast<int>(batContent.size()), narrowContent.data(), narrowLen,
-                nullptr, nullptr);
-
-            DWORD written = 0;
-            const BOOL wrote = WriteFile(batFile, narrowContent.data(),
-                static_cast<DWORD>(narrowContent.size()), &written, nullptr);
-            CloseHandle(batFile);
-            if (!wrote || written != narrowContent.size()) {
-                DeleteFileW(batPath.c_str());
-                return false;
-            }
-
-            SHELLEXECUTEINFOW sei{sizeof(sei)};
-            sei.fMask = SEE_MASK_FLAG_NO_UI;
-            sei.lpVerb = L"open";
-            sei.lpFile = batPath.c_str();
-            sei.nShow = SW_HIDE;
-
-            if (ShellExecuteExW(&sei)) {
-                return true;
-            }
-
-            // If access denied (e.g. Program Files), request elevation via UAC
-            if (GetLastError() == ERROR_ACCESS_DENIED) {
-                sei.lpVerb = L"runas";
-                if (ShellExecuteExW(&sei)) {
-                    return true;
-                }
-            }
+// Best effort and bounded. The elevated helper leaves the consumed update file
+// alone (deleting it while elevated would follow a swapped junction), so the
+// normal-user launcher removes it here. Only plain files are deleted.
+inline void CleanupStaleUpdateFiles() {
+    wchar_t localAppData[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH) == 0 || !localAppData[0]) return;
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::path(localAppData) / L"LeanLauncher" / L"updates";
+    int inspected = 0;
+    for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end && inspected < 64;
+         it.increment(ec), ++inspected) {
+        const std::filesystem::file_status status = it->symlink_status(ec);
+        if (ec || status.type() != std::filesystem::file_type::regular) continue;
+        if (IsStaleUpdateFileName(it->path().filename().wstring())) {
+            DeleteFileW(it->path().c_str());
         }
     }
-
-    return false;
 }
 
 inline void CleanupOldUpdates() {
@@ -686,6 +963,7 @@ inline void CleanupOldUpdates() {
         const std::wstring oldExe = std::wstring(currentExe) + L".old";
         DeleteFileW(oldExe.c_str());
     }
+    CleanupStaleUpdateFiles();
 }
 
 } // namespace takeoff

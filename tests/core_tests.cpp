@@ -1,6 +1,8 @@
 #include "../src/search.h"
 #include "../src/settings.h"
 #include "../src/updates.h"
+#include "../src/sha256.h"
+#include "../src/update_apply.h"
 #include "../src/file_index.h"
 #include "../src/calculator.h"
 #include "../src/obsidian_config.h"
@@ -485,6 +487,271 @@ int main() {
     } else if (QueryLatestReleaseTag(L"api.github.com", L"/repos/microsoft/terminal/releases/latest", liveTag, liveUrl)) {
         Check(!liveTag.empty(), "live GitHub query returned a release tag");
         std::wcout << L"[LIVE TEST] Fallback query latest release: " << liveTag << L'\n';
+    }
+
+    // v1.9.1: elevated update helper
+    {
+        // SHA-256 known vectors (FIPS 180-4) and the streaming form.
+        Check(Sha256Hex("", 0) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "sha256 of the empty input");
+        Check(Sha256Hex("abc", 3) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+              "sha256 of abc");
+        const std::string twoBlock = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+        Check(Sha256Hex(twoBlock.data(), twoBlock.size()) ==
+                  "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+              "sha256 of the 448-bit vector (padding spills into a second block)");
+        const std::string millionA(1000000, 'a');
+        Check(Sha256Hex(millionA.data(), millionA.size()) ==
+                  "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+              "sha256 of one million a");
+        {
+            Sha256 streamed;
+            streamed.Update("a", 1);
+            streamed.Update("", 0);
+            streamed.Update("bc", 2);
+            Check(streamed.FinalHex() == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                  "sha256 streamed in pieces equals the one-shot hash");
+        }
+        const std::string sixtyFourZeros(64, '0');
+        const std::string upper = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD";
+        const std::string lower = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        Check(Sha256HexMatches(lower, upper), "hash compare ignores case");
+        Check(Sha256HexMatches(lower, lower), "hash compare accepts identical hashes");
+        Check(!Sha256HexMatches(lower, sixtyFourZeros), "hash compare rejects a different hash");
+        Check(!Sha256HexMatches(lower.substr(0, 63), lower.substr(0, 63)), "hash compare rejects a short hash even when equal");
+        Check(!Sha256HexMatches(lower + "0", lower + "0"), "hash compare rejects a long hash even when equal");
+        Check(!Sha256HexMatches("", ""), "hash compare rejects two empty strings");
+        Check(!Sha256HexMatches(std::string(64, 'g'), std::string(64, 'g')), "hash compare rejects non-hex characters");
+
+        // ParseApplyUpdateArgs: argv after the exe name.
+        const std::wstring goodPath = L"C:\\Users\\Sascha\\AppData\\Local\\LeanLauncher\\updates\\LeanLauncher_v1.9.1.exe";
+        const std::wstring goodHash = L"BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD";
+        auto parse = [&](const std::vector<std::wstring>& a) { return ParseApplyUpdateArgs(a); };
+        {
+            const auto ok = parse({L"--apply-update", goodPath, goodHash, L"4242"});
+            Check(ok.has_value(), "apply-update: a well-formed request parses");
+            if (ok) {
+                Check(ok->updatePath == goodPath, "apply-update: keeps the update path");
+                Check(ok->sha256 == lower, "apply-update: hash is normalised to lowercase");
+                Check(ok->pid == 4242, "apply-update: pid is parsed");
+            }
+        }
+        Check(IsApplyUpdateSwitch(L"--apply-update"), "apply-update: the switch is recognised");
+        Check(IsApplyUpdateSwitch(L"--APPLY-UPDATE"), "apply-update: the switch is case-insensitive");
+        Check(!IsApplyUpdateSwitch(L"--replace"), "apply-update: other switches are not the helper");
+        Check(!parse({}).has_value(), "apply-update: no arguments is rejected");
+        Check(!parse({L"--apply-update"}).has_value(), "apply-update: too few arguments is rejected");
+        Check(!parse({L"--apply-update", goodPath, goodHash}).has_value(), "apply-update: missing pid is rejected");
+        Check(!parse({L"--apply-update", goodPath, goodHash, L"4242", L"extra"}).has_value(),
+              "apply-update: too many arguments is rejected");
+        Check(!parse({L"--replace", goodPath, goodHash, L"4242"}).has_value(), "apply-update: the switch must come first");
+        Check(!parse({L"--apply-update", goodPath, goodHash.substr(0, 63), L"4242"}).has_value(),
+              "apply-update: a 63-character hash is rejected");
+        Check(!parse({L"--apply-update", goodPath, goodHash + L"0", L"4242"}).has_value(),
+              "apply-update: a 65-character hash is rejected");
+        Check(!parse({L"--apply-update", goodPath, std::wstring(64, L'z'), L"4242"}).has_value(),
+              "apply-update: a non-hex hash is rejected");
+        Check(!parse({L"--apply-update", goodPath, L"", L"4242"}).has_value(), "apply-update: an empty hash is rejected");
+        Check(!parse({L"--apply-update", goodPath, goodHash, L"0"}).has_value(), "apply-update: pid 0 is rejected");
+        Check(!parse({L"--apply-update", goodPath, goodHash, L"-5"}).has_value(), "apply-update: a negative pid is rejected");
+        Check(!parse({L"--apply-update", goodPath, goodHash, L"12ab"}).has_value(), "apply-update: a non-numeric pid is rejected");
+        Check(!parse({L"--apply-update", goodPath, goodHash, L""}).has_value(), "apply-update: an empty pid is rejected");
+        Check(!parse({L"--apply-update", goodPath, goodHash, L"99999999999"}).has_value(),
+              "apply-update: a pid that overflows is rejected");
+        Check(!parse({L"--apply-update", L"C:\\x\\LeanLauncher_v1.9.1.dll", goodHash, L"4242"}).has_value(),
+              "apply-update: a path that is not an exe is rejected");
+        Check(!parse({L"--apply-update", L"C:\\x\\notepad.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: a file name that does not start with LeanLauncher is rejected");
+        Check(!parse({L"--apply-update", L"C:\\x\\evilLeanLauncher.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: LeanLauncher must be the start of the file name, not just in it");
+        Check(!parse({L"--apply-update", L"C:\\x\\LeanLauncher\\payload.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: a LeanLauncher folder does not make another file name acceptable");
+        Check(!parse({L"--apply-update", L"", goodHash, L"4242"}).has_value(), "apply-update: an empty path is rejected");
+        Check(!parse({L"--apply-update", L"LeanLauncher_v1.9.1.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: a relative path is rejected");
+        Check(!parse({L"--apply-update", L"\\\\server\\share\\LeanLauncher.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: a network path is rejected");
+        Check(!parse({L"--apply-update", L"C:\\x\\..\\y\\LeanLauncher.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: a path with .. is rejected");
+        Check(parse({L"--apply-update", L"c:\\x\\leanlauncher.EXE", goodHash, L"7"}).has_value(),
+              "apply-update: name and extension checks ignore case");
+
+        // What Restart to Update does with each outcome.
+        Check(RestartReactionFor(ApplyResult::Started) == RestartReaction::ExitLauncher,
+              "restart to update: a started update closes the launcher");
+        Check(RestartReactionFor(ApplyResult::UacDeclined) == RestartReaction::StayWithMessage,
+              "restart to update: a declined prompt keeps the launcher running with a message");
+        Check(RestartReactionFor(ApplyResult::NeedsFreshCheck) == RestartReaction::StayWithMessage,
+              "restart to update: an unverified file keeps the launcher running with a message");
+        Check(RestartReactionFor(ApplyResult::Failed) == RestartReaction::StayMessageAndOpenReleases,
+              "restart to update: a failure shows a message and opens the releases page");
+        Check(std::wstring(RestartMessageFor(ApplyResult::UacDeclined)).find(L"administrator permission") != std::wstring::npos,
+              "restart to update: the declined message asks for administrator permission");
+        Check(std::wstring(RestartMessageFor(ApplyResult::NeedsFreshCheck)).find(L"Check for updates") != std::wstring::npos,
+              "restart to update: the unverified message points at Check for updates");
+        Check(RestartMessageFor(ApplyResult::Started)[0] == L'\0', "restart to update: no message when the update started");
+        for (ApplyResult r : {ApplyResult::UacDeclined, ApplyResult::NeedsFreshCheck, ApplyResult::Failed}) {
+            const std::wstring m = RestartMessageFor(r);
+            Check(m.find(L'\u2014') == std::wstring::npos && m.find(L"--") == std::wstring::npos,
+                  "restart to update: messages contain no em dash or double hyphen");
+        }
+
+        // Round 1: alternate data streams and other path tricks.
+        Check(!parse({L"--apply-update", L"C:\\x\\LeanLauncher.exe:evil.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: an alternate data stream on the exe is rejected");
+        Check(!parse({L"--apply-update", L"C:\\x\\a.txt:LeanLauncher.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: a stream name that looks like the exe is rejected");
+        Check(!parse({L"--apply-update", L"C:\\x:y\\LeanLauncher.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: a colon in a folder name is rejected");
+        Check(!parse({L"--apply-update", L"\\\\?\\C:\\x\\LeanLauncher.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: the extended-length prefix is rejected");
+        Check(!parse({L"--apply-update", L"\\\\.\\C:\\x\\LeanLauncher.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: the device prefix is rejected");
+        Check(!parse({L"--apply-update", L"C:\\x\\..\\LeanLauncher.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: a parent folder component is rejected");
+        Check(!parse({L"--apply-update", L"C:LeanLauncher.exe", goodHash, L"4242"}).has_value(),
+              "apply-update: a drive-relative path is rejected");
+        Check(!parse({L"--apply-update", L"C:\\x\\NUL", goodHash, L"4242"}).has_value(),
+              "apply-update: a device name is rejected");
+
+        // GitHub digest confirmation (pure part).
+        const std::string exeDigest = "d5207374283de1a171e9b123fb39b597d6d3ede6895bc4d09c586adc967b1a63";
+        const std::string releaseJson =
+            "{\"url\":\"https://api.github.com/repos/sdkasper/lean-launcher/releases/1\",\"tag_name\":\"v1.9.1\","
+            "\"author\":{\"login\":\"x\",\"digest\":\"sha256:" + std::string(64, '1') + "\"},"
+            "\"assets\":[{\"name\":\"LeanLauncher.exe.minisig\",\"size\":100,\"digest\":\"sha256:" + std::string(64, '2') + "\"},"
+            "{\"name\":\"LeanLauncher.exe\",\"uploader\":{\"login\":\"y\"},\"size\":460800,"
+            "\"digest\":\"sha256:" + exeDigest + "\",\"download_count\":3},"
+            "{\"name\":\"notes.txt\",\"size\":5}],\"body\":\"digest sha256:" + std::string(64, '3') + "\"}";
+        Check(ReleaseJsonHasAssetDigest(releaseJson, exeDigest), "release digest: a matching asset digest is found");
+        std::string exeDigestUpper = exeDigest;
+        for (char& ch : exeDigestUpper) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        Check(ReleaseJsonHasAssetDigest(releaseJson, exeDigestUpper), "release digest: an upper-case hash matches");
+        {
+            std::string upperJson = releaseJson;
+            const size_t at = upperJson.find(exeDigest);
+            for (size_t i = 0; i < exeDigest.size(); ++i) {
+                upperJson[at + i] = static_cast<char>(std::toupper(static_cast<unsigned char>(upperJson[at + i])));
+            }
+            Check(ReleaseJsonHasAssetDigest(upperJson, exeDigest), "release digest: an upper-case published digest matches");
+        }
+        Check(!ReleaseJsonHasAssetDigest(releaseJson, std::string(64, '2')),
+              "release digest: an asset not named LeanLauncher.exe never matches");
+        {
+            const std::string d = "\"digest\":\"sha256:" + exeDigest + "\"";
+            auto one = [&](const std::string& body) { return "{\"assets\":[" + body + "]}"; };
+            Check(ReleaseJsonHasAssetDigest(one("{\"name\":\"LeanLauncher.exe\"," + d + "}"), exeDigest),
+                  "release asset name: name then digest is accepted");
+            Check(ReleaseJsonHasAssetDigest(one("{" + d + ",\"name\":\"LeanLauncher.exe\"}"), exeDigest),
+                  "release asset name: digest then name is accepted");
+            Check(!ReleaseJsonHasAssetDigest(one("{\"name\":\"LeanLauncher-v1.9.0-windows-x64.zip\"," + d + "}"), exeDigest),
+                  "release asset name: the zip asset is rejected");
+            Check(!ReleaseJsonHasAssetDigest(one("{\"name\":\"LeanLauncher-v1.9.0.exe\"," + d + "}"), exeDigest),
+                  "release asset name: the versioned exe asset is rejected");
+            Check(!ReleaseJsonHasAssetDigest(one("{\"name\":\"Setup.exe\"," + d + "}"), exeDigest),
+                  "release asset name: another exe is rejected");
+            Check(!ReleaseJsonHasAssetDigest(one("{\"name\":\"leanlauncher.exe\"," + d + "}"), exeDigest),
+                  "release asset name: the compare is case-sensitive");
+            Check(!ReleaseJsonHasAssetDigest(one("{" + d + "}"), exeDigest),
+                  "release asset name: a digest with no name is rejected");
+            Check(!ReleaseJsonHasAssetDigest(one("{\"name\":\"LeanLauncher.exe\"},{" + d + ",\"name\":\"Setup.exe\"}"), exeDigest),
+                  "release asset name: name and digest in different assets are rejected");
+            Check(!ReleaseJsonHasAssetDigest(one("{\"name\":\"LeanLauncher.exe\",\"name\":\"Setup.exe\"," + d + "}"), exeDigest),
+                  "release asset name: a repeated name key is rejected");
+            Check(!ReleaseJsonHasAssetDigest(one("{\"name\":\"Lean\\u004cauncher.exe\"," + d + "}"), exeDigest),
+                  "release asset name: an escaped name is rejected");
+            Check(!ReleaseJsonHasAssetDigest(one("{\"name\":123," + d + "}"), exeDigest),
+                  "release asset name: a non-string name is rejected");
+            Check(ReleaseJsonHasAssetDigest(one("{\"name\":\"Setup.exe\"," + d + "},{\"name\":\"LeanLauncher.exe\"," + d + "}"), exeDigest),
+                  "release asset name: a later asset with the exact name still matches");
+        }
+        Check(!DeadlineExceeded(1000, 1000, 60000), "deadline: not exceeded at the start");
+        Check(!DeadlineExceeded(1000, 60999, 60000), "deadline: not exceeded just before the limit");
+        Check(DeadlineExceeded(1000, 61000, 60000), "deadline: exceeded at the limit");
+        Check(DeadlineExceeded(1000, 500, 60000), "deadline: a clock that went backwards counts as exceeded");
+        Check(!ReleaseJsonHasAssetDigest(releaseJson, std::string(64, '9')), "release digest: no matching asset fails");
+        Check(!ReleaseJsonHasAssetDigest(releaseJson, std::string(64, '1')),
+              "release digest: a digest outside an asset object does not count");
+        Check(!ReleaseJsonHasAssetDigest(releaseJson, std::string(64, '3')),
+              "release digest: a hash inside another string does not count");
+        Check(!ReleaseJsonHasAssetDigest(releaseJson, exeDigest.substr(0, 63)), "release digest: a short hash never matches");
+        Check(!ReleaseJsonHasAssetDigest(releaseJson, ""), "release digest: an empty hash never matches");
+        Check(!ReleaseJsonHasAssetDigest("{\"assets\":[{\"name\":\"LeanLauncher.exe\"}]}", exeDigest),
+              "release digest: an asset without a digest fails");
+        Check(!ReleaseJsonHasAssetDigest("{\"assets\":[{\"name\":\"a\",\"digest\":null}]}", exeDigest),
+              "release digest: a null digest fails");
+        Check(!ReleaseJsonHasAssetDigest("{\"assets\":[{\"digest\":\"sha512:" + exeDigest + "\"}]}", exeDigest),
+              "release digest: another algorithm prefix fails");
+        Check(!ReleaseJsonHasAssetDigest("{\"assets\":[{\"digest\":\"" + exeDigest + "\"}]}", exeDigest),
+              "release digest: a digest without the sha256 prefix fails");
+        Check(!ReleaseJsonHasAssetDigest("{\"assets\":[{\"name\":\"sha256:" + exeDigest + "\"}]}", exeDigest),
+              "release digest: a hash in an asset name does not count");
+        Check(!ReleaseJsonHasAssetDigest("{\"assets\":[{\"name\":\"x\\\",\\\"digest\\\":\\\"sha256:" + exeDigest + "\"}]}", exeDigest),
+              "release digest: escaped quotes in a name cannot forge a digest field");
+        Check(!ReleaseJsonHasAssetDigest("{\"assets\":[{\"dig\\u0065st\":\"sha256:" + exeDigest + "\"}]}", exeDigest),
+              "release digest: an escaped key is not treated as the digest key");
+        Check(!ReleaseJsonHasAssetDigest(releaseJson.substr(0, releaseJson.size() / 2), exeDigest),
+              "release digest: truncated JSON fails");
+        Check(!ReleaseJsonHasAssetDigest(releaseJson + "x", exeDigest), "release digest: trailing garbage fails");
+        Check(!ReleaseJsonHasAssetDigest("", exeDigest), "release digest: empty input fails");
+        Check(!ReleaseJsonHasAssetDigest("not json", exeDigest), "release digest: invalid input fails");
+        Check(!ReleaseJsonHasAssetDigest("[{\"digest\":\"sha256:" + exeDigest + "\"}]", exeDigest),
+              "release digest: a top-level array is not a release");
+        Check(!ReleaseJsonHasAssetDigest("{\"assets\":{\"digest\":\"sha256:" + exeDigest + "\"}}", exeDigest),
+              "release digest: assets must be an array");
+        Check(!ReleaseJsonHasAssetDigest(std::string(200, '[') + std::string(200, ']'), exeDigest),
+              "release digest: absurd nesting fails");
+
+        Check(IsStaleUpdateFileName(L"LeanLauncher_v1.9.1.exe"), "cleanup: a staged update exe is stale");
+        Check(IsStaleUpdateFileName(L"leanlauncher_v1.9.1.EXE.tmp"), "cleanup: a partial download is stale");
+        Check(!IsStaleUpdateFileName(L"notes.txt"), "cleanup: other files are left alone");
+        Check(!IsStaleUpdateFileName(L"LeanLauncher_v1.9.1.exe.bak"), "cleanup: only the known suffixes are removed");
+        Check(!IsStaleUpdateFileName(L"other_LeanLauncher_v1.exe"), "cleanup: the name must start with the update prefix");
+
+        // ValidateExecutableBuffer.
+        {
+            std::vector<uint8_t> pe(70000, 0);
+            IMAGE_DOS_HEADER dos{};
+            dos.e_magic = IMAGE_DOS_SIGNATURE;
+            dos.e_lfanew = 0x80;
+            std::memcpy(pe.data(), &dos, sizeof(dos));
+            const DWORD nt = IMAGE_NT_SIGNATURE;
+            std::memcpy(pe.data() + 0x80, &nt, sizeof(nt));
+            IMAGE_FILE_HEADER fh{};
+            fh.Machine = IMAGE_FILE_MACHINE_AMD64;
+            std::memcpy(pe.data() + 0x84, &fh, sizeof(fh));
+            Check(ValidateExecutableBuffer(pe.data(), pe.size()), "pe buffer: a valid x64 header is accepted");
+            fh.Machine = IMAGE_FILE_MACHINE_I386;
+            std::memcpy(pe.data() + 0x84, &fh, sizeof(fh));
+            Check(ValidateExecutableBuffer(pe.data(), pe.size()), "pe buffer: a valid x86 header is accepted");
+            fh.Machine = IMAGE_FILE_MACHINE_ARM64;
+            std::memcpy(pe.data() + 0x84, &fh, sizeof(fh));
+            Check(!ValidateExecutableBuffer(pe.data(), pe.size()), "pe buffer: another machine type is rejected");
+            fh.Machine = IMAGE_FILE_MACHINE_AMD64;
+            std::memcpy(pe.data() + 0x84, &fh, sizeof(fh));
+            Check(!ValidateExecutableBuffer(pe.data(), 1000), "pe buffer: a buffer under 64 KB is rejected");
+            Check(!ValidateExecutableBuffer(nullptr, 70000), "pe buffer: a null buffer is rejected");
+            auto broken = pe;
+            broken[0] = 'X';
+            Check(!ValidateExecutableBuffer(broken.data(), broken.size()), "pe buffer: a bad DOS signature is rejected");
+            broken = pe;
+            dos.e_lfanew = 0;
+            std::memcpy(broken.data(), &dos, sizeof(dos));
+            Check(!ValidateExecutableBuffer(broken.data(), broken.size()), "pe buffer: e_lfanew of zero is rejected");
+            dos.e_lfanew = -16;
+            std::memcpy(broken.data(), &dos, sizeof(dos));
+            Check(!ValidateExecutableBuffer(broken.data(), broken.size()), "pe buffer: a negative e_lfanew is rejected");
+            dos.e_lfanew = static_cast<LONG>(pe.size() - 4);
+            std::memcpy(broken.data(), &dos, sizeof(dos));
+            Check(!ValidateExecutableBuffer(broken.data(), broken.size()),
+                  "pe buffer: headers that run past the end are rejected");
+            dos.e_lfanew = 0x7fffffff;
+            std::memcpy(broken.data(), &dos, sizeof(dos));
+            Check(!ValidateExecutableBuffer(broken.data(), broken.size()), "pe buffer: e_lfanew far past the end is rejected");
+            broken = pe;
+            broken[0x80] = 'X';
+            Check(!ValidateExecutableBuffer(broken.data(), broken.size()), "pe buffer: a bad NT signature is rejected");
+        }
     }
 
     // App recents preservation across index reload verification

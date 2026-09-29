@@ -49,7 +49,7 @@
 - **Keyboard-First** - Launch, elevate to admin (`Ctrl+Enter`), and trigger quick-launch slots (`Alt+1`-`8`) without touching your mouse.
 - **Privacy First** - Zero telemetry, zero analytics, and zero background services. Search history is never written to disk.
 - **Pinned results** - pin up to 5 apps, files, or folders from the actions menu (`Ctrl+K` → Pin). Pins stay at the top of the empty search box and jump to the top whenever they match what you type.
-- **About tab** - version, author, a link to the GitHub repo, and how many files and vault notes are currently indexed, right from Settings. **Export settings... / Import settings...** move your setup to another PC; an import shows what will change before applying and keeps a backup of your old settings. A **Check for updates** row checks GitHub on demand (even with automatic checks off); when a newer release has downloaded, a second click installs it and restarts.
+- **About tab** - version, author, a link to the GitHub repo, and how many files and vault notes are currently indexed, right from Settings. **Export settings... / Import settings...** move your setup to another PC; an import shows what will change before applying and keeps a backup of your old settings. A **Check for updates** row checks GitHub on demand (even with automatic checks off); when a newer release has downloaded, a second click installs it and restarts. If Lean Launcher is installed in a protected folder such as Program Files, Windows asks for administrator permission once, and the update is checked against the checksum published on GitHub before it is installed. Versions up to 1.9.0 cannot do this, so download 1.9.1 manually once in that case.
 
 ### File Search
 

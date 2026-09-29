@@ -45,6 +45,7 @@
 #include "timezones.h"
 #include "pomodoro.h"
 #include "preview.h"
+#include "update_apply.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -837,6 +838,22 @@ bool ShouldReplaceRunningInstance() {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
+    // Elevated update helper: handled before anything else, so it never creates a
+    // launcher window or touches the single-instance mutex.
+    {
+        int argc = 0;
+        if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
+            std::vector<std::wstring> args;
+            bool applyUpdate = false;
+            for (int i = 1; i < argc; ++i) {
+                args.emplace_back(argv[i]);
+                if (takeoff::IsApplyUpdateSwitch(argv[i])) applyUpdate = true;
+            }
+            LocalFree(argv);
+            if (applyUpdate) return takeoff::RunApplyUpdateMode(args);
+        }
+    }
+
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const bool startMinimized = ShouldStartMinimized(nCmdShow);
     const bool replaceInstance = ShouldReplaceRunningInstance();
