@@ -72,6 +72,7 @@ public:
                 leanlauncher::obsidian::NoteIndex::Instance().Start(obsidianVaultPath_, hwnd_);
             }
         }
+        ApplySnippetsState();
         SetTimer(hwnd_, kHotkeyTimer, 2000, nullptr);
         RestorePomodoro();
         // Not forced: let the 24h throttle in CheckForUpdatesAsync decide
@@ -556,6 +557,7 @@ private:
             ResizeAndPosition();
             return 0;
         case WM_DESTROY: {
+            expander_.Stop();
             if (shellNotifyId_) {
                 SHChangeNotifyDeregister(shellNotifyId_);
                 shellNotifyId_ = 0;
@@ -703,6 +705,7 @@ private:
                 settings_.enableUnitConverter = ReadDword(key, L"UnitConverterEnabled", 1) != 0;
                 settings_.enableTimeZones = ReadDword(key, L"TimeZonesEnabled", 1) != 0;
                 settings_.enablePomodoro = ReadDword(key, L"PomodoroEnabled", 1) != 0;
+                settings_.enableSnippets = ReadDword(key, L"SnippetsEnabled", 0) != 0;
                 settings_.pomodoroLog = ReadDword(key, L"PomodoroLog", 1) != 0;
                 // US-045: preview panel. No old-format migration needed - this
                 // setting didn't exist before SettingsVersion 2, so it's read
@@ -762,6 +765,8 @@ private:
                 readStringSetting(L"PomodoroPrefix", settings_.pomodoroPrefix);
                 readStringSetting(L"PomodoroFocusMinutes", settings_.pomodoroFocusMinutes);
                 readStringSetting(L"PomodoroBreakMinutes", settings_.pomodoroBreakMinutes);
+                readStringSetting(L"SnippetsPrefix", settings_.snippetsPrefix);
+                readStringSetting(L"SnippetsPath", settings_.snippetsPath);
                 readStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
                 readStringSetting(L"VaultSearchPillLabel", settings_.vaultSearchPillLabel);
                 readStringSetting(L"TaskPrefix", settings_.taskPrefix);
@@ -1032,6 +1037,7 @@ private:
                 {L"UnitConverterEnabled", settings_.enableUnitConverter ? 1u : 0u},
                 {L"TimeZonesEnabled", settings_.enableTimeZones ? 1u : 0u},
                 {L"PomodoroEnabled", settings_.enablePomodoro ? 1u : 0u},
+                {L"SnippetsEnabled", settings_.enableSnippets ? 1u : 0u},
                 {L"PomodoroLog", settings_.pomodoroLog ? 1u : 0u},
                 {L"PreviewEnabled", settings_.enablePreview ? 1u : 0u},
                 {L"PreviewOpen", settings_.previewOpen ? 1u : 0u},
@@ -1067,6 +1073,8 @@ private:
             writeStringSetting(L"PomodoroPrefix", settings_.pomodoroPrefix);
             writeStringSetting(L"PomodoroFocusMinutes", settings_.pomodoroFocusMinutes);
             writeStringSetting(L"PomodoroBreakMinutes", settings_.pomodoroBreakMinutes);
+            writeStringSetting(L"SnippetsPrefix", settings_.snippetsPrefix);
+            writeStringSetting(L"SnippetsPath", settings_.snippetsPath);
             writeStringSetting(L"VaultPath", obsidianVaultPath_);
             writeStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
             writeStringSetting(L"VaultSearchPillLabel", settings_.vaultSearchPillLabel);
@@ -1532,6 +1540,22 @@ private:
         mouseKnown_ = false;
         hoverLockRow_ = -1;
         webSearchCardHovered_ = false;
+        if (!IsWindowVisible(hwnd_)) {
+            // Fresh open: whatever has focus now is the target (none if it is
+            // the launcher, the taskbar or the desktop). Already open: keep it.
+            HWND foreground = GetForegroundWindow();
+            if (foreground) {
+                wchar_t cls[64]{};
+                GetClassNameW(foreground, cls, static_cast<int>(std::size(cls)));
+                if (foreground == hwnd_ || foreground == GetShellWindow() || foreground == GetDesktopWindow() ||
+                    wcscmp(cls, L"Shell_TrayWnd") == 0 || wcscmp(cls, L"Shell_SecondaryTrayWnd") == 0 ||
+                    wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0) {
+                    foreground = nullptr;
+                }
+            }
+            snippetTarget_ = foreground;
+        }
+        ReloadSnippetsIfChanged();
         UpdateResults();
         ResizeAndPosition();
         ShowWindow(hwnd_, SW_SHOWNORMAL);
@@ -1547,9 +1571,10 @@ private:
         }
     }
 
-    enum class SettingsCategory : uint8_t { All, Shortcuts, System, Search, Obsidian, About };
+    enum class SettingsCategory : uint8_t { General, Search, Tools, Snippets, Obsidian, About };
 
-    // Settings rows 0-3: keyboard shortcuts. 4-6: system. 7-14: search (7
+    // Settings rows 0-3: keyboard shortcuts. 4-6: system (4-5 General; 6, the
+    // startup update check, lives in About's UPDATES card). 7-14: search (7
     // File search, 8 Web search, 9 Search engine picker - US-016; 10-12 add
     // the File/Web/App search prefix fields - US-017; 13-14 add Edit
     // exclusions.../Help - US-019). 15-39: Obsidian (only row 15 is active
@@ -1561,8 +1586,8 @@ private:
     // target notes - US-025; quick-open target - US-026), numbered after 39
     // so no existing row ID shifts - like every Obsidian row, their screen
     // position comes from ObsidianVisibleRows(), not the number. 44-45 are the
-    // About tab's rows, check for updates then GitHub, in screen order (not
-    // part of "All" - see IsRowInCategory). 46 is the Reset button, handled as a sentinel row rather than a real
+    // About tab's rows, check now then GitHub, in screen order (they
+    // sit in no card list - see IsRowInCategory). 46 is the Reset button, handled as a sentinel row rather than a real
     // settings row.
     // Rows 9-14 are not part of the Obsidian block below - they live in the
     // Search category alongside rows 7-8 - so every Obsidian row constant
@@ -1607,12 +1632,12 @@ private:
     static constexpr int kRowAboutGithubLink = 45;
     static constexpr int kRowResetToDefaults = 46;
     // 47+: feature toggles (NFR-018), numbered after the Reset sentinel so no
-    // existing row ID shifts; their position comes from kSearchRows.
+    // existing row ID shifts; their position comes from the tab card lists below.
     static constexpr int kRowSystemCommandsEnabled = 47;
     static constexpr int kRowSystemCommandsPrefix = 48;
     static constexpr int kRowTypedUrlsEnabled = 49;
     static constexpr int kRowPathCompletionEnabled = 50;
-    static constexpr int kRowAboutExportSettings = 51;  // US-044, About tab BACKUP card
+    static constexpr int kRowAboutExportSettings = 51;  // US-044, General tab BACKUP card
     static constexpr int kRowAboutImportSettings = 52;
     static constexpr int kRowUnitConverterEnabled = 53;
     static constexpr int kRowTimeZonesEnabled = 54;
@@ -1623,22 +1648,80 @@ private:
     static constexpr int kRowPomodoroLog = 59;
     static constexpr int kRowPreviewHotkey = 60;   // US-045
     static constexpr int kRowPreviewEnabled = 61;
-    static constexpr int kSettingsMaxRow = 61;
-    // SEARCH & FEATURES card rows in screen order. A row's position comes from
-    // its rank here, not its number, so feature toggles (NFR-018) are added by
+    static constexpr int kRowSnippetsEnabled = 62;  // US-050
+    static constexpr int kRowSnippetsPrefix = 63;
+    static constexpr int kRowSnippetsFile = 64;
+    static constexpr int kRowSnippetsOpen = 65;
+    static constexpr int kRowSnippetsImport = 66;
+    static constexpr int kSettingsMaxRow = 66;
+    static constexpr int kRowCheckForUpdatesOnStart = 6;  // shown in About's UPDATES card
+
+    // Every tab except Obsidian (an accordion) and About (fixed layout) is an
+    // ordered list of cards. A row's position comes from its place in these
+    // lists, not its number, so a feature toggle (NFR-018) is added by
     // appending one entry - see settings_layout.h for the geometry.
-    static constexpr int kSearchRows[] = {
-        7, 8, kRowWebSearchEngine, kRowFileSearchPrefix, kRowWebSearchPrefix,
-        kRowAppSearchPrefix, kRowFileSearchEditExclusions, kRowFileSearchHelp,
-        kRowSystemCommandsEnabled, kRowSystemCommandsPrefix, kRowTypedUrlsEnabled, kRowPathCompletionEnabled,
-        kRowUnitConverterEnabled, kRowTimeZonesEnabled,
-        kRowPomodoroEnabled, kRowPomodoroPrefix, kRowPomodoroFocusMinutes, kRowPomodoroBreakMinutes, kRowPomodoroLog,
-        kRowPreviewEnabled, kRowPreviewHotkey,
+    struct SettingsCard {
+        const wchar_t* header;
+        const int* rows;
+        int count;
     };
-    static constexpr int kSearchRowCount = static_cast<int>(std::size(kSearchRows));
-    static constexpr int SearchRowRank(int row) {
-        return leanlauncher::settings_layout::RowRank(kSearchRows, row);
+    struct SettingsCardList {
+        const SettingsCard* cards;
+        std::size_t count;
+    };
+    static constexpr int kShortcutRows[] = {0, 1, 2, 3};
+    static constexpr int kStartupRows[] = {4, 5};
+    static constexpr int kBackupRows[] = {kRowAboutExportSettings, kRowAboutImportSettings};
+    static constexpr int kSearchSourceRows[] = {7, 8, kRowWebSearchEngine};
+    static constexpr int kSearchPrefixRows[] = {kRowFileSearchPrefix, kRowWebSearchPrefix, kRowAppSearchPrefix};
+    static constexpr int kSearchExclusionRows[] = {kRowFileSearchEditExclusions, kRowFileSearchHelp};
+    static constexpr int kSearchResultsRows[] = {kRowPreviewEnabled, kRowPreviewHotkey};
+    static constexpr int kQuickAnswerRows[] = {
+        kRowUnitConverterEnabled, kRowTimeZonesEnabled, kRowTypedUrlsEnabled, kRowPathCompletionEnabled};
+    static constexpr int kSystemCommandRows[] = {kRowSystemCommandsEnabled, kRowSystemCommandsPrefix};
+    static constexpr int kPomodoroRows[] = {
+        kRowPomodoroEnabled, kRowPomodoroPrefix, kRowPomodoroFocusMinutes, kRowPomodoroBreakMinutes, kRowPomodoroLog};
+    static constexpr int kSnippetRows[] = {
+        kRowSnippetsEnabled, kRowSnippetsPrefix, kRowSnippetsFile, kRowSnippetsOpen, kRowSnippetsImport};
+
+    static constexpr SettingsCard kGeneralCards[] = {
+        {L"KEYBOARD SHORTCUTS", kShortcutRows, static_cast<int>(std::size(kShortcutRows))},
+        {L"STARTUP", kStartupRows, static_cast<int>(std::size(kStartupRows))},
+        {L"BACKUP", kBackupRows, static_cast<int>(std::size(kBackupRows))},
+    };
+    static constexpr SettingsCard kSearchCards[] = {
+        {L"SOURCES", kSearchSourceRows, static_cast<int>(std::size(kSearchSourceRows))},
+        {L"PREFIXES", kSearchPrefixRows, static_cast<int>(std::size(kSearchPrefixRows))},
+        {L"FILE EXCLUSIONS", kSearchExclusionRows, static_cast<int>(std::size(kSearchExclusionRows))},
+        {L"RESULTS", kSearchResultsRows, static_cast<int>(std::size(kSearchResultsRows))},
+    };
+    static constexpr SettingsCard kToolsCards[] = {
+        {L"QUICK ANSWERS", kQuickAnswerRows, static_cast<int>(std::size(kQuickAnswerRows))},
+        {L"SYSTEM COMMANDS", kSystemCommandRows, static_cast<int>(std::size(kSystemCommandRows))},
+        {L"POMODORO", kPomodoroRows, static_cast<int>(std::size(kPomodoroRows))},
+    };
+    static constexpr SettingsCard kSnippetCards[] = {
+        {L"TEXT EXPANDER", kSnippetRows, static_cast<int>(std::size(kSnippetRows))},
+    };
+
+    // Empty for Obsidian and About, which lay themselves out.
+    static constexpr SettingsCardList CardsFor(SettingsCategory cat) {
+        switch (cat) {
+            case SettingsCategory::General: return {kGeneralCards, std::size(kGeneralCards)};
+            case SettingsCategory::Search: return {kSearchCards, std::size(kSearchCards)};
+            case SettingsCategory::Tools: return {kToolsCards, std::size(kToolsCards)};
+            case SettingsCategory::Snippets: return {kSnippetCards, std::size(kSnippetCards)};
+            default: return {nullptr, 0};
+        }
     }
+
+    // Tab strip, in screen order.
+    static constexpr SettingsCategory kSettingsCategories[] = {
+        SettingsCategory::General, SettingsCategory::Search, SettingsCategory::Tools,
+        SettingsCategory::Snippets, SettingsCategory::Obsidian, SettingsCategory::About};
+    static constexpr const wchar_t* kSettingsCategoryLabels[] = {
+        L"General", L"Search", L"Tools", L"Snippets", L"Obsidian", L"About"};
+    static constexpr float kSettingsTabWidths[] = {66.0f, 62.0f, 54.0f, 72.0f, 84.0f, 58.0f};
 
     // Which of the five Obsidian action blocks is currently expanded, or
     // -1 if all are collapsed. A single int gives accordion behavior for
@@ -1732,59 +1815,41 @@ private:
     }
 
     bool IsRowInCategory(int row, SettingsCategory cat) const {
-        if (cat == SettingsCategory::All) {
-            if (row >= 0 && row <= 6) return true;
-            return SearchRowRank(row) >= 0 || ObsidianRowRank(row) >= 0;
-        }
-        if (cat == SettingsCategory::Shortcuts) return row >= 0 && row <= 3;
-        if (cat == SettingsCategory::System) return row >= 4 && row <= 6;
-        if (cat == SettingsCategory::Search) return SearchRowRank(row) >= 0;
         if (cat == SettingsCategory::Obsidian) return ObsidianRowRank(row) >= 0;
         if (cat == SettingsCategory::About) {
-            return row == kRowAboutCheckUpdates || row == kRowAboutGithubLink ||
-                row == kRowAboutExportSettings || row == kRowAboutImportSettings;
+            return row == kRowCheckForUpdatesOnStart || row == kRowAboutCheckUpdates ||
+                row == kRowAboutGithubLink;
         }
-        return false;
+        const auto list = CardsFor(cat);
+        return leanlauncher::settings_layout::FindRow(list.cards, list.count, row).Found();
+    }
+
+    // Every row of a tab in screen order (Reset excluded).
+    std::vector<int> CategoryRowsInOrder(SettingsCategory cat) const {
+        std::vector<int> rows;
+        if (cat == SettingsCategory::Obsidian) return ObsidianVisibleRows();
+        if (cat == SettingsCategory::About) {
+            return {kRowCheckForUpdatesOnStart, kRowAboutCheckUpdates, kRowAboutGithubLink};
+        }
+        const auto list = CardsFor(cat);
+        for (std::size_t c = 0; c < list.count; ++c) {
+            rows.insert(rows.end(), list.cards[c].rows, list.cards[c].rows + list.cards[c].count);
+        }
+        return rows;
     }
 
     int FirstRowInCategory(SettingsCategory cat) const {
-        if (cat == SettingsCategory::Shortcuts) return 0;
-        if (cat == SettingsCategory::System) return 4;
-        if (cat == SettingsCategory::Search) return 7;
-        if (cat == SettingsCategory::Obsidian) return kRowObsidianEnabled;
-        if (cat == SettingsCategory::About) return kRowAboutCheckUpdates;
-        return 0;
+        const auto rows = CategoryRowsInOrder(cat);
+        return rows.empty() ? 0 : rows.front();
     }
 
     int LastRowInCategory(SettingsCategory cat) const {
-        if (cat == SettingsCategory::Shortcuts) return 3;
-        if (cat == SettingsCategory::System) return 6;
-        if (cat == SettingsCategory::Search) return kSearchRows[kSearchRowCount - 1];
-        if (cat == SettingsCategory::About) return kRowAboutImportSettings;
-        // Obsidian, and the fallback used for "All" (whose last row is
-        // whatever the Obsidian section's current last row is).
-        const auto& rows = ObsidianVisibleRows();
-        return rows.empty() ? kRowObsidianEnabled : rows.back();
+        const auto rows = CategoryRowsInOrder(cat);
+        return rows.empty() ? 0 : rows.back();
     }
 
     int NextSettingsRow(int current, int delta) const {
-        // Screen order, not row-number order: Search and Obsidian rows are
-        // positioned by rank, and later rows (e.g. 40-43, 47+) sit mid-card.
-        std::vector<int> screenOrder;
-        for (int r = 0; r <= 6; ++r) screenOrder.push_back(r);
-        screenOrder.insert(screenOrder.end(), std::begin(kSearchRows), std::end(kSearchRows));
-        const auto& obsidianRows = ObsidianVisibleRows();
-        screenOrder.insert(screenOrder.end(), obsidianRows.begin(), obsidianRows.end());
-        screenOrder.push_back(kRowAboutCheckUpdates);
-        screenOrder.push_back(kRowAboutGithubLink);
-        screenOrder.push_back(kRowAboutExportSettings);
-        screenOrder.push_back(kRowAboutImportSettings);
-        std::vector<int> activeRows;
-        for (int r : screenOrder) {
-            if (IsRowInCategory(r, settingsCategory_)) {
-                activeRows.push_back(r);
-            }
-        }
+        std::vector<int> activeRows = CategoryRowsInOrder(settingsCategory_);
         activeRows.push_back(kRowResetToDefaults);
         auto it = std::find(activeRows.begin(), activeRows.end(), current);
         if (it == activeRows.end()) {
@@ -1800,24 +1865,11 @@ private:
         constexpr float y = 11.0f;
         constexpr float h = 24.0f;
         float x = 160.0f;
-        float w = 40.0f;
-        if (cat == SettingsCategory::Shortcuts) {
-            x = 160.0f + 40.0f + 6.0f;
-            w = 82.0f;
-        } else if (cat == SettingsCategory::System) {
-            x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f;
-            w = 68.0f;
-        } else if (cat == SettingsCategory::Search) {
-            x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f;
-            w = 68.0f;
-        } else if (cat == SettingsCategory::Obsidian) {
-            x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f + 68.0f + 6.0f;
-            w = 84.0f;  // wider than the old 68px "Vault" tab to fit "Obsidian"
-        } else if (cat == SettingsCategory::About) {
-            x = 160.0f + 40.0f + 6.0f + 82.0f + 6.0f + 68.0f + 6.0f + 68.0f + 6.0f + 84.0f + 6.0f;
-            w = 58.0f;
+        for (std::size_t i = 0; i < std::size(kSettingsCategories); ++i) {
+            if (kSettingsCategories[i] == cat) return D2D1::RectF(x, y, x + kSettingsTabWidths[i], y + h);
+            x += kSettingsTabWidths[i] + 6.0f;
         }
-        return D2D1::RectF(x, y, x + w, y + h);
+        return D2D1::RectF(0, y, 0, y + h);
     }
 
     D2D1_RECT_F ResetButtonRect() const {
@@ -1825,36 +1877,27 @@ private:
     }
 
     float SettingsContentBottom() const {
-        if (settingsCategory_ == SettingsCategory::All) {
-            // Obsidian is the last card; its top follows the Search card's size.
-            return leanlauncher::settings_layout::AllContentBottom(kSearchRowCount, ObsidianRowCount());
-        } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
-            return 240.0f;
-        } else if (settingsCategory_ == SettingsCategory::System) {
-            return 193.0f;
-        } else if (settingsCategory_ == SettingsCategory::Search) {
-            return leanlauncher::settings_layout::SearchCategoryContentBottom(kSearchRowCount);
-        } else if (settingsCategory_ == SettingsCategory::Obsidian) {
+        if (settingsCategory_ == SettingsCategory::Obsidian) {
             // 36 header offset + N rows + 16 bottom padding.
             return 36.0f + ObsidianRowCount() * kSettingsRowHeight + 16.0f;
         } else if (settingsCategory_ == SettingsCategory::About) {
-            // BACKUP card (US-044) is last, below INDEX; 2 rows + 16 bottom padding.
-            return AboutBackupCardTop() + 2 * kSettingsRowHeight + 16.0f;
+            // INDEX card is last; 2 rows + 16 bottom padding.
+            return AboutIndexCardTop() + 2 * kSettingsRowHeight + 16.0f;
         }
-        return 200.0f;
+        const auto list = CardsFor(settingsCategory_);
+        return leanlauncher::settings_layout::ContentBottom(list.cards, list.count);
     }
 
     // About tab layout: version/author lines, "UPDATES" header@66 and its
-    // one-row card@86 (US-029), then "LINKS" and "INDEX", each header 18px
-    // below the previous card and its card 20px below the header - the same
-    // header/card spacing the All view uses.
+    // two-row card@86 (the startup-check toggle, then Check now - US-029), then
+    // "LINKS" and "INDEX", each header 18px below the previous card
+    // and its card 20px below the header - the same header/card spacing the
+    // card-based tabs use.
     static constexpr float AboutUpdatesCardTop() { return 86.0f; }
-    static constexpr float AboutLinksHeaderTop() { return AboutUpdatesCardTop() + kSettingsRowHeight + 18.0f; }
+    static constexpr float AboutLinksHeaderTop() { return AboutUpdatesCardTop() + 2 * kSettingsRowHeight + 18.0f; }
     static constexpr float AboutLinksCardTop() { return AboutLinksHeaderTop() + 20.0f; }
     static constexpr float AboutIndexHeaderTop() { return AboutLinksCardTop() + kSettingsRowHeight + 18.0f; }
     static constexpr float AboutIndexCardTop() { return AboutIndexHeaderTop() + 20.0f; }
-    static constexpr float AboutBackupHeaderTop() { return AboutIndexCardTop() + 2 * kSettingsRowHeight + 18.0f; }
-    static constexpr float AboutBackupCardTop() { return AboutBackupHeaderTop() + 20.0f; }
 
     // "482113" -> "482,113" for the About tab's index counts.
     static std::wstring FormatCount(size_t value) {
@@ -1878,29 +1921,15 @@ private:
     }
 
     float SettingsRowTop(int row) const {
-        if (settingsCategory_ == SettingsCategory::All) {
-            if (row < 4) return 36.0f + row * kSettingsRowHeight;
-            if (row < 7) return 262.0f + (row - 4) * kSettingsRowHeight;
-            const int searchRank = SearchRowRank(row);
-            if (searchRank >= 0) return leanlauncher::settings_layout::AllSearchRowTop(searchRank);
-            // Obsidian section, All-view only: directly below the Search card.
-            return leanlauncher::settings_layout::AllObsidianCardTop(kSearchRowCount) +
-                ObsidianRowRank(row) * kSettingsRowHeight;
-        } else if (settingsCategory_ == SettingsCategory::Shortcuts) {
-            return 36.0f + row * kSettingsRowHeight;
-        } else if (settingsCategory_ == SettingsCategory::System) {
-            return 36.0f + (row - 4) * kSettingsRowHeight;
-        } else if (settingsCategory_ == SettingsCategory::Search) {
-            return leanlauncher::settings_layout::CategoryRowTop(SearchRowRank(row));
-        } else if (settingsCategory_ == SettingsCategory::Obsidian) {
+        if (settingsCategory_ == SettingsCategory::Obsidian) {
             return 36.0f + ObsidianRowRank(row) * kSettingsRowHeight;
         } else if (settingsCategory_ == SettingsCategory::About) {
-            if (row == kRowAboutCheckUpdates) return AboutUpdatesCardTop();
-            if (row == kRowAboutExportSettings) return AboutBackupCardTop();
-            if (row == kRowAboutImportSettings) return AboutBackupCardTop() + kSettingsRowHeight;
+            if (row == kRowCheckForUpdatesOnStart) return AboutUpdatesCardTop();
+            if (row == kRowAboutCheckUpdates) return AboutUpdatesCardTop() + kSettingsRowHeight;
             return AboutLinksCardTop();
         }
-        return 0.0f;
+        const auto list = CardsFor(settingsCategory_);
+        return leanlauncher::settings_layout::RowTop(list.cards, list.count, row);
     }
 
     int SettingsRowAtPoint(float x, float y) const {
@@ -1938,14 +1967,17 @@ private:
         const float rTop = SettingsRowTop(row);
         const float rBottom = rTop + kSettingsRowHeight;
         const float maxScroll = SettingsMaxScroll();
+        // Landing on the first row of a card scrolls its header into view too.
         float sectionHeaderTop = rTop;
-        if (settingsCategory_ == SettingsCategory::All) {
-            if (row == 0) sectionHeaderTop = 16.0f;
-            else if (row == 4) sectionHeaderTop = 242.0f;
-            else if (row == 7) sectionHeaderTop = leanlauncher::settings_layout::kAllSearchHeaderTop;
-            else if (row == kRowObsidianEnabled) sectionHeaderTop = leanlauncher::settings_layout::AllObsidianHeaderTop(kSearchRowCount);
+        if (settingsCategory_ == SettingsCategory::Obsidian || settingsCategory_ == SettingsCategory::About) {
+            if (row == kRowObsidianEnabled || row == kRowCheckForUpdatesOnStart) sectionHeaderTop = 16.0f;
         } else {
-            if (row == 0 || row == 4 || row == 7 || row == kRowObsidianEnabled || row == kRowAboutCheckUpdates) sectionHeaderTop = 16.0f;
+            const auto list = CardsFor(settingsCategory_);
+            const auto slot = leanlauncher::settings_layout::FindRow(list.cards, list.count, row);
+            if (slot.Found() && slot.rank == 0) {
+                sectionHeaderTop = leanlauncher::settings_layout::CardHeaderTop(
+                    list.cards, list.count, static_cast<std::size_t>(slot.card));
+            }
         }
         const float visibleTop = sectionHeaderTop;
         const float visibleBottom = rBottom + 8.0f;
@@ -1957,12 +1989,12 @@ private:
         }
     }
 
-    void OpenSettings(SettingsCategory targetCategory = SettingsCategory::All) {
+    void OpenSettings(SettingsCategory targetCategory = SettingsCategory::General) {
         page_ = Page::Settings;
         actionsOpen_ = false;
         dragging_ = false;
         settingsCategory_ = targetCategory;
-        settingsSelected_ = (targetCategory == SettingsCategory::All) ? 0 : FirstRowInCategory(targetCategory);
+        settingsSelected_ = FirstRowInCategory(targetCategory);
         settingsScroll_ = 0.0f;
         settingsDraggingScroll_ = false;
         settingsStatus_.clear();
@@ -2030,6 +2062,7 @@ private:
                 ImmReleaseContext(hwnd_, context);
             }
         }
+        snippetTarget_ = nullptr;
         composing_ = false;
         pendingSurrogate_ = 0;
         composition_.clear();
@@ -2098,6 +2131,13 @@ private:
         if (settings_.enableSystemCommands && leanlauncher::syscmd::TryParseCommandPrefix(
                 input_.text, settings_.systemCommandsPrefix, commandFilter)) {
             ShowCommandResults(Normalize(commandFilter));
+            return;
+        }
+        // US-050: ", " lists snippets, ", sig" narrows them.
+        std::wstring snippetFilter;
+        if (settings_.enableSnippets && snippetIndex_ && !settings_.snippetsPrefix.empty() &&
+            leanlauncher::syscmd::TryParseCommandPrefix(input_.text, settings_.snippetsPrefix, snippetFilter)) {
+            ShowSnippetResults(Normalize(snippetFilter));
             return;
         }
         // US-049: "pomo ..." shows only timer rows.
@@ -2749,6 +2789,9 @@ private:
         if (!settings_.enableTimeZones) timeZones_.Clear();
         if (!settings_.enablePomodoro) EndPomodoro(leanlauncher::pomodoro::EndReason::Stopped);
         if (!settings_.enablePreview) ClosePreview(true);
+        if (settings_.enableSnippets != before.enableSnippets || settings_.snippetsPath != before.snippetsPath) {
+            ApplySnippetsState();
+        }
         UpdateResults();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -2821,6 +2864,350 @@ private:
         EnsureVisible();
         InvalidateRect(hwnd_, nullptr, FALSE);
         return true;
+    }
+
+    // ---- US-050 snippets ------------------------------------------------------
+    std::wstring SnippetsFilePath() const {
+        const std::wstring fallback = L"%APPDATA%\\LeanLauncher\\snippets.yml";
+        const auto expand = [](const std::wstring& raw) {
+            wchar_t expanded[MAX_PATH * 2]{};
+            const DWORD n = ExpandEnvironmentStringsW(raw.c_str(), expanded, static_cast<DWORD>(std::size(expanded)));
+            return (n > 0 && n <= std::size(expanded)) ? std::wstring(expanded) : raw;
+        };
+        if (!settings_.snippetsPath.empty()) {
+            std::wstring path = expand(settings_.snippetsPath);
+            // Never use an expanded path that fails the same validation as the Settings field.
+            if (!leanlauncher::snippets::SnippetsPathProblem(path)) return path;
+        }
+        return expand(fallback);
+    }
+
+    // A commented starter file, so the feature is discoverable on first enable.
+    static void WriteDefaultSnippetsFile(const std::filesystem::path& path) {
+        std::error_code ec;
+        std::filesystem::create_directories(path.parent_path(), ec);
+        static const char kStarter[] =
+               "# Lean Launcher snippets. Type a trigger in any app and it is replaced by the text.\n"
+               "# Same shape as Espanso: matches, trigger, replace, label. Variables are not supported yet.\n"
+               "# Edit this file in any editor; it reloads the next time the launcher opens.\n"
+               "matches:\n"
+               "  - trigger: \":sig\"\n"
+               "    label: \"Email signature\"\n"
+               "    replace: \"Best regards,\\nYour Name\"\n"
+               "  - trigger: \":addr\"\n"
+               "    label: \"Address\"\n"
+               "    replace: \"Street 1, 12345 City\"\n";
+        // CREATE_NEW: an existing file is never truncated, whatever the caller checked before.
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return;
+        DWORD written = 0;
+        WriteFile(file, kStarter, static_cast<DWORD>(sizeof(kStarter) - 1), &written, nullptr);
+        CloseHandle(file);
+    }
+
+    // Returns true when the index was replaced. A transient read failure keeps
+    // the previous index and leaves the write time alone so the next Show retries.
+    bool ReloadSnippets() {
+        namespace sn = leanlauncher::snippets;
+        const std::filesystem::path path = SnippetsFilePath();
+        std::error_code ec;
+        const sn::FileState state = sn::ClassifyPath(path);
+        if (state == sn::FileState::Error) {  // status failed (for example a network drive hiccup): touch nothing
+            snippetWarnings_ = {L"Couldn't reach the snippets file"};
+            if (!snippetIndex_) snippetIndex_ = std::make_shared<const sn::SnippetIndex>(std::vector<sn::Snippet>{});
+            return false;
+        }
+        if (state == sn::FileState::Missing) {
+            WriteDefaultSnippetsFile(path);
+            if (sn::ClassifyPath(path) != sn::FileState::Present) {
+                snippetWarnings_ = {L"Couldn't create the snippets file"};
+                if (!snippetIndex_) snippetIndex_ = std::make_shared<const sn::SnippetIndex>(std::vector<sn::Snippet>{});
+                return false;
+            }
+        }
+        // The time is read before the content, so an edit landing in between is loaded next time.
+        const auto stamp = std::filesystem::last_write_time(path, ec);
+        const bool stampOk = !ec;
+        const auto size = std::filesystem::file_size(path, ec);
+        if (ec) {
+            snippetWarnings_ = {L"Couldn't read the snippets file"};
+            return false;
+        }
+        std::string bytes;
+        if (size > sn::kMaxFileBytes) {
+            snippetWarnings_ = {L"The snippets file is larger than 1 MB, so it was not loaded"};
+            snippetIndex_ = std::make_shared<const sn::SnippetIndex>(std::vector<sn::Snippet>{});
+            if (stampOk) snippetsWriteTime_ = stamp;
+            return true;
+        }
+        {
+            std::ifstream in(path, std::ios::binary);
+            if (!in) {
+                snippetWarnings_ = {L"Couldn't read the snippets file"};
+                return false;
+            }
+            bytes.resize(sn::kMaxFileBytes + 1);
+            in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            if (in.bad()) {
+                snippetWarnings_ = {L"Couldn't read the snippets file"};
+                return false;
+            }
+            bytes.resize(static_cast<size_t>(in.gcount()));
+        }
+        if (stampOk) snippetsWriteTime_ = stamp;
+        sn::ParseResult parsed = sn::ParseSnippets(bytes);
+        snippetWarnings_ = std::move(parsed.warnings);
+        snippetIndex_ = std::make_shared<const sn::SnippetIndex>(std::move(parsed.snippets));
+        if (expander_.Running()) expander_.SetIndex(snippetIndex_);
+        return true;
+    }
+
+    // Brings the hook in line with the setting: on = (re)load the file and start
+    // the keyboard listener when there is at least one snippet; off = stop it
+    // and free everything (NFR-018).
+    void ApplySnippetsState() {
+        if (!settings_.enableSnippets) {
+            expander_.Stop();
+            snippetIndex_.reset();
+            snippetWarnings_.clear();
+            return;
+        }
+        const bool replaced = ReloadSnippets();
+        if constexpr (!kUiTest) {  // the UI test build never installs a global hook
+            if (snippetIndex_ && !snippetIndex_->Empty()) {
+                if (replaced || !expander_.Running()) {
+                    if (!expander_.Start(hwnd_, snippetIndex_)) {
+                        // The toggle reads off, and the saved state matches.
+                        settings_.enableSnippets = false;
+                        SaveSettings();
+                        snippetIndex_.reset();
+                        snippetWarnings_.clear();
+                        settingsStatus_ = L"Couldn't start the keyboard listener, so snippets were turned off.";
+                    }
+                }
+            } else if (replaced) {
+                expander_.Stop();
+            }
+        }
+    }
+
+    // Adds the text matches of the user's Espanso folder to the snippets file.
+    // Order: read everything and merge in memory, check the limits, ask, back up
+    // (never overwriting an earlier backup), then replace the file via a temp
+    // file so a failed write cannot leave a truncated snippets file.
+    void ImportEspansoSnippets() {
+        namespace sn = leanlauncher::snippets;
+        constexpr size_t kMaxImportFiles = 200;
+        wchar_t folder[MAX_PATH * 2]{};
+        if (!ExpandEnvironmentStringsW(L"%APPDATA%\\espanso\\match", folder, static_cast<DWORD>(std::size(folder)))) {
+            settingsStatus_ = L"Couldn't find the Espanso folder.";
+            return;
+        }
+        std::vector<sn::Snippet> incoming;
+        size_t skipped = 0, files = 0, examined = 0, incomingBytes = 0;
+        bool limitReached = false;
+        std::error_code ec;
+        const sn::FileState folderState = sn::ClassifyPath(folder);
+        if (folderState == sn::FileState::Missing) {
+            settingsStatus_ = L"No Espanso match files found in %APPDATA%\\espanso\\match.";
+            return;
+        }
+        if (folderState == sn::FileState::Error) {
+            settingsStatus_ = L"Couldn't read the whole Espanso folder; nothing changed.";
+            return;
+        }
+        std::filesystem::directory_iterator it(folder, ec);
+        for (const std::filesystem::directory_iterator end; !ec && it != end; it.increment(ec)) {
+            std::error_code fec;
+            if (!it->is_regular_file(fec)) continue;
+            const std::wstring ext = it->path().extension().wstring();
+            if (_wcsicmp(ext.c_str(), L".yml") != 0 && _wcsicmp(ext.c_str(), L".yaml") != 0) continue;
+            if (examined >= kMaxImportFiles || limitReached) { limitReached = true; ++skipped; continue; }
+            ++examined;
+            const auto bytesOnDisk = it->file_size(fec);
+            if (fec || bytesOnDisk > sn::kMaxFileBytes) { ++skipped; continue; }
+            if (incomingBytes + bytesOnDisk > sn::kMaxFileBytes) { limitReached = true; ++skipped; continue; }
+            std::string bytes(static_cast<size_t>(bytesOnDisk), '\0');
+            {
+                std::ifstream in(it->path(), std::ios::binary);
+                if (in) in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+                if (!in || in.gcount() != static_cast<std::streamsize>(bytes.size())) { ++skipped; continue; }
+            }
+            incomingBytes += bytes.size();
+            sn::ParseResult parsed = sn::ParseSnippets(bytes);
+            skipped += parsed.warnings.size();
+            for (auto& snippet : parsed.snippets) {
+                if (sn::LooksLikeEspansoVariable(snippet.replace)) ++skipped;
+                else incoming.push_back(std::move(snippet));
+            }
+            ++files;
+        }
+        if (ec) {
+            settingsStatus_ = L"Couldn't read the whole Espanso folder; nothing changed.";
+            return;
+        }
+        if (files == 0) {
+            settingsStatus_ = L"No Espanso match files found in %APPDATA%\\espanso\\match.";
+            return;
+        }
+
+        // Existing snippets win. Parse the current file (not the running index, which is empty when off).
+        // Nothing is dropped silently: entries the parser cannot keep are counted and shown in the prompt.
+        const std::filesystem::path file = SnippetsFilePath();
+        std::vector<sn::Snippet> current;
+        size_t unreadable = 0;
+        const sn::FileState fileState = sn::ClassifyPath(file);
+        if (fileState == sn::FileState::Error) {
+            settingsStatus_ = L"Your snippets file is too large or unreadable; nothing changed.";
+            return;
+        }
+        const bool hadFile = (fileState == sn::FileState::Present);
+        if (hadFile) {
+            const auto size = std::filesystem::file_size(file, ec);
+            if (ec || size > sn::kMaxFileBytes) {
+                settingsStatus_ = L"Your snippets file is too large or unreadable; nothing changed.";
+                return;
+            }
+            std::ifstream in(file, std::ios::binary);
+            std::string bytes(static_cast<size_t>(size), '\0');
+            if (in) in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            if (!in || in.bad() || in.gcount() != static_cast<std::streamsize>(bytes.size())) {
+                settingsStatus_ = L"Couldn't read your snippets file; nothing changed.";
+                return;
+            }
+            sn::ParseResult parsed = sn::ParseSnippets(bytes);
+            unreadable = parsed.warnings.size();
+            current = std::move(parsed.snippets);
+        }
+        const sn::MergeResult merged = sn::MergeSnippets(std::move(current), incoming);
+        const std::string yaml = sn::SerializeSnippets(merged.merged);
+        if (merged.overflow > 0 || !sn::ImportWithinLimits(yaml.size(), merged.merged.size())) {
+            // The size shown is that of the capped file that would be written, not of the full set.
+            settingsStatus_ = L"The import would exceed the snippet limits (" +
+                              std::to_wstring(merged.merged.size() + merged.overflow) +
+                              L" snippets, " + std::to_wstring((yaml.size() + 1023) / 1024) + L" KB); nothing changed.";
+            return;
+        }
+
+        std::filesystem::path backup;
+        if (hadFile) {
+            SYSTEMTIME now{};
+            GetLocalTime(&now);
+            for (int attempt = 1; attempt <= 50; ++attempt) {
+                const std::filesystem::path candidate = file.parent_path() / sn::BackupName(
+                    now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, attempt);
+                if (!std::filesystem::exists(candidate, ec)) { backup = candidate; break; }
+            }
+            if (backup.empty()) {
+                settingsStatus_ = L"Could not save a backup; nothing changed.";
+                return;
+            }
+        }
+        const std::wstring prompt = sn::EspansoImportPrompt(
+            merged.added, merged.duplicates, skipped, unreadable,
+            hadFile ? backup.filename().wstring() : std::wstring(), limitReached);
+        int answer = IDNO;
+        {
+            ModalDialogScope scope(*this);
+            answer = MessageBoxW(hwnd_, prompt.c_str(), L"Import from Espanso", MB_YESNO | MB_ICONQUESTION);
+        }
+        if (answer != IDYES) {
+            settingsStatus_ = L"Import cancelled.";
+            return;
+        }
+
+        std::filesystem::create_directories(file.parent_path(), ec);
+        if (hadFile) {
+            std::error_code copyEc;
+            std::filesystem::copy_file(file, backup, std::filesystem::copy_options::none, copyEc);
+            if (copyEc) {
+                settingsStatus_ = L"Could not save a backup; nothing changed.";
+                return;
+            }
+        }
+        const std::filesystem::path temp = file.parent_path() / L"snippets-import.tmp";
+        bool written = false;
+        {
+            std::ofstream out(temp, std::ios::binary | std::ios::trunc);
+            if (out) {
+                out.write(yaml.data(), static_cast<std::streamsize>(yaml.size()));
+                out.flush();
+                out.close();
+                written = !out.fail();
+            }
+        }
+        std::error_code renameEc;
+        if (written) std::filesystem::rename(temp, file, renameEc);
+        if (!written || renameEc) {
+            std::error_code removeEc;
+            std::filesystem::remove(temp, removeEc);
+            settingsStatus_ = L"Couldn't write the snippets file; nothing changed.";
+            return;
+        }
+        ApplySnippetsState();
+        // ApplySnippetsState sets its own message when the keyboard listener could not start; keep it.
+        if (settings_.enableSnippets || settingsStatus_.empty()) {
+            settingsStatus_ = L"Imported " + sn::CountNoun(merged.added, L"snippet", L"snippets") + L" (" +
+                              std::to_wstring(merged.duplicates) + L" already existed, " +
+                              sn::CountNoun(skipped, L"entry", L"entries") + L" skipped).";
+        }
+    }
+
+    // Reload when the file changed since it was last read (checked on Show, no watcher).
+    void ReloadSnippetsIfChanged() {
+        if (!settings_.enableSnippets) return;
+        std::error_code ec;
+        const auto stamp = std::filesystem::last_write_time(SnippetsFilePath(), ec);
+        if (!ec && stamp != snippetsWriteTime_) ApplySnippetsState();
+    }
+
+    // Rows for ", ..." (the snippets prefix): label plus trigger, best match first.
+    void ShowSnippetResults(const std::wstring& normalizedFilter) {
+        namespace sn = leanlauncher::snippets;
+        if (!snippetIndex_) return;
+        const auto& all = snippetIndex_->All();
+        for (size_t index : sn::SearchSnippets(all, normalizedFilter)) {
+            const sn::Snippet& snippet = all[index];
+            AppEntry entry;
+            entry.category = AppCategory::Snippet;
+            entry.name = snippet.label.empty() ? snippet.trigger : snippet.label + L"  " + snippet.trigger;
+            entry.path = sn::PathForIndex(index);
+            results_.push_back(apps_.size());
+            apps_.push_back(std::move(entry));
+        }
+        if (results_.empty()) {
+            AppEntry entry;
+            entry.category = AppCategory::Info;
+            entry.name = all.empty() ? L"No snippets yet - edit your snippets file in Settings" : L"No matching snippet";
+            entry.inert = true;
+            results_.push_back(apps_.size());
+            apps_.push_back(std::move(entry));
+        }
+        selected_ = std::clamp(selected_, 0, (std::max)(0, static_cast<int>(results_.size()) - 1));
+        EnsureVisible();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void RunSnippetRow(const AppEntry& app) {
+        namespace sn = leanlauncher::snippets;
+        size_t index = 0;
+        if (!settings_.enableSnippets || !snippetIndex_ || !sn::IndexFromPath(app.path, index) ||
+            index >= snippetIndex_->Size()) {
+            return;
+        }
+        std::wstring text = snippetIndex_->All()[index].replace;
+        const HWND target = snippetTarget_;
+        snippetTarget_ = nullptr;  // one use only, so it can never go stale
+        if (target && IsWindow(target)) {
+            Hide();
+            SetForegroundWindow(target);
+            sn::Expander::InsertIntoWindowAsync(hwnd_, target, std::move(text));
+        } else {
+            // Nowhere to paste: leave the text on the clipboard and the launcher open.
+            CopyText(text);
+            status_ = L"Copied - paste with Ctrl+V";
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
     }
 
     void RunPomodoroRow(const AppEntry& app) {
@@ -3497,6 +3884,8 @@ private:
         case kRowTaskTargetNote: return &settings_.taskTargetNote;
         case kRowNoteAddTargetNote: return &settings_.noteAddTargetNote;
         case kRowLogTargetNote: return &settings_.logTargetNote;
+        case kRowSnippetsPrefix: return &settings_.snippetsPrefix;
+        case kRowSnippetsFile: return &settings_.snippetsPath;
         default: return nullptr;
         }
     }
@@ -3529,6 +3918,7 @@ private:
         }
         const bool wasLogHeadingRow = (editingRow_ == kRowLogHeading);
         const bool wasWebSearchEngineRow = (editingRow_ == kRowWebSearchEngine);
+        const bool wasSnippetsFileRow = (editingRow_ == kRowSnippetsFile);
         *field = checked.value;
         editingRow_ = -1;
         if (wasWebSearchEngineRow) {
@@ -3546,6 +3936,7 @@ private:
         dailyNoteConfig_ = leanlauncher::obsidian::ResolveDailyNoteConfig(
             obsidianVaultPath_, settings_.dailyNoteFolderOverride, settings_.dailyNoteFormatOverride);
         SaveSettings();
+        if (wasSnippetsFileRow) ApplySnippetsState();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
@@ -3723,6 +4114,49 @@ private:
             SaveSettings();
             CancelCommandConfirm();
             UpdateResults();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowSnippetsEnabled) {
+            if (!settings_.enableSnippets) {
+                // The prefix only joins the conflict check while the feature is on,
+                // so an empty or colliding prefix can be saved while it is off.
+                quicklaunch::Settings candidate = settings_;
+                candidate.enableSnippets = true;
+                if (const wchar_t* problem = leanlauncher::settings_io::detail::PrefixConflict(candidate)) {
+                    settingsStatus_ = std::wstring(problem) + L" Change the snippets prefix first.";
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return;
+                }
+            }
+            settings_.enableSnippets = !settings_.enableSnippets;
+            SaveSettings();
+            ApplySnippetsState();  // starts or fully stops the keyboard listener (NFR-018)
+            // A failed hook start turns the toggle off again and sets its own message.
+            UpdateResults();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowSnippetsOpen) {
+            if constexpr (!kUiTest) {
+                const std::wstring path = SnippetsFilePath();
+                namespace sn = leanlauncher::snippets;
+                sn::FileState state = sn::ClassifyPath(path);
+                if (state == sn::FileState::Missing) {
+                    WriteDefaultSnippetsFile(path);
+                    state = sn::ClassifyPath(path);
+                }
+                if (state != sn::FileState::Present) {
+                    settingsStatus_ = L"Couldn't reach your snippets file.";
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return;
+                }
+                ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+            return;
+        }
+        if (row == kRowSnippetsImport) {
+            if constexpr (!kUiTest) ImportEspansoSnippets();
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
@@ -4035,6 +4469,7 @@ private:
         case AppCategory::Command: return L"Command";
         case AppCategory::Url: return L"URL";
         case AppCategory::Pomodoro: return L"Timer";
+        case AppCategory::Snippet: return L"Snippet";
         case AppCategory::Calculator: return L"Calculator";
         case AppCategory::TaskAdd: return settings_.taskPillLabel;
         case AppCategory::NoteAdd: return settings_.noteAddPillLabel;
@@ -4131,6 +4566,17 @@ private:
                 path = app.path;
             }
             break;
+        case AppCategory::Snippet: {
+            // The replacement text is the preview body.
+            content->kind = pv::PreviewKind::None;
+            content->body = PreviewCategoryLabel(app);
+            size_t snippetIndexValue = 0;
+            if (snippetIndex_ && leanlauncher::snippets::IndexFromPath(app.path, snippetIndexValue) &&
+                snippetIndexValue < snippetIndex_->Size()) {
+                content->body = snippetIndex_->All()[snippetIndexValue].replace;
+            }
+            break;
+        }
         default:
             content->kind = pv::PreviewKind::None;
             content->body = PreviewCategoryLabel(app);
@@ -4912,7 +5358,7 @@ private:
                 // doing nothing (spec: result row reads "Set up your vault in
                 // Settings" and must not add anything when activated). Land
                 // directly on the Vault category/row so onboarding doesn't
-                // strand the user on an unrelated "All" settings view.
+                // strand the user on an unrelated settings tab.
                 OpenSettings(SettingsCategory::Obsidian);
                 return;
             }
@@ -4968,6 +5414,10 @@ private:
         }
         if (app.category == takeoff::AppCategory::Pomodoro) {
             RunPomodoroRow(app);
+            return;
+        }
+        if (app.category == takeoff::AppCategory::Snippet) {
+            RunSnippetRow(app);
             return;
         }
         if (app.category == takeoff::AppCategory::Url) {
@@ -5205,7 +5655,8 @@ private:
         actionsOpen_ = false;
         actionsPositioned_ = false;
         const AppEntry& app = apps_[results_[selected_]];
-        if (app.category == takeoff::AppCategory::Command || app.category == takeoff::AppCategory::Pomodoro) {
+        if (app.category == takeoff::AppCategory::Command || app.category == takeoff::AppCategory::Pomodoro ||
+            app.category == takeoff::AppCategory::Snippet) {
             LaunchSelected(false);  // "Run", through the same confirmation
             return;
         }
@@ -5366,6 +5817,7 @@ private:
     int ActionCount() const {
         if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Command) return 1;
         if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Pomodoro) return 1;
+        if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Snippet) return 1;
         if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Url) return 2;
         return (HasResult() && IsPinnable(apps_[results_[selected_]])) ? 4 : 3;
     }
@@ -5484,15 +5936,7 @@ private:
                     CloseSettings();
                     return;
                 }
-                const SettingsCategory categories[] = {
-                    SettingsCategory::All,
-                    SettingsCategory::Shortcuts,
-                    SettingsCategory::System,
-                    SettingsCategory::Search,
-                    SettingsCategory::Obsidian,
-                    SettingsCategory::About
-                };
-                for (auto cat : categories) {
+                for (auto cat : kSettingsCategories) {
                     const auto r = CategoryTabRect(cat);
                     if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
                         if (editingRow_ >= 0) CancelEditingRow();
@@ -5810,6 +6254,7 @@ private:
             if (app.category == takeoff::AppCategory::Url) continue;  // a web address has no file icon
             if (app.category == takeoff::AppCategory::Info) continue;  // status text only
             if (app.category == takeoff::AppCategory::Pomodoro) continue;
+            if (app.category == takeoff::AppCategory::Snippet) continue;
             if (app.category == takeoff::AppCategory::Command) {
                 if (app.path == leanlauncher::syscmd::CommandPath(leanlauncher::syscmd::Command::EmptyRecycleBin)) {
                     RequestRecycleBinInfo();
@@ -6418,6 +6863,7 @@ private:
                     : (app.category == takeoff::AppCategory::Command ? L"Command"
                     : (app.category == takeoff::AppCategory::Url ? L"URL"
                     : (app.category == takeoff::AppCategory::Info ? L""
+                    : (app.category == takeoff::AppCategory::Snippet ? L"Snippet"
                     : (app.category == takeoff::AppCategory::Pomodoro ? L"Timer"
                     : (app.category == takeoff::AppCategory::System ? L"System"
                     : (app.category == takeoff::AppCategory::Folder ? L"Folder"
@@ -6426,7 +6872,7 @@ private:
                     : (app.category == takeoff::AppCategory::NoteAdd ? settings_.noteAddPillLabel.c_str()
                     : (app.category == takeoff::AppCategory::LogAdd ? settings_.logPillLabel.c_str()
                     : (app.category == takeoff::AppCategory::NoteJump ? settings_.vaultSearchPillLabel.c_str()
-                    : (app.category == takeoff::AppCategory::WebSearch ? settings_.webSearchPillLabel.c_str() : L"Application"))))))))))));
+                    : (app.category == takeoff::AppCategory::WebSearch ? settings_.webSearchPillLabel.c_str() : L"Application")))))))))))));
                 Text(categoryLabel,
                     D2D1::RectF(width_ - 154, top, width_ - 28, top + 40), hintFormat_.Get(),
                     highContrast_ && selected ? textColor : Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -6700,6 +7146,10 @@ private:
                 Text(L"Open URL", D2D1::RectF(24, top, 156, height_),
                     hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
                 Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
+            } else if (app.category == takeoff::AppCategory::Snippet) {
+                Text(L"Insert", D2D1::RectF(24, top, 156, height_),
+                    hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
+                Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
             } else if (app.category == takeoff::AppCategory::Command) {
                 Text(L"Run command", D2D1::RectF(24, top, 156, height_),
                     hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
@@ -6778,11 +7228,13 @@ private:
         const wchar_t* noteLabels[] = {L"Open in Obsidian", L"Copy note title", L"Reveal in Explorer"};
         const wchar_t* webSearchLabels[] = {L"Search in browser", L"Copy query text", L"Copy search URL"};
         const wchar_t* commandLabels[] = {L"Run"};
+        const wchar_t* snippetLabels[] = {L"Insert"};
         const wchar_t* urlLabels[] = {L"Open URL", L"Copy URL"};
         const bool isCommand = (app.category == takeoff::AppCategory::Command ||
                                 app.category == takeoff::AppCategory::Pomodoro);
         const bool isUrl = (app.category == takeoff::AppCategory::Url);
-        const wchar_t** labels = isCommand ? commandLabels : isUrl ? urlLabels : isCalc ? calcLabels
+        const bool isSnippet = (app.category == takeoff::AppCategory::Snippet);
+        const wchar_t** labels = isSnippet ? snippetLabels : isCommand ? commandLabels : isUrl ? urlLabels : isCalc ? calcLabels
             : (isTaskAdd ? taskLabels
             : (isNoteAdd ? noteAddLabels
             : (isLogAdd ? logAddLabels
@@ -7195,120 +7647,132 @@ private:
             }
         };
 
-        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Shortcuts) {
-            const float hY = 16.0f;
-            const float cY = 36.0f;
-            drawCard(L"KEYBOARD SHORTCUTS", hY, cY, 4);
+        // Card-based tabs: frames first, then each tab's rows at their layout position.
+        const auto cardList = CardsFor(settingsCategory_);
+        for (std::size_t i = 0; i < cardList.count; ++i) {
+            drawCard(cardList.cards[i].header,
+                leanlauncher::settings_layout::CardHeaderTop(cardList.cards, cardList.count, i),
+                leanlauncher::settings_layout::CardTop(cardList.cards, cardList.count, i),
+                cardList.cards[i].count);
+        }
+        const auto rowY = [&](int row) { return SettingsRowTop(row) + offsetY; };
 
-            DrawSettingsRow(0, cY + offsetY, L"Open Lean Launcher",
+        if (settingsCategory_ == SettingsCategory::General) {
+            DrawSettingsRow(0, rowY(0), L"Open Lean Launcher",
                 L"Global shortcut that opens or closes the launcher",
                 quicklaunch::FormatBinding(settings_.launcherHotkey));
-            DrawSettingsRow(1, cY + kSettingsRowHeight + offsetY, L"Actions menu",
+            DrawSettingsRow(1, rowY(1), L"Actions menu",
                 L"Show actions for the selected application",
                 quicklaunch::FormatBinding(settings_.actionsHotkey));
-            DrawSettingsRow(2, cY + 2 * kSettingsRowHeight + offsetY, L"Open as administrator",
+            DrawSettingsRow(2, rowY(2), L"Open as administrator",
                 L"Launch the selected application with elevation",
                 quicklaunch::FormatAdminBinding(settings_.administratorHotkey));
-            DrawSettingsRow(3, cY + 3 * kSettingsRowHeight + offsetY, L"Quick launch",
+            DrawSettingsRow(3, rowY(3), L"Quick launch",
                 L"Open one of the eight visible results directly",
                 quicklaunch::FormatQuickLaunchBinding(settings_.quickLaunchHotkey));
-        }
-
-        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::System) {
-            const float hY = (settingsCategory_ == SettingsCategory::All) ? 242.0f : 16.0f;
-            const float cY = (settingsCategory_ == SettingsCategory::All) ? 262.0f : 36.0f;
-            drawCard(L"SYSTEM", hY, cY, 3);
-
-            DrawSettingsRow(4, cY + offsetY, L"Run at startup",
+            DrawSettingsRow(4, rowY(4), L"Run at startup",
                 L"Start Lean Launcher when you sign in to Windows", {}, true, settings_.runAtStartup);
-            DrawSettingsRow(5, cY + kSettingsRowHeight + offsetY, L"Notification area icon",
+            DrawSettingsRow(5, rowY(5), L"Notification area icon",
                 L"Show Lean Launcher in the hidden icons area", {}, true, settings_.showTrayIcon);
-            DrawSettingsRow(6, cY + 2 * kSettingsRowHeight + offsetY, L"Check for updates",
-                L"Check for updates when Lean Launcher starts", {}, true, settings_.checkForUpdates);
+            DrawSettingsRow(kRowAboutExportSettings, rowY(kRowAboutExportSettings), L"Export settings...",
+                L"Save your settings to a file, to move them to another PC", {}, false, false, true);
+            DrawSettingsRow(kRowAboutImportSettings, rowY(kRowAboutImportSettings),
+                L"Import settings...", L"Load settings from a file - you see what changes before anything is applied",
+                {}, false, false, true);
         }
 
-        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Search) {
-            const float hY = (settingsCategory_ == SettingsCategory::All) ? leanlauncher::settings_layout::kAllSearchHeaderTop : 16.0f;
-            const float cY = (settingsCategory_ == SettingsCategory::All) ? leanlauncher::settings_layout::kAllSearchCardTop : 36.0f;
-            drawCard(L"SEARCH & FEATURES", hY, cY, kSearchRowCount);
-            const auto searchRowY = [&](int row) {
-                return cY + SearchRowRank(row) * kSettingsRowHeight + offsetY;
-            };
-
-            DrawSettingsRow(7, searchRowY(7), L"File search",
+        if (settingsCategory_ == SettingsCategory::Search) {
+            DrawSettingsRow(7, rowY(7), L"File search",
                 L"Search files and folders on your computer", {}, true, settings_.enableFileSearch);
-            DrawSettingsRow(8, searchRowY(8), L"Web search",
+            DrawSettingsRow(8, rowY(8), L"Web search",
                 L"Open " + settings_.webSearchEngineName + L" when no results match your query",
                 {}, true, settings_.enableWebSearch);
-            DrawSettingsRow(kRowWebSearchEngine, searchRowY(kRowWebSearchEngine), L"Search engine",
+            DrawSettingsRow(kRowWebSearchEngine, rowY(kRowWebSearchEngine), L"Search engine",
                 webSearchDropdownOpen_ ? L"Tap to collapse"
                     : L"Search engine used for the \"Web search\" fallback",
                 settings_.webSearchEngineName, false, false, false, true);
-            DrawSettingsRow(kRowFileSearchPrefix, searchRowY(kRowFileSearchPrefix), L"File search prefix",
+            DrawSettingsRow(kRowFileSearchPrefix, rowY(kRowFileSearchPrefix), L"File search prefix",
                 L"Type this followed by a space to show only files and folders",
                 settings_.fileSearchPrefix, false, false, false, true);
-            DrawSettingsRow(kRowWebSearchPrefix, searchRowY(kRowWebSearchPrefix), L"Web search prefix",
+            DrawSettingsRow(kRowWebSearchPrefix, rowY(kRowWebSearchPrefix), L"Web search prefix",
                 L"Type this followed by a space to force a \"" + settings_.webSearchEngineName + L"\" search",
                 settings_.webSearchPrefix, false, false, false, true);
-            DrawSettingsRow(kRowAppSearchPrefix, searchRowY(kRowAppSearchPrefix), L"App search prefix",
+            DrawSettingsRow(kRowAppSearchPrefix, rowY(kRowAppSearchPrefix), L"App search prefix",
                 L"Type this followed by a space to show only installed apps",
                 settings_.appSearchPrefix, false, false, false, true);
-            DrawSettingsRow(kRowFileSearchEditExclusions, searchRowY(kRowFileSearchEditExclusions), L"Edit exclusions...",
+            DrawSettingsRow(kRowFileSearchEditExclusions, rowY(kRowFileSearchEditExclusions), L"Edit exclusions...",
                 L"Add your own folder and file-type exclusions on top of the built-in list",
                 {}, false, false, true);
-            DrawSettingsRow(kRowFileSearchHelp, searchRowY(kRowFileSearchHelp), L"Help",
+            DrawSettingsRow(kRowFileSearchHelp, rowY(kRowFileSearchHelp), L"Help",
                 L"Learn how file search exclusions work",
                 {}, false, false, true);
-            DrawSettingsRow(kRowSystemCommandsEnabled, searchRowY(kRowSystemCommandsEnabled), L"System commands",
-                L"Lock, sleep, restart, shut down, sign out, and empty the Recycle Bin",
-                {}, true, settings_.enableSystemCommands);
-            DrawSettingsRow(kRowSystemCommandsPrefix, searchRowY(kRowSystemCommandsPrefix), L"System commands prefix",
-                L"Type this followed by a space to list system commands",
-                settings_.systemCommandsPrefix, false, false, false, true);
-            DrawSettingsRow(kRowTypedUrlsEnabled, searchRowY(kRowTypedUrlsEnabled), L"Typed URLs",
-                L"Open web addresses you type, like github.com or https://...",
-                {}, true, settings_.enableTypedUrls);
-            DrawSettingsRow(kRowPathCompletionEnabled, searchRowY(kRowPathCompletionEnabled), L"Path completion",
-                L"Complete folder paths as you type, like C:\\Us or %APPDATA%\\",
-                {}, true, settings_.enablePathCompletion);
-            DrawSettingsRow(kRowUnitConverterEnabled, searchRowY(kRowUnitConverterEnabled), L"Unit converter",
-                L"Convert units offline, like 5 km in mi or 72 f to c",
-                {}, true, settings_.enableUnitConverter);
-            DrawSettingsRow(kRowTimeZonesEnabled, searchRowY(kRowTimeZonesEnabled), L"Time zone converter",
-                L"Times in other places, like time in Tokyo or 10am PST in CET",
-                {}, true, settings_.enableTimeZones);
-            DrawSettingsRow(kRowPomodoroEnabled, searchRowY(kRowPomodoroEnabled), L"Pomodoro timer",
-                L"Focus timers with a tray reminder, like pomo 25 write intro",
-                {}, true, settings_.enablePomodoro);
-            DrawSettingsRow(kRowPomodoroPrefix, searchRowY(kRowPomodoroPrefix), L"Pomodoro prefix",
-                L"Type this followed by a space to start or check a timer",
-                settings_.pomodoroPrefix, false, false, false, true);
-            DrawSettingsRow(kRowPomodoroFocusMinutes, searchRowY(kRowPomodoroFocusMinutes), L"Focus length",
-                L"Minutes for a focus timer when you don't type a number",
-                settings_.pomodoroFocusMinutes, false, false, false, true);
-            DrawSettingsRow(kRowPomodoroBreakMinutes, searchRowY(kRowPomodoroBreakMinutes), L"Break length",
-                L"Minutes for a break",
-                settings_.pomodoroBreakMinutes, false, false, false, true);
-            DrawSettingsRow(kRowPomodoroLog, searchRowY(kRowPomodoroLog), L"Log finished Pomodoros",
-                L"Add finished focus timers to your log heading - only if today's note exists",
-                {}, true, settings_.pomodoroLog);
-            DrawSettingsRow(kRowPreviewEnabled, searchRowY(kRowPreviewEnabled), L"Preview panel",
+            DrawSettingsRow(kRowPreviewEnabled, rowY(kRowPreviewEnabled), L"Preview panel",
                 L"A note, image, or file preview next to your results",
                 {}, true, settings_.enablePreview);
-            DrawSettingsRow(kRowPreviewHotkey, searchRowY(kRowPreviewHotkey), L"Preview panel shortcut",
+            DrawSettingsRow(kRowPreviewHotkey, rowY(kRowPreviewHotkey), L"Preview panel shortcut",
                 L"Show or hide a preview of the selected result",
                 quicklaunch::FormatBinding(settings_.previewHotkey));
         }
 
-        if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Obsidian) {
-            const float hY = (settingsCategory_ == SettingsCategory::All)
-                ? leanlauncher::settings_layout::AllObsidianHeaderTop(kSearchRowCount) : 16.0f;
-            const float cY = (settingsCategory_ == SettingsCategory::All)
-                ? leanlauncher::settings_layout::AllObsidianCardTop(kSearchRowCount) : 36.0f;
+        if (settingsCategory_ == SettingsCategory::Tools) {
+            DrawSettingsRow(kRowUnitConverterEnabled, rowY(kRowUnitConverterEnabled), L"Unit converter",
+                L"Convert units offline, like 5 km in mi or 72 f to c",
+                {}, true, settings_.enableUnitConverter);
+            DrawSettingsRow(kRowTimeZonesEnabled, rowY(kRowTimeZonesEnabled), L"Time zone converter",
+                L"Times in other places, like time in Tokyo or 10am PST in CET",
+                {}, true, settings_.enableTimeZones);
+            DrawSettingsRow(kRowTypedUrlsEnabled, rowY(kRowTypedUrlsEnabled), L"Typed URLs",
+                L"Open web addresses you type, like github.com or https://...",
+                {}, true, settings_.enableTypedUrls);
+            DrawSettingsRow(kRowPathCompletionEnabled, rowY(kRowPathCompletionEnabled), L"Path completion",
+                L"Complete folder paths as you type, like C:\\Us or %APPDATA%\\",
+                {}, true, settings_.enablePathCompletion);
+            DrawSettingsRow(kRowSystemCommandsEnabled, rowY(kRowSystemCommandsEnabled), L"System commands",
+                L"Lock, sleep, restart, shut down, sign out, and empty the Recycle Bin",
+                {}, true, settings_.enableSystemCommands);
+            DrawSettingsRow(kRowSystemCommandsPrefix, rowY(kRowSystemCommandsPrefix), L"System commands prefix",
+                L"Type this followed by a space to list system commands",
+                settings_.systemCommandsPrefix, false, false, false, true);
+            DrawSettingsRow(kRowPomodoroEnabled, rowY(kRowPomodoroEnabled), L"Pomodoro timer",
+                L"Focus timers with a tray reminder, like pomo 25 write intro",
+                {}, true, settings_.enablePomodoro);
+            DrawSettingsRow(kRowPomodoroPrefix, rowY(kRowPomodoroPrefix), L"Pomodoro prefix",
+                L"Type this followed by a space to start or check a timer",
+                settings_.pomodoroPrefix, false, false, false, true);
+            DrawSettingsRow(kRowPomodoroFocusMinutes, rowY(kRowPomodoroFocusMinutes), L"Focus length",
+                L"Minutes for a focus timer when you don't type a number",
+                settings_.pomodoroFocusMinutes, false, false, false, true);
+            DrawSettingsRow(kRowPomodoroBreakMinutes, rowY(kRowPomodoroBreakMinutes), L"Break length",
+                L"Minutes for a break",
+                settings_.pomodoroBreakMinutes, false, false, false, true);
+            DrawSettingsRow(kRowPomodoroLog, rowY(kRowPomodoroLog), L"Log finished Pomodoros",
+                L"Add finished focus timers to your log heading - only if today's note exists",
+                {}, true, settings_.pomodoroLog);
+        }
+
+        if (settingsCategory_ == SettingsCategory::Snippets) {
+            DrawSettingsRow(kRowSnippetsEnabled, rowY(kRowSnippetsEnabled), L"Snippets (text expander)",
+                L"Type a trigger like :sig in any app to expand it. Installs a keyboard listener while on",
+                {}, true, settings_.enableSnippets);
+            DrawSettingsRow(kRowSnippetsPrefix, rowY(kRowSnippetsPrefix), L"Snippets prefix",
+                L"Type this followed by a space to search your snippets",
+                settings_.snippetsPrefix, false, false, false, true);
+            DrawSettingsRow(kRowSnippetsFile, rowY(kRowSnippetsFile), L"Snippets file",
+                L"Full path to a .yml file. Leave empty for the default in %APPDATA%\\LeanLauncher",
+                settings_.snippetsPath.empty() ? std::wstring(L"(default)") : settings_.snippetsPath, false, false, false, true);
+            DrawSettingsRow(kRowSnippetsOpen, rowY(kRowSnippetsOpen), L"Edit snippets",
+                L"Open the snippets file in your default editor",
+                {}, false, false, true);
+            DrawSettingsRow(kRowSnippetsImport, rowY(kRowSnippetsImport), L"Import from Espanso",
+                L"Add your existing Espanso text matches (variables are skipped)",
+                {}, false, false, true);
+        }
+
+        if (settingsCategory_ == SettingsCategory::Obsidian) {
             const auto& visibleRows = ObsidianVisibleRows();
-            drawCard(L"OBSIDIAN", hY, cY, static_cast<int>(visibleRows.size()));
+            drawCard(L"OBSIDIAN", 16.0f, 36.0f, static_cast<int>(visibleRows.size()));
             for (size_t i = 0; i < visibleRows.size(); ++i) {
-                DrawObsidianRow(visibleRows[i], cY + static_cast<float>(i) * kSettingsRowHeight + offsetY);
+                DrawObsidianRow(visibleRows[i], 36.0f + static_cast<float>(i) * kSettingsRowHeight + offsetY);
             }
         }
 
@@ -7320,8 +7784,10 @@ private:
                 D2D1::RectF(24, 38.0f + offsetY, width_ - 24, 56.0f + offsetY),
                 hintFormat_.Get(), Muted());
 
-            drawCard(L"UPDATES", 66.0f, AboutUpdatesCardTop(), 1);
-            DrawSettingsRow(kRowAboutCheckUpdates, AboutUpdatesCardTop() + offsetY, L"Check for updates",
+            drawCard(L"UPDATES", 66.0f, AboutUpdatesCardTop(), 2);
+            DrawSettingsRow(kRowCheckForUpdatesOnStart, AboutUpdatesCardTop() + offsetY, L"Check on startup",
+                L"Check for updates when Lean Launcher starts", {}, true, settings_.checkForUpdates);
+            DrawSettingsRow(kRowAboutCheckUpdates, AboutUpdatesCardTop() + kSettingsRowHeight + offsetY, L"Check now",
                 takeoff::FormatLastUpdateCheck(lastUpdateCheck_),
                 takeoff::UpdateRowText(updateState_, updateTag_), false, false, true);
 
@@ -7355,13 +7821,6 @@ private:
                 Text(indexLines[i].first, lineRect, resultFormat_.Get(), Foreground());
                 Text(*indexLines[i].second, lineRect, hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
             }
-
-            drawCard(L"BACKUP", AboutBackupHeaderTop(), AboutBackupCardTop(), 2);
-            DrawSettingsRow(kRowAboutExportSettings, AboutBackupCardTop() + offsetY, L"Export settings...",
-                L"Save your settings to a file, to move them to another PC", {}, false, false, true);
-            DrawSettingsRow(kRowAboutImportSettings, AboutBackupCardTop() + kSettingsRowHeight + offsetY,
-                L"Import settings...", L"Load settings from a file - you see what changes before anything is applied",
-                {}, false, false, true);
         }
 
         target_->PopAxisAlignedClip();
@@ -7405,17 +7864,8 @@ private:
             resultFormat_.Get(), Foreground());
 
         // Category tabs
-        const SettingsCategory categories[] = {
-            SettingsCategory::All,
-            SettingsCategory::Shortcuts,
-            SettingsCategory::System,
-            SettingsCategory::Search,
-            SettingsCategory::Obsidian,
-            SettingsCategory::About
-        };
-        const wchar_t* catLabels[] = {L"All", L"Shortcuts", L"System", L"Search", L"Obsidian", L"About"};
-        for (int i = 0; i < 6; ++i) {
-            const auto cat = categories[i];
+        for (std::size_t i = 0; i < std::size(kSettingsCategories); ++i) {
+            const auto cat = kSettingsCategories[i];
             const auto tabRect = CategoryTabRect(cat);
             const bool active = (settingsCategory_ == cat);
             const bool tabHover = mouseKnown_ && mouseX_ >= tabRect.left && mouseX_ <= tabRect.right && mouseY_ >= tabRect.top && mouseY_ <= tabRect.bottom;
@@ -7426,7 +7876,7 @@ private:
             } else if (tabHover) {
                 Fill(tabRect, D2D1::ColorF(1, 1, 1, 0.06f), 12.0f);
             }
-            Text(catLabels[i], tabRect, hintFormat_.Get(),
+            Text(kSettingsCategoryLabels[i], tabRect, hintFormat_.Get(),
                 active ? (highContrast_ ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground()) : (tabHover ? Foreground() : Muted()),
                 DWRITE_TEXT_ALIGNMENT_CENTER);
         }
@@ -7532,6 +7982,13 @@ private:
     // US-049 Pomodoro: the running timer (none = no timers set), the pending
     // "replace running timer" confirmation, and the break offer on the balloon.
     std::optional<leanlauncher::pomodoro::State> pomodoro_;
+    // US-050 snippets. The index is shared with the hook thread through
+    // Expander; everything is released when the feature is turned off.
+    std::shared_ptr<const leanlauncher::snippets::SnippetIndex> snippetIndex_;
+    std::vector<std::wstring> snippetWarnings_;
+    std::filesystem::file_time_type snippetsWriteTime_{};
+    HWND snippetTarget_ = nullptr;  // the window that had focus before the launcher showed
+    leanlauncher::snippets::Expander expander_;
     bool pomodoroReplacePending_ = false;
     std::wstring pomodoroReplacePath_;
     unsigned long long pomodoroReplaceAt_ = 0;
@@ -7584,7 +8041,7 @@ private:
     std::wstring composition_, status_, settingsStatus_;
     int selected_ = 0, firstVisible_ = 0, actionSelected_ = 0, wheelDelta_ = 0;
     int settingsSelected_ = 0;
-    SettingsCategory settingsCategory_ = SettingsCategory::All;
+    SettingsCategory settingsCategory_ = SettingsCategory::General;
     int recordingRow_ = -1;
     int editingRow_ = -1;
     bool vaultDropdownOpen_ = false;

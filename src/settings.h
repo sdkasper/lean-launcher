@@ -64,6 +64,12 @@ struct Settings {
     bool enablePreview = true;
     bool previewOpen = false;
     HotkeyBinding previewHotkey{kModControl, 'P'};
+    // US-050: text expander. Off by default: the keyboard hook is installed
+    // only while this is on. Never exported or imported (see settings_io.h).
+    bool enableSnippets = false;
+    std::wstring snippetsPrefix = L",";
+    // Empty = %APPDATA%\LeanLauncher\snippets.yml.
+    std::wstring snippetsPath;
     // Default matches the Google preset in search.h's kWebSearchPresets -
     // existing installs with no saved value get identical behavior to
     // before this setting existed (AC: no behavior change for anyone who

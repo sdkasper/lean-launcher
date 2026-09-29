@@ -45,6 +45,7 @@
 #include "timezones.h"
 #include "pomodoro.h"
 #include "preview.h"
+#include "expander.h"
 #include "update_apply.h"
 
 namespace fs = std::filesystem;

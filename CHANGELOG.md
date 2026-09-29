@@ -10,6 +10,27 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.0.0] - 2026-09-29
+
+Snippets and a reorganised Settings page make this a milestone release. Nothing is removed: every setting, shortcut, and saved value keeps working, and settings exports from earlier versions import unchanged.
+
+### Changed
+- **Settings is reorganised into six tabs** - **General**, **Search**, **Tools**, **Snippets**, **Obsidian**, and **About**. The crowded Search tab (27 rows) is split up: File search, Web search, the search engine, prefixes, exclusions, and the preview panel stay in Search; unit and time zone converters, typed URLs, path completion, system commands, and Pomodoro move to Tools; the text expander gets its own Snippets tab. General combines the old Shortcuts and System tabs and also holds Export settings... / Import settings... in a BACKUP card (moved from About). Each tab groups its rows into titled cards. The "All" tab is gone, and Settings now opens on General.
+- **"Check for updates when Lean Launcher starts" moved to About** - it now sits in the UPDATES card as "Check on startup", right above the "Check now" row (previously called "Check for updates"), so both update controls are in one place.
+
+### Added
+- **Snippets (text expander)** - opt-in and off by default (Settings > Snippets): type a trigger such as `:sig` in any app and it is replaced by your text. Snippets are kept in `%APPDATA%\LeanLauncher\snippets.yml`, created with two samples the first time you turn the feature on; the Settings row "Edit snippets" opens it. The file uses an Espanso-compatible subset: `matches:` with `trigger`, `replace`, and `label`, with multi-line text through `|` blocks or `\n` in quoted text. Variables, `word`, multiple `triggers`, and other Espanso features are not supported yet; such entries are skipped with a warning in Settings. Limits: file 1 MB, 5,000 snippets, replacement 64 KB, trigger 2-32 characters without spaces; a shorter trigger that is the start of a longer one fires first. Short single-line text is typed. Long or multi-line text is pasted only when the clipboard is empty or holds only plain text (the clipboard is then restored afterwards and the pasted text is kept out of Windows clipboard history); otherwise it is typed key by key, and a multi-line snippet typed this way sends Enter for each line, so editors with auto-indent may re-indent it (tip: use short single-line snippets, or avoid having rich text such as a copied web page on the clipboard, if that matters). The `,` prefix searches your snippets: type `, ` and part of a label (`, sig`), then `Enter` inserts into the window you came from, or copies to the clipboard if there is none. "Import from Espanso" asks first, saves a timestamped backup, skips entries with variables, and never turns the feature on. Settings export and import never include or turn on the Snippets toggle. **Privacy:** while on, a keyboard listener sees what you type to spot triggers, keeps at most the last 32 characters in memory only, never stores or sends them, and is fully removed when you turn Snippets off. It cannot see into or type into windows running as administrator and may not work in some games or remote desktop windows.
+
+### Known limits
+- Snippets do not work in windows running as administrator, and may not work in some games or remote desktop windows.
+- Espanso variables, `word`, and multiple `triggers` are not supported yet; those entries are skipped with a warning.
+- The snippets file is read when Snippets is turned on and each time the launcher opens, not while you edit it.
+- A mouse click that moves the caret inside the same window does not reset the typed text, which can cause a rare false expansion.
+- Password fields still expand snippets, because the listener cannot tell them apart.
+- Triggers are case-sensitive, so Caps Lock changes the typed character.
+- If expansions ever stop working (Windows removes keyboard hooks that answer too slowly), turn Snippets off and on again.
+- Type the last trigger character and release it before pressing the next key; a fast rollover cancels the expansion.
+
 ## [1.9.1] - 2026-09-29
 
 ### Fixed

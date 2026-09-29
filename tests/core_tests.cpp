@@ -17,6 +17,7 @@
 #include "../src/timezones.h"
 #include "../src/pomodoro.h"
 #include "../src/preview.h"
+#include "../src/snippets.h"
 #include "reference_scorer.h"
 
 #include <chrono>
@@ -2268,103 +2269,53 @@ int main() {
         fs::remove_all(scratchDir, ec);
     }
 
-    // 5. Settings Scroll and Viewport Invariants:
-    // Guarantees Settings content cleanly fits and scrolls without overlapping FooterTop (440px).
-    //
-    // This is an independent hand-derived sanity check, not a call into the real
-    // SettingsContentBottom() (that's a private member of a class defined in
-    // main.cpp's anonymous namespace, unreachable from this test binary). As of
-    // the Search category's 8-row layout (File search / Web search / Search
-    // engine - US-016; File/Web/App search prefix - US-017 added three more
-    // rows; Edit exclusions / Help - US-019 added two more) and Obsidian being
-    // the last section in the All view, the real All-category
-    // SettingsContentBottom() with Obsidian disabled (1 visible row) is 918.0f;
-    // this block's constants are kept in sync with that value by hand.
-    //
-    // EVERY constant below must be rechecked against src/launcher.h whenever a
-    // Settings row is added or removed. Because each assertion compares this
-    // block's own derived constant against its own literal, a stale mirror
-    // still passes while verifying nothing about the product - US-016, US-017
-    // and US-019 all added Search rows, and the mirror silently drifted.
-    constexpr float kWindowHeight = 482.0f;
-    constexpr float kFooterH = 42.0f;
-    constexpr float kSettingsHeaderH = 46.0f;
-    constexpr float kSettingsRowH = 47.0f;
-    constexpr float footerTop = kWindowHeight - kFooterH; // 440.0f
-    // The Obsidian section is a one-off, variable-height block, not part of
-    // the repeating row grid, so its top is taken directly from source
-    // (header@741, card@761) rather than derived from a generalTop + N*rowH
-    // formula. With Obsidian disabled (the default), it's a single row.
-    constexpr float obsidianRowTop = 855.0f;
-    constexpr float obsidianRowBottom = obsidianRowTop + kSettingsRowH;  // 902.0f
-    constexpr float contentBottom = obsidianRowBottom + 16.0f;           // 918.0f (16px bottom padding)
-    constexpr float maxScroll = contentBottom - footerTop;               // 478.0f
-
-    Check(footerTop == 440.0f, "footer top is exactly 440px");
-    Check(obsidianRowBottom > footerTop,
-        "unscrolled Obsidian row (the last row with Obsidian disabled) exceeds footer top, proving scroll is required");
-    Check(maxScroll == 478.0f, "settings max scroll is 478px");
-
-    // When scrolled to maxScroll:
-    const float scrolledObsidianRowBottom = obsidianRowBottom - maxScroll;
-    Check(scrolledObsidianRowBottom < footerTop, "scrolled Obsidian row bottom is strictly above footer top");
-    Check(footerTop - scrolledObsidianRowBottom >= 16.0f, "Obsidian row has at least 16px clearance above footer");
-
-    // Check viewport height and scrollable area:
-    constexpr float viewportHeight = footerTop - kSettingsHeaderH; // 394.0f
-    Check(viewportHeight == 394.0f, "settings viewport height is 394px");
-
-    // In individual categories, content height is well under viewportHeight (394px)
-    constexpr float kCategoryShortcutsContentH = 36.0f + 2 * kSettingsRowH + 12.0f; // 142px
-    constexpr float kCategorySystemContentH = 36.0f + 5 * kSettingsRowH + 12.0f;    // 283px
-    constexpr float kCategoryVaultContentH = 36.0f + 1 * kSettingsRowH + 16.0f;     // 99px
-    Check(kCategoryShortcutsContentH < viewportHeight, "Shortcuts category has zero overflow in viewport");
-    Check(kCategorySystemContentH < viewportHeight, "System category has zero overflow in viewport");
-    Check(kCategoryVaultContentH < viewportHeight, "Vault category has zero overflow in viewport");
-
-    // Search: US-019's two extra rows (Edit exclusions, Help) push it past the
-    // viewport, so unlike its siblings above it genuinely overflows now. That is
-    // expected, not a defect - what must hold is that scrolling can still bring
-    // the last row fully into view. Mirrored from src/launcher.h: content bottom
-    // is 36 header + 8 rows + 16 padding (this one uses the real 16px padding
-    // rather than the 12px approximation used above, because Search now sits
-    // right on the overflow boundary where the 4px decides the answer), row tops
-    // are 36 + (row - 7) * 47, and EnsureSettingsVisible targets the row bottom
-    // plus an 8px margin against a 2px viewport inset.
-    constexpr float kCategorySearchContentH = 36.0f + 8 * kSettingsRowH + 16.0f;    // 428px
-    constexpr float searchMaxScroll = kCategorySearchContentH - viewportHeight;     // 34px
-    constexpr float helpRowTop = 36.0f + 7 * kSettingsRowH;                         // 365px (kRowFileSearchHelp)
-    constexpr float helpRowBottom = helpRowTop + kSettingsRowH;                     // 412px
-    constexpr float helpScrollNeeded = (helpRowBottom + 8.0f) - (viewportHeight - 2.0f); // 28px
-    Check(kCategorySearchContentH == 428.0f, "Search category content bottom is 428px (8 rows)");
-    Check(kCategorySearchContentH > viewportHeight,
-        "Search category overflows its viewport, so its last row requires scrolling");
-    Check(searchMaxScroll == 34.0f, "Search category max scroll is 34px");
-    Check(helpScrollNeeded > 0.0f && helpScrollNeeded <= searchMaxScroll,
-        "the scroll EnsureSettingsVisible needs for the Help row is within Search's max scroll");
-    Check(helpRowBottom - helpScrollNeeded < viewportHeight,
-        "scrolled Help row bottom is inside the Settings viewport");
-
-    // Settings layout helpers (src/settings_layout.h): the real geometry the
-    // launcher uses, so the Search card can grow without hand-edited offsets.
+    // 5. Settings layout (src/settings_layout.h): the real geometry the launcher
+    // uses. A tab is an ordered list of cards; nothing below is a hand-mirrored
+    // copy of launcher.h, so a row moved between cards cannot drift from it.
     {
         namespace sl = leanlauncher::settings_layout;
-        // The 8-row Search card of v1.7.0 must lay out exactly as before.
-        Check(sl::AllObsidianHeaderTop(8) == 835.0f, "8 Search rows: All-view Obsidian header stays at 835");
-        Check(sl::AllObsidianCardTop(8) == 855.0f, "8 Search rows: All-view Obsidian card stays at 855");
-        Check(sl::SearchCategoryContentBottom(8) == 428.0f, "8 Search rows: Search tab content bottom stays at 428");
-        Check(sl::AllContentBottom(8, 1) == 918.0f, "8 Search rows + 1 Obsidian row: All content bottom stays at 918");
-        // Each added Search row moves everything below it by one row height.
-        Check(sl::AllObsidianHeaderTop(9) == 882.0f, "9 Search rows: Obsidian header moves down one row");
-        Check(sl::AllObsidianCardTop(9) == 902.0f, "9 Search rows: Obsidian card moves down one row");
-        Check(sl::SearchCategoryContentBottom(9) == 475.0f, "9 Search rows: Search tab grows one row");
-        Check(sl::AllSearchRowTop(0) == 441.0f && sl::AllSearchRowTop(8) == 817.0f,
-              "All-view Search row tops come from their rank");
-        Check(sl::CategoryRowTop(0) == 36.0f && sl::CategoryRowTop(8) == 412.0f,
-              "Single-tab row tops come from their rank");
-        constexpr int rows[] = {7, 8, 9, 47};
-        Check(sl::RowRank(rows, 7) == 0 && sl::RowRank(rows, 47) == 3, "RowRank finds a row's screen position");
-        Check(sl::RowRank(rows, 15) == -1, "RowRank returns -1 for a row not in the list");
+        struct Card {
+            const int* rows;
+            int count;
+        };
+        static constexpr int shortcuts[] = {0, 1, 2, 3};
+        static constexpr int startup[] = {4, 5};
+        static constexpr int sources[] = {7, 8, 9};
+        static constexpr int prefixes[] = {10, 11, 12};
+        static constexpr int exclusions[] = {13, 14};
+        static constexpr int results[] = {61, 60};
+        static constexpr Card general[] = {{shortcuts, 4}, {startup, 2}};
+        static constexpr Card search[] = {{sources, 3}, {prefixes, 3}, {exclusions, 2}, {results, 2}};
+
+        // The first card keeps the old single-tab geometry: header@16, card@36.
+        Check(sl::CardHeaderTop(general, 2, 0) == 16.0f && sl::CardTop(general, 2, 0) == 36.0f,
+            "first card header sits at 16 and its card at 36");
+        // A second card starts 18px below the first card and its card 20px below its header.
+        Check(sl::CardHeaderTop(general, 2, 1) == 242.0f && sl::CardTop(general, 2, 1) == 262.0f,
+            "second card follows the first with the shared header/card spacing");
+        Check(sl::ContentBottom(general, 2) == 372.0f, "General content bottom is 372");
+        Check(sl::ContentBottom(search, 4) == 636.0f, "Search content bottom is 636");
+        Check(sl::ContentBottom(general, 0) == 0.0f, "an empty tab has no content");
+
+        // Row lookup: card and rank inside it, -1 when absent.
+        const auto slot = sl::FindRow(search, 4, 13);
+        Check(slot.Found() && slot.card == 2 && slot.rank == 0, "FindRow locates the first row of a later card");
+        Check(sl::FindRow(search, 4, 60).rank == 1 && sl::FindRow(search, 4, 61).rank == 0,
+            "FindRow uses list order, not row number");
+        Check(!sl::FindRow(search, 4, 4).Found(), "FindRow reports a row from another tab as absent");
+        Check(sl::RowTop(general, 2, 4) == 262.0f && sl::RowTop(general, 2, 5) == 309.0f,
+            "RowTop places a row by its card and rank");
+        Check(sl::RowTop(search, 4, 13) == sl::CardTop(search, 4, 2), "RowTop of a card's first row is the card top");
+        Check(sl::RowTop(search, 4, 999) == 0.0f, "RowTop of an absent row is 0");
+
+        // Viewport: 482px window, 42px footer, 46px header leaves 394px. General
+        // fits without scrolling; Search overflows but its last row can still
+        // be scrolled fully into view.
+        constexpr float viewportHeight = 482.0f - 42.0f - 46.0f;
+        Check(sl::ContentBottom(general, 2) <= viewportHeight, "General fits the settings viewport");
+        constexpr float searchMaxScroll = 636.0f - viewportHeight;
+        const float lastRowBottom = sl::RowTop(search, 4, 60) + sl::kRowHeight;
+        Check(lastRowBottom - searchMaxScroll < viewportHeight, "the last Search row scrolls into view");
     }
 
     // --- Calculator Tests ---
@@ -4518,6 +4469,384 @@ int main() {
         text = pv::BuildTextPreview(raw, false);
         Check(text.truncated && text.body.size() == pv::kMaxPreviewBytes - 1 && text.body.back() == L'a',
             "a 64 KB cut mid-character stays UTF-8 and keeps the truncated flag");
+    }
+
+    // US-050: snippets file parser (pure logic in src/snippets.h)
+    {
+        namespace sn = leanlauncher::snippets;
+        {
+            const auto r = sn::ParseSnippets(
+                "matches:\n"
+                "  - trigger: \":sig\"\n"
+                "    label: \"Email signature\"\n"
+                "    replace: \"Best regards,\\nSascha\"\n"
+                "  - trigger: ':br'\n"
+                "    replace: 'Kind regards'\n"
+                "  - trigger: :plain\n"
+                "    replace: plain text # trailing comment\n");
+            Check(r.snippets.size() == 3 && r.warnings.empty(), "parser reads double-quoted, single-quoted and plain scalars");
+            Check(r.snippets[0].trigger == L":sig" && r.snippets[0].label == L"Email signature" &&
+                  r.snippets[0].replace == L"Best regards,\nSascha", "double-quoted escapes and label are decoded");
+            Check(r.snippets[2].replace == L"plain text", "a plain scalar drops a trailing comment");
+        }
+        {
+            const auto r = sn::ParseSnippets(
+                "matches:\n"
+                "  - trigger: \":addr\"\n"
+                "    replace: |\n"
+                "      Line one\n"
+                "        indented\n"
+                "\n"
+                "      Line three\n"
+                "  - trigger: \":fold\"\n"
+                "    replace: >-\n"
+                "      one\n"
+                "      two\n");
+            Check(r.snippets.size() == 2, "block scalars parse");
+            Check(r.snippets[0].replace == L"Line one\n  indented\n\nLine three\n", "a literal block keeps one trailing newline");
+            Check(r.snippets[1].replace == L"one two", "a folded block with strip joins lines with a space and has no trailing newline");
+        }
+        {   // Review focus 3: Windows-edited files
+            const auto r = sn::ParseSnippets(
+                "\xEF\xBB\xBF" "matches:\r\n  - trigger: \":crlf\"\r\n    replace: \"a\\tb\"\r\n");
+            Check(r.snippets.size() == 1 && r.snippets[0].replace == L"a\tb" && r.warnings.empty(),
+                  "a BOM and CRLF line endings are accepted");
+            Check(sn::ParseSnippets("").snippets.empty() && sn::ParseSnippets("").warnings.empty(), "an empty file is fine");
+            const auto bad = sn::ParseSnippets("matches:\n  - trigger: \":oops\n    replace: x\n");
+            Check(bad.snippets.empty() && bad.warnings.size() == 1 && bad.warnings[0].find(L"line 2") != std::wstring::npos,
+                  "an unterminated quote skips the item and names the line");
+            const auto tab = sn::ParseSnippets("matches:\n\t- trigger: \":tab\"\n\t  replace: x\n");
+            Check(tab.snippets.empty(), "tab-indented items are not parsed (no crash)");
+        }
+        {   // unsupported features are skipped with a warning, not silently expanded wrong
+            const auto r = sn::ParseSnippets(
+                "matches:\n"
+                "  - trigger: \":date\"\n"
+                "    replace: \"{{mytime}}\"\n"
+                "    vars:\n"
+                "      - name: mytime\n"
+                "        type: date\n"
+                "        params:\n"
+                "          format: \"%F\"\n"
+                "  - trigger: \":ok\"\n"
+                "    replace: fine\n"
+                "  - trigger: \"wrd\"\n"
+                "    replace: word\n"
+                "    word: true\n"
+                "  - triggers: [\":a\", \":b\"]\n"
+                "    replace: multi\n");
+            Check(r.snippets.size() == 1 && r.snippets[0].trigger == L":ok", "items using vars, word or triggers are skipped");
+            Check(r.warnings.size() == 3, "each skipped item produces one warning");
+            Check(r.warnings[0].find(L"line 2") != std::wstring::npos && r.warnings[0].find(L"vars") != std::wstring::npos,
+                  "the warning names the line and the unsupported key");
+        }
+        {   // top-level keys other than matches are ignored, even with nested lists
+            const auto r = sn::ParseSnippets(
+                "global_vars:\n"
+                "  - name: x\n"
+                "    type: echo\n"
+                "matches:\n"
+                "- trigger: \":zero\"\n"
+                "  replace: indent zero\n");
+            Check(r.snippets.size() == 1 && r.snippets[0].trigger == L":zero", "only the matches list is read, dashes may sit at column zero");
+        }
+        {   // trigger validation, duplicates
+            const auto r = sn::ParseSnippets(
+                "matches:\n"
+                "  - trigger: \"a\"\n    replace: short\n"
+                "  - trigger: \"has space\"\n    replace: space\n"
+                "  - trigger: \":dup\"\n    replace: first\n"
+                "  - trigger: \":dup\"\n    replace: second\n"
+                "  - trigger: \":noreplace\"\n"
+                "  - replace: notrigger\n");
+            Check(r.snippets.size() == 1 && r.snippets[0].replace == L"first", "the first of a duplicate trigger wins");
+            Check(r.warnings.size() == 5, "short, spaced, duplicate, no-replace and no-trigger items each warn");
+            Check(sn::TriggerProblem(L":ok") == nullptr && sn::TriggerProblem(L"a") != nullptr &&
+                  sn::TriggerProblem(std::wstring(33, L'x')) != nullptr && sn::TriggerProblem(L"a\tb") != nullptr,
+                  "TriggerProblem enforces 2-32 characters and no whitespace");
+            Check(sn::TriggerProblem(L"ab\xD83D\xDE00") != nullptr, "TriggerProblem rejects a non-BMP (surrogate pair) trigger");
+        }
+        {   // Review focus 4: non-BMP replacement text survives
+            const auto r = sn::ParseSnippets("matches:\n  - trigger: \":smile\"\n    replace: \"\xF0\x9F\x98\x80 ok\"\n");
+            Check(r.snippets.size() == 1 && r.snippets[0].replace.size() == 5 && r.snippets[0].replace[0] == 0xD83D,
+                  "an emoji in a replacement becomes a surrogate pair");
+            const auto u = sn::ParseSnippets("matches:\n  - trigger: \":uni\"\n    replace: \"caf\\u00e9\"\n");
+            Check(u.snippets.size() == 1 && u.snippets[0].replace == L"café", "a \\u escape is decoded");
+        }
+        {   // Review focus 5: multi-line plain scalars (must use | block)
+            const auto badMulti = sn::ParseSnippets(
+                "matches:\n"
+                "  - trigger: \":multi\"\n"
+                "    replace: first line\n"
+                "      more text\n");
+            Check(badMulti.snippets.empty() && badMulti.warnings.size() == 1, "multi-line plain scalar is skipped");
+            Check(badMulti.warnings[0].find(L"line 2") != std::wstring::npos && badMulti.warnings[0].find(L"| block") != std::wstring::npos,
+                  "the warning names the line and hints about | block");
+            const auto goodMulti = sn::ParseSnippets(
+                "matches:\n"
+                "  - trigger: \":multi\"\n"
+                "    replace: |\n"
+                "      first line\n"
+                "      more text\n");
+            Check(goodMulti.snippets.size() == 1 && goodMulti.snippets[0].replace == L"first line\nmore text\n",
+                  "the same text with | block loads successfully");
+        }
+        {   // Review focus 5: limits
+            std::string big = "matches:\n";
+            for (int i = 0; i < 5100; ++i) {
+                big += "  - trigger: \":t" + std::to_string(i) + "\"\n    replace: x\n";
+            }
+            const auto capped = sn::ParseSnippets(big);
+            Check(capped.snippets.size() == sn::kMaxSnippets, "at most 5,000 snippets are loaded");
+            Check(!capped.warnings.empty(), "going over the snippet cap warns");
+            const auto huge = sn::ParseSnippets("matches:\n  - trigger: \":huge\"\n    replace: \"" +
+                                                std::string(sn::kMaxReplaceChars + 1, 'y') + "\"\n");
+            Check(huge.snippets.empty() && huge.warnings.size() == 1, "a replacement over 64 KB is skipped");
+            const auto oversize = sn::ParseSnippets(std::string(sn::kMaxFileBytes + 1, ' '));
+            Check(oversize.snippets.empty() && oversize.warnings.size() == 1, "a file over 1 MB loads nothing and warns once");
+        }
+    }
+
+    // US-050: suffix index, search, serialize, merge
+    {
+        namespace sn = leanlauncher::snippets;
+        std::vector<sn::Snippet> list = {
+            {L":sig", L"Best regards", L"Email signature"},
+            {L":si", L"short", L""},
+            {L":addr", L"Street 1", L"Home address"},
+        };
+        const sn::SnippetIndex index(list);
+        Check(index.Size() == 3 && index.MaxTriggerLength() == 5, "the index knows its size and longest trigger");
+        Check(index.MatchSuffix(L"hello :sig") != nullptr && index.MatchSuffix(L"hello :sig")->replace == L"Best regards",
+              "a trigger typed after other text matches as a suffix");
+        Check(index.MatchSuffix(L":sig") != nullptr && index.MatchSuffix(L":sig")->trigger == L":sig",
+              "the longest matching suffix wins over a shorter trigger");
+        Check(index.MatchSuffix(L":si") != nullptr && index.MatchSuffix(L":si")->trigger == L":si", "a shorter trigger matches on its own");
+        Check(index.MatchSuffix(L":sigg") == nullptr && index.MatchSuffix(L"sig") == nullptr && index.MatchSuffix(L"") == nullptr,
+              "no match for a non-suffix, a partial trigger, or an empty buffer");
+        Check(sn::SnippetIndex(std::vector<sn::Snippet>{}).MatchSuffix(L":sig") == nullptr && sn::SnippetIndex(std::vector<sn::Snippet>{}).Empty(), "an empty index never matches");
+
+        const auto all = sn::SearchSnippets(list, L"");
+        Check(all.size() == 3 && all[0] == 0 && all[2] == 2, "an empty query lists snippets in file order");
+        const auto byLabel = sn::SearchSnippets(list, L"home");
+        Check(byLabel.size() == 1 && byLabel[0] == 2, "search matches the label");
+        const auto byTrigger = sn::SearchSnippets(list, L"sig");
+        Check(!byTrigger.empty() && byTrigger[0] == 0, "search matches the trigger, best first");
+        Check(sn::SearchSnippets(list, L"zzz").empty(), "search with no match is empty");
+
+        size_t back = 99;
+        Check(sn::IndexFromPath(sn::PathForIndex(7), back) && back == 7, "a result path round-trips its index");
+        Check(!sn::IndexFromPath(L"leanlauncher:command:lock", back) && !sn::IndexFromPath(L"leanlauncher:snippet:x", back),
+              "a foreign or non-numeric path is rejected");
+
+        const std::vector<sn::Snippet> tricky = {
+            {L":q", L"say \"hi\"\nnext\t\\ end", L"Quote"},
+            {L":emoji", L"\xD83D\xDE00 ok", L""},
+        };
+        const auto round = sn::ParseSnippets(sn::SerializeSnippets(tricky));
+        Check(round.warnings.empty() && round.snippets.size() == 2 && round.snippets[0].replace == tricky[0].replace &&
+              round.snippets[0].label == L"Quote" && round.snippets[1].replace == tricky[1].replace,
+              "serialize then parse returns the same snippets");
+        const std::vector<sn::Snippet> ctrl = {{L":ctl", std::wstring(L"a\x01") + L"b\x1f" + L"c", L""}};
+        const auto ctrlRound = sn::ParseSnippets(sn::SerializeSnippets(ctrl));
+        Check(ctrlRound.warnings.empty() && ctrlRound.snippets.size() == 1 && ctrlRound.snippets[0].replace == ctrl[0].replace,
+              "serialize then parse round-trips control characters in a replacement");
+        Check(sn::SearchSnippets(list, L"", 2).size() == 2 && sn::SearchSnippets(list, L"", 1).size() == 1,
+              "SearchSnippets honours the limit argument");
+
+        const auto merged = sn::MergeSnippets(list, {{L":sig", L"other", L""}, {L":new", L"n", L""}});
+        Check(merged.added == 1 && merged.duplicates == 1 && merged.merged.size() == 4 && merged.merged[0].replace == L"Best regards",
+              "merge adds new triggers and keeps the existing snippet on a duplicate");
+    }
+
+    // US-050: key buffer, modifier rules, insert planning, path validation
+    {
+        namespace sn = leanlauncher::snippets;
+        sn::KeyBuffer buffer;
+        buffer.SetCapacity(4);
+        buffer.Append(L"ab");
+        buffer.Append(L"cde");
+        Check(buffer.View() == L"bcde", "the buffer keeps only the last `capacity` characters");
+        buffer.Backspace();
+        Check(buffer.View() == L"bcd", "Backspace removes the last character");
+        buffer.Backspace(); buffer.Backspace(); buffer.Backspace(); buffer.Backspace();
+        Check(buffer.View().empty(), "Backspace on an empty buffer is harmless");
+        buffer.Append(L":si");
+        buffer.Backspace();
+        buffer.Append(L"ig");
+        Check(buffer.View() == L":sig", "a corrected trigger is matched as typed (review focus 2)");
+        buffer.Clear();
+        Check(buffer.View().empty(), "Clear empties the buffer");
+        {
+            sn::KeyBuffer wipe;
+            wipe.SetCapacity(4);
+            wipe.Append(L"abcd");
+            wipe.Append(L"efg");  // trims from the front: stale characters may linger past size()
+            wipe.Clear();
+            wipe.Append(L"x");
+            bool tailZero = wipe.StorageCapacityForTest() >= 4;
+            for (size_t i = 1; i < wipe.StorageCapacityForTest(); ++i) tailZero = tailZero && wipe.RawForTest()[i] == 0;
+            Check(tailZero, "Clear zeroes the whole storage, not just the used part");
+        }
+        sn::KeyBuffer zero;
+        zero.SetCapacity(0);
+        zero.Append(L"abc");
+        Check(zero.View().empty(), "a zero-capacity buffer stores nothing");
+
+        Check(sn::ClassifyModifiers(false, false, false) == sn::ModifierAction::Type, "no modifier types");
+        Check(sn::ClassifyModifiers(true, true, false) == sn::ModifierAction::Type, "Ctrl+Alt (AltGr) types (review focus 1)");
+        Check(sn::ClassifyModifiers(true, false, false) == sn::ModifierAction::Reset, "Ctrl alone resets");
+        Check(sn::ClassifyModifiers(false, true, false) == sn::ModifierAction::Reset, "Alt alone resets");
+        Check(sn::ClassifyModifiers(false, false, true) == sn::ModifierAction::Reset &&
+              sn::ClassifyModifiers(true, true, true) == sn::ModifierAction::Reset, "the Windows key resets, even with AltGr");
+
+        Check(sn::IsResetKey(0x0D) && sn::IsResetKey(0x09) && sn::IsResetKey(0x1B) && sn::IsResetKey(0x25) &&
+              sn::IsResetKey(0x28) && sn::IsResetKey(0x24) && sn::IsResetKey(0x23) && sn::IsResetKey(0x2E),
+              "Enter, Tab, Escape, arrows, Home, End and Delete clear the buffer");
+        Check(!sn::IsResetKey('A') && !sn::IsResetKey(0x08) && !sn::IsResetKey(0x20), "letters, Backspace and Space do not reset");
+        Check(sn::IsModifierVk(0x10) && sn::IsModifierVk(0xA1) && sn::IsModifierVk(0x5B) && sn::IsModifierVk(0x14) &&
+              !sn::IsModifierVk('A'), "modifier and lock keys are recognised");
+
+        Check(sn::PlanInsert(L"short single line") == sn::InsertMode::Keystrokes, "short single-line text is typed");
+        Check(sn::PlanInsert(std::wstring(100, L'x')) == sn::InsertMode::Keystrokes, "exactly 100 units is still typed");
+        Check(sn::PlanInsert(std::wstring(101, L'x')) == sn::InsertMode::Clipboard, "101 units is pasted");
+        Check(sn::PlanInsert(L"two\nlines") == sn::InsertMode::Clipboard && sn::PlanInsert(L"cr\rhere") == sn::InsertMode::Clipboard,
+              "any line break forces a paste");
+        Check(sn::PlanInsert(L"") == sn::InsertMode::Keystrokes, "an empty replacement is a (no-op) keystroke insert");
+
+        Check(sn::ToClipboardText(L"a\nb") == L"a\r\nb", "a lone newline becomes CRLF (review focus 4)");
+        Check(sn::ToClipboardText(L"a\r\nb") == L"a\r\nb", "an existing CRLF is not doubled");
+        Check(sn::ToClipboardText(L"a\n\nb\n") == L"a\r\n\r\nb\r\n", "consecutive and trailing newlines are converted");
+        Check(sn::ToClipboardText(L"no breaks") == L"no breaks", "text without breaks is unchanged");
+
+        Check(sn::SnippetsPathProblem(L"") == nullptr, "an empty path means the default");
+        Check(sn::SnippetsPathProblem(L"C:\\Users\\me\\snippets.yml") == nullptr &&
+              sn::SnippetsPathProblem(L"D:/x/My.YAML") == nullptr, "a full .yml or .yaml path is accepted");
+        Check(sn::SnippetsPathProblem(L"snippets.yml") != nullptr, "a relative path is rejected");
+        Check(sn::SnippetsPathProblem(L"\\\\server\\share\\s.yml") != nullptr, "a UNC path is rejected (NFR-009)");
+        Check(sn::SnippetsPathProblem(L"C:\\x\\notes.txt") != nullptr, "a non-YAML extension is rejected");
+        Check(sn::SnippetsPathProblem(L"C:\\x\\..\\y\\s.yml") != nullptr, "a path with .. is rejected");
+    }
+
+    // US-050: snippet settings
+    {
+        namespace io = leanlauncher::settings_io;
+        const takeoff::Settings defaults;
+        Check(!defaults.enableSnippets, "snippets are off by default");
+        Check(defaults.snippetsPrefix == L"," && defaults.snippetsPath.empty(), "the default prefix is a comma and the path is empty");
+        Check(io::detail::PrefixConflict(defaults) == nullptr, "the default snippets prefix does not collide with another prefix");
+
+        takeoff::Settings defaultsOn = defaults;
+        defaultsOn.enableSnippets = true;
+        Check(io::detail::PrefixConflict(defaultsOn) == nullptr, "with snippets on, the default comma prefix does not collide with another prefix");
+        takeoff::Settings taken = defaults;
+        taken.enableSnippets = true;
+        taken.snippetsPrefix = taken.taskPrefix;
+        Check(io::detail::PrefixConflict(taken) != nullptr, "with snippets on, a snippets prefix that equals another prefix is a conflict");
+
+        takeoff::Settings off = defaults;
+        off.taskPrefix = L"x";
+        off.snippetsPrefix = L"x";
+        Check(io::detail::PrefixConflict(off) == nullptr, "with snippets off, another prefix saved as x is not a conflict");
+        Check(io::CheckTextSetting(off, &takeoff::Settings::webSearchPrefix, L"ww").error == nullptr,
+              "with snippets off, editing another prefix is not blocked by the snippets default");
+        takeoff::Settings onX = off;
+        onX.enableSnippets = true;
+        Check(io::detail::PrefixConflict(onX) != nullptr, "with snippets on, a task prefix of x collides with the snippets prefix x");
+        const auto importX = io::ParseImport(
+            R"({"format":"lean-launcher-settings","schemaVersion":1,"settings":{"TaskPrefix":"x"}})", defaults);
+        Check(importX.ok && importX.settings.taskPrefix == L"x" && importX.skipped.empty(),
+              "importing a task prefix of x is accepted while snippets are off");
+
+        takeoff::Settings snipOn = defaults;
+        snipOn.enableSnippets = true;
+        Check(io::CheckTextSetting(snipOn, &takeoff::Settings::snippetsPrefix, L"zz").error == nullptr &&
+              io::CheckTextSetting(snipOn, &takeoff::Settings::snippetsPrefix, L"").error != nullptr,
+              "the snippets prefix uses the shared prefix check");
+        Check(io::CheckTextSetting(defaults, &takeoff::Settings::snippetsPath, L"C:\\Users\\me\\snippets.yml").error == nullptr &&
+              io::CheckTextSetting(defaults, &takeoff::Settings::snippetsPath, L"\\\\server\\share\\s.yml").error != nullptr &&
+              io::CheckTextSetting(defaults, &takeoff::Settings::snippetsPath, L"").error == nullptr,
+              "the snippets path uses the shared path check");
+
+        takeoff::Settings on = defaults;
+        on.enableSnippets = true;
+        on.snippetsPrefix = L"sn";
+        on.snippetsPath = L"D:\\notes\\snips.yml";
+        const std::string exported = io::ExportJson(on, {}, {}, L"1.10.0");
+        Check(exported.find("SnippetsEnabled") == std::string::npos,
+              "the snippets toggle is never exported (an import must not switch on a keyboard hook)");
+        const auto imported = io::ParseImport(exported, defaults);
+        Check(!imported.settings.enableSnippets, "importing never turns snippets on");
+        Check(imported.settings.snippetsPrefix == L"sn" && imported.settings.snippetsPath == L"D:\\notes\\snips.yml",
+              "the prefix and path round-trip through export and import");
+    }
+
+    // US-050: Espanso import confirmation text, filters and limits
+    {
+        namespace sn = leanlauncher::snippets;
+        const std::wstring text = sn::EspansoImportPrompt(3, 2, 1, 0, L"snippets-before-import-20260929-101500.yml", false);
+        Check(text.find(L"Add 3 snippets from Espanso (2 already exist, 1 entry skipped)?") == 0,
+              "the import prompt states added, existing and skipped counts with correct grammar");
+        Check(text.find(L"snippets-before-import-20260929-101500.yml") != std::wstring::npos &&
+              text.find(L"comments in it are lost") != std::wstring::npos,
+              "the import prompt names the backup file and warns that comments are lost");
+        Check(text.find(L"can't read") == std::wstring::npos && text.find(L"Import limit reached") == std::wstring::npos,
+              "the import prompt has no unreadable-entry or limit note when there is nothing to report");
+        Check(sn::EspansoImportPrompt(1, 0, 2, 0, L"b.yml", false).find(L"Add 1 snippet from Espanso (0 already exist, 2 entries skipped)?") == 0,
+              "the import prompt uses the singular for one snippet and the plural for entries");
+        const std::wstring warned = sn::EspansoImportPrompt(1, 0, 0, 3, L"b.yml", false);
+        Check(warned.find(L"3 entries in your file that Lean Launcher can't read") != std::wstring::npos &&
+              warned.find(L"will be removed.") != std::wstring::npos,
+              "the import prompt warns about unreadable entries in the current file");
+        Check(sn::EspansoImportPrompt(1, 0, 0, 1, L"b.yml", false).find(L"1 entry in your file that Lean Launcher can't read") != std::wstring::npos,
+              "the unreadable-entry warning uses the singular for one entry");
+        const std::wstring noFile = sn::EspansoImportPrompt(2, 0, 0, 0, L"", false);
+        Check(noFile.find(L"backup") == std::wstring::npos && noFile.find(L"saved first") == std::wstring::npos &&
+              noFile.find(L"comments") == std::wstring::npos,
+              "with no existing file the import prompt does not mention a backup");
+        Check(sn::EspansoImportPrompt(2, 0, 0, 0, L"b.yml", true).find(L"Import limit reached") != std::wstring::npos,
+              "the import prompt notes when the import limit was reached");
+
+        Check(sn::LooksLikeEspansoVariable(L"Today is {{mydate}}") && sn::LooksLikeEspansoVariable(L"Hello $|$ world"),
+              "a variable placeholder or a cursor hint marks an Espanso match as unsupported");
+        Check(!sn::LooksLikeEspansoVariable(L"plain text") && !sn::LooksLikeEspansoVariable(L"{{ only open") &&
+              !sn::LooksLikeEspansoVariable(L"only close }} {{") && !sn::LooksLikeEspansoVariable(L"json { \"a\": 1 }"),
+              "plain text and unmatched braces are not treated as variables");
+
+        Check(sn::BackupName(2026, 9, 29, 8, 5, 3) == L"snippets-before-import-20260929-080503.yml",
+              "the backup name is a zero-padded local timestamp");
+        Check(sn::BackupName(2026, 9, 29, 8, 5, 3, 1) == sn::BackupName(2026, 9, 29, 8, 5, 3) &&
+              sn::BackupName(2026, 12, 31, 23, 59, 59, 2) == L"snippets-before-import-20261231-235959-2.yml" &&
+              sn::BackupName(2026, 12, 31, 23, 59, 59, 3) == L"snippets-before-import-20261231-235959-3.yml",
+              "a taken backup name gets a -2, -3 suffix before the extension");
+
+        Check(sn::ImportWithinLimits(sn::kMaxFileBytes, sn::kMaxSnippets) &&
+              !sn::ImportWithinLimits(sn::kMaxFileBytes + 1, 10) && !sn::ImportWithinLimits(100, sn::kMaxSnippets + 1),
+              "the import limits match what the loader accepts (size and count)");
+
+        // Fix round 2: file classification and the merge overflow count
+        namespace fs = std::filesystem;
+        Check(sn::ClassifyFileStatus({}, fs::file_type::regular) == sn::FileState::Present &&
+              sn::ClassifyFileStatus({}, fs::file_type::directory) == sn::FileState::Present,
+              "an existing path is classified as present");
+        Check(sn::ClassifyFileStatus({}, fs::file_type::not_found) == sn::FileState::Missing &&
+              sn::ClassifyFileStatus(std::make_error_code(std::errc::no_such_file_or_directory), fs::file_type::not_found) == sn::FileState::Missing,
+              "a genuine not-found is classified as missing, with or without an error code");
+        Check(sn::ClassifyFileStatus(std::make_error_code(std::errc::permission_denied), fs::file_type::none) == sn::FileState::Error &&
+              sn::ClassifyFileStatus(std::make_error_code(std::errc::io_error), fs::file_type::none) == sn::FileState::Error &&
+              sn::ClassifyFileStatus({}, fs::file_type::none) == sn::FileState::Error,
+              "an access error or an unknown status is an error, never treated as missing");
+
+        std::vector<sn::Snippet> nearCap;
+        for (size_t n = 0; n + 1 < sn::kMaxSnippets; ++n) nearCap.push_back({L"t" + std::to_wstring(n), L"r", L""});
+        const auto capped = sn::MergeSnippets(nearCap, {{L"n1", L"x", L""}, {L"n2", L"x", L""}, {L"n3", L"x", L""}});
+        Check(capped.added == 1 && capped.overflow == 2 && capped.duplicates == 0 && capped.merged.size() == sn::kMaxSnippets,
+              "new snippets beyond the cap are counted as overflow, not added");
+        auto atCap = nearCap;
+        atCap.push_back({L"last", L"r", L""});
+        const auto dupAtCap = sn::MergeSnippets(atCap, {{L"t1", L"y", L""}, {L"last", L"y", L""}});
+        Check(dupAtCap.added == 0 && dupAtCap.overflow == 0 && dupAtCap.duplicates == 2,
+              "duplicates at the cap are duplicates, not overflow");
     }
 
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";

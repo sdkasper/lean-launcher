@@ -84,6 +84,8 @@
     <ClInclude Include="src\update_apply.h" />
     <ClInclude Include="src\calculator.h" />
     <ClInclude Include="src\preview.h" />
+    <ClInclude Include="src\snippets.h" />
+    <ClInclude Include="src\expander.h" />
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="src\LeanLauncher.manifest" />

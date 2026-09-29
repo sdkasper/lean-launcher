@@ -4,6 +4,7 @@
 #include "search.h"
 #include "obsidian_config.h"
 #include "daily_note.h"
+#include "snippets.h"
 
 #include <cstdlib>
 #include <cstdint>
@@ -58,7 +59,7 @@ namespace detail {
 using takeoff::HotkeyBinding;
 using takeoff::Settings;
 
-enum class TextKind { Plain, Prefix, TargetNote, WebTemplate, Minutes };
+enum class TextKind { Plain, Prefix, TargetNote, WebTemplate, Minutes, SnippetsFile };
 
 struct BoolField { const char* key; bool Settings::*member; };
 struct TextField { const char* key; std::wstring Settings::*member; TextKind kind; };
@@ -88,6 +89,7 @@ inline constexpr BoolField kBools[] = {
     // PreviewOpen is window state (whether the panel is currently expanded),
     // not a preference - like RunAtStartup, it's never exported or imported.
     // Its registry load/save stays in launcher.h's LoadSettings/SaveSettings.
+    // SnippetsEnabled (US-050) is likewise never exported or imported: a settings file must not switch on a keyboard hook. Its registry load/save stays in launcher.h.
     {"ObsidianEnabled", &Settings::obsidianEnabled},
     {"VaultSearchEnabled", &Settings::vaultSearchEnabled},
     {"TaskAddEnabled", &Settings::taskAddEnabled},
@@ -123,6 +125,8 @@ inline constexpr TextField kTexts[] = {
     {"PomodoroPrefix", &Settings::pomodoroPrefix, TextKind::Prefix},
     {"PomodoroFocusMinutes", &Settings::pomodoroFocusMinutes, TextKind::Minutes},
     {"PomodoroBreakMinutes", &Settings::pomodoroBreakMinutes, TextKind::Minutes},
+    {"SnippetsPrefix", &Settings::snippetsPrefix, TextKind::Prefix},
+    {"SnippetsPath", &Settings::snippetsPath, TextKind::SnippetsFile},
 };
 
 // ---- JSON writing -----------------------------------------------------------
@@ -392,10 +396,13 @@ inline bool IsMinutes(const std::wstring& text) {
     return value >= 1 && value <= 180;
 }
 
+// The snippets prefix only counts while the feature is on, so its default cannot block another prefix saved with the same value.
 inline std::vector<std::wstring> Prefixes(const Settings& s) {
     std::vector<std::wstring> out;
     for (const auto& f : kTexts) {
-        if (f.kind == TextKind::Prefix) out.push_back(s.*(f.member));
+        if (f.kind != TextKind::Prefix) continue;
+        if (f.member == &Settings::snippetsPrefix && !s.enableSnippets) continue;
+        out.push_back(s.*(f.member));
     }
     return out;
 }
@@ -459,6 +466,9 @@ inline TextCheck CheckTextSetting(const takeoff::Settings& current, std::wstring
         break;
     case TextKind::WebTemplate:
         result.error = takeoff::FindWebSearchUrlError(proposed);
+        break;
+    case TextKind::SnippetsFile:
+        result.error = leanlauncher::snippets::SnippetsPathProblem(proposed);
         break;
     case TextKind::Plain:
         break;
