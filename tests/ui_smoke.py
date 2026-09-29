@@ -147,6 +147,45 @@ try:
 
     type_text("cal")
     capture("02-results.png")
+
+    # US-045 preview panel: Ctrl+P widens the window, the state survives a
+    # hide/show, and Ctrl+P again restores the launcher width. The app reads
+    # Ctrl through GetKeyState, so hold the real key around the message.
+    def ctrl_key(code):
+        u.keybd_event(0x11, 0, 0, 0)
+        pump(0.1)
+        key(code)
+        u.keybd_event(0x11, 0, 2, 0)
+        pump(0.1)
+
+    def window_width():
+        r = W.RECT()
+        u.GetWindowRect(hwnd, C.byref(r))
+        return r.right - r.left, r
+
+    width_before, _ = window_width()
+    ctrl_key(0x50)  # Ctrl+P
+    width_after, wide_rect = window_width()
+    check(width_after > width_before, "Ctrl+P widens the window for the preview panel")
+    narrow_bounds = bounds
+    bounds = (wide_rect.left, wide_rect.top, wide_rect.right, wide_rect.bottom)
+    capture("05-preview-open.png")
+    u.SendMessageW(hwnd, 0x312, 1, 0)  # WM_HOTKEY: hide
+    pump(0.2)
+    check(not u.IsWindowVisible(hwnd), "launcher hotkey hides with the panel open")
+    u.SendMessageW(hwnd, 0x312, 1, 0)  # WM_HOTKEY: show again
+    pump(0.3)
+    reopened_width, _ = window_width()
+    check(reopened_width == width_after, "preview panel stays open after hide and reopen")
+    u.keybd_event(0x12, 0, 0, 0)
+    u.keybd_event(0x12, 0, 2, 0)
+    u.SetForegroundWindow(hwnd)
+    pump(0.3)
+    ctrl_key(0x50)  # Ctrl+P again
+    width_closed, _ = window_width()
+    check(width_closed == width_before, "Ctrl+P again returns the window to the launcher width")
+    bounds = narrow_bounds
+    type_text("cal")  # reopening cleared the query
     check(query() == "cal", "typing updates search")
     before = capture()
     key(0x28)

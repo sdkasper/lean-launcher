@@ -60,6 +60,10 @@ struct Settings {
     std::wstring pomodoroPrefix = L"pomo";
     std::wstring pomodoroFocusMinutes = L"25";
     std::wstring pomodoroBreakMinutes = L"5";
+    // US-045: preview panel. On by default, closed until Ctrl+P; open/closed is remembered.
+    bool enablePreview = true;
+    bool previewOpen = false;
+    HotkeyBinding previewHotkey{kModControl, 'P'};
     // Default matches the Google preset in search.h's kWebSearchPresets -
     // existing installs with no saved value get identical behavior to
     // before this setting existed (AC: no behavior change for anyone who
@@ -245,6 +249,8 @@ inline const wchar_t* HasInternalConflict(int targetRow, const HotkeyBinding& pr
         if (!settings.quickLaunchHotkey.disabled && proposed.key >= '1' && proposed.key <= '8' &&
             proposed.modifiers == settings.quickLaunchHotkey.modifiers)
             return L"Conflicts with Quick launch shortcut.";
+        if (!settings.previewHotkey.disabled && proposed == settings.previewHotkey)
+            return L"Conflicts with Preview panel shortcut.";
     } else if (targetRow == 1) {
         if (!settings.launcherHotkey.disabled && proposed == settings.launcherHotkey)
             return L"Conflicts with Open Lean Launcher shortcut.";
@@ -254,6 +260,8 @@ inline const wchar_t* HasInternalConflict(int targetRow, const HotkeyBinding& pr
         if (!settings.quickLaunchHotkey.disabled && proposed.key >= '1' && proposed.key <= '8' &&
             proposed.modifiers == settings.quickLaunchHotkey.modifiers)
             return L"Conflicts with Quick launch shortcut.";
+        if (!settings.previewHotkey.disabled && proposed == settings.previewHotkey)
+            return L"Conflicts with Preview panel shortcut.";
     } else if (targetRow == 2) {
         if (!settings.launcherHotkey.disabled && settings.launcherHotkey.key == kVkReturn &&
             proposed.modifiers == settings.launcherHotkey.modifiers)
@@ -261,6 +269,9 @@ inline const wchar_t* HasInternalConflict(int targetRow, const HotkeyBinding& pr
         if (!settings.actionsHotkey.disabled && settings.actionsHotkey.key == kVkReturn &&
             proposed.modifiers == settings.actionsHotkey.modifiers)
             return L"Conflicts with Actions menu shortcut.";
+        if (!settings.previewHotkey.disabled && settings.previewHotkey.key == kVkReturn &&
+            proposed.modifiers == settings.previewHotkey.modifiers)
+            return L"Conflicts with Preview panel shortcut.";
     } else if (targetRow == 3) {
         if (!settings.launcherHotkey.disabled && settings.launcherHotkey.key >= '1' &&
             settings.launcherHotkey.key <= '8' && proposed.modifiers == settings.launcherHotkey.modifiers)
@@ -268,6 +279,20 @@ inline const wchar_t* HasInternalConflict(int targetRow, const HotkeyBinding& pr
         if (!settings.actionsHotkey.disabled && settings.actionsHotkey.key >= '1' &&
             settings.actionsHotkey.key <= '8' && proposed.modifiers == settings.actionsHotkey.modifiers)
             return L"Conflicts with Actions menu shortcut.";
+        if (!settings.previewHotkey.disabled && settings.previewHotkey.key >= '1' &&
+            settings.previewHotkey.key <= '8' && proposed.modifiers == settings.previewHotkey.modifiers)
+            return L"Conflicts with Preview panel shortcut.";
+    } else if (targetRow == 4) {
+        if (!settings.launcherHotkey.disabled && proposed == settings.launcherHotkey)
+            return L"Conflicts with Open Lean Launcher shortcut.";
+        if (!settings.actionsHotkey.disabled && proposed == settings.actionsHotkey)
+            return L"Conflicts with Actions menu shortcut.";
+        if (!settings.administratorHotkey.disabled && proposed.key == kVkReturn &&
+            proposed.modifiers == settings.administratorHotkey.modifiers)
+            return L"Conflicts with Open as administrator shortcut.";
+        if (!settings.quickLaunchHotkey.disabled && proposed.key >= '1' && proposed.key <= '8' &&
+            proposed.modifiers == settings.quickLaunchHotkey.modifiers)
+            return L"Conflicts with Quick launch shortcut.";
     }
     return nullptr;
 }

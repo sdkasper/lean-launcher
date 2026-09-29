@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(LeanLauncher VERSION 1.8.0 LANGUAGES CXX)
+project(LeanLauncher VERSION 1.9.0 LANGUAGES CXX)
 
 function(add_launcher target)
 add_executable(${target} WIN32
@@ -21,6 +21,7 @@ add_executable(${target} WIN32
     src/converter.h
     src/timezones.h
     src/pomodoro.h
+    src/preview.h
     src/LeanLauncher.manifest
     src/LeanLauncher.rc
 )
@@ -42,6 +43,7 @@ target_link_libraries(${target} PRIVATE
     advapi32
     winhttp
     powrprof
+    version
 )
 
 set_target_properties(${target} PROPERTIES

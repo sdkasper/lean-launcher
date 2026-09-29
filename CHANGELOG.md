@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [1.9.0] - 2026-09-29
+
+### Added
+- **Preview panel** - press `Ctrl+P` to show the selected note, text file, folder, or image beside the results, read straight from disk - Obsidian is never started, and nothing is written to disk. Notes show a compact property line (tags, created) and light formatting: larger bold headings, bullets, ☐/☑ checkboxes, bold/italic, and `[[links]]`/`#tags` in the accent colour; any `.md` file is shown this way, even a loose file outside the vault. Text and code files on the allow-list show as plain monospaced text, and a folder lists its first 20 items. Loading starts 80 ms after the selection settles and reads at most 64 KB on a background thread; the panel shows the start of the file, with a "Preview shows the start of the file" notice whenever the shown text is cut. Images (`.png .jpg .jpeg .gif .bmp .webp`) show a thumbnail from the Windows thumbnail cache, plus the file name, dimensions, and size below it. A long file path wraps onto up to three lines under the title instead of being cut off. Online-only OneDrive or Dropbox files show "Not downloaded - open to download" and are never downloaded. Scroll the panel with the mouse wheel or Shift+PgUp/PgDn; plain PgUp/PgDn still move through the results. The window grows from 750 to about 1,170 px to fit the 420 px panel, or falls back to an overlay over the results on a narrow screen. Whether the panel is open is remembered between launches, but that state isn't included in a settings export. The "Preview panel" toggle and its shortcut (default `Ctrl+P`, configurable and conflict-checked like `Ctrl+K`) are in Settings > Search; turning the toggle off, or hiding the launcher, frees the preview worker, buffers, layouts, and thumbnail bitmaps.
+
 ## [1.8.0] - 2026-09-24
 
 ### Added

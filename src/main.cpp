@@ -44,6 +44,7 @@
 #include "converter.h"
 #include "timezones.h"
 #include "pomodoro.h"
+#include "preview.h"
 
 namespace fs = std::filesystem;
 using Microsoft::WRL::ComPtr;
@@ -86,6 +87,8 @@ constexpr UINT kUpdateProgressMessage = WM_APP + 12;
 constexpr UINT kRecycleBinInfoMessage = WM_APP + 13;
 // Path worker -> UI: a folder listing for path completion (US-043); lParam owns a PathListing.
 constexpr UINT kPathListingMessage = WM_APP + 14;
+// Preview worker -> UI: a built preview (US-045); lParam owns a PreviewContent.
+constexpr UINT kPreviewReadyMessage = WM_APP + 15;
 constexpr UINT_PTR kCaretTimer = 1;
 constexpr UINT_PTR kHotkeyTimer = 2;
 constexpr UINT_PTR kRenderRetryTimer = 3;
@@ -98,6 +101,8 @@ constexpr UINT_PTR kPathTimeoutTimer = 7;
 // Pomodoro (US-049): a coarse 30 s refresh plus a one-shot at the exact end.
 constexpr UINT_PTR kPomodoroTickTimer = 8;
 constexpr UINT_PTR kPomodoroEndTimer = 9;
+// Starts a preview load 80 ms after the selection stops changing (US-045).
+constexpr UINT_PTR kPreviewDebounceTimer = 10;
 
 struct AppEntry {
     std::wstring name;

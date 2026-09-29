@@ -14,7 +14,8 @@ public:
         if (!CreateFormat(19.0f, DWRITE_FONT_WEIGHT_NORMAL, searchFormat_) ||
             !CreateFormat(14.0f, DWRITE_FONT_WEIGHT_MEDIUM, resultFormat_) ||
             !CreateFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, hintFormat_) ||
-            !CreateFormat(22.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, calcResultFormat_)) return false;
+            !CreateFormat(22.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, calcResultFormat_) ||
+            !CreateFormat(12.5f, DWRITE_FONT_WEIGHT_NORMAL, previewMonoFormat_, L"Consolas")) return false;
 
         WNDCLASSEXW windowClass{sizeof(windowClass)};
         windowClass.style = CS_DBLCLKS;
@@ -297,6 +298,17 @@ private:
             }
             return 0;
         }
+        case kPreviewReadyMessage: {
+            // US-045: only the latest request's result is shown; anything
+            // older (the selection moved on, the launcher hid, the panel
+            // closed or the toggle went off) is freed right here.
+            std::unique_ptr<PreviewContent> content(reinterpret_cast<PreviewContent*>(lParam));
+            if (previewThreadsRunning_ > 0) --previewThreadsRunning_;
+            if (content && previewGate_.IsCurrent(content->generation) && PreviewVisible()) {
+                ShowPreviewContent(std::move(content));
+            }
+            return 0;
+        }
         case kRecycleBinInfoMessage:
             // US-041: count and size for the Empty Recycle Bin row (x64: both fit).
             recycleBinQueryPending_ = false;
@@ -341,6 +353,9 @@ private:
                     pathTimedOut_ = true;
                     UpdateResults();
                 }
+            } else if (wParam == kPreviewDebounceTimer) {
+                KillTimer(hwnd_, kPreviewDebounceTimer);
+                RequestPreview();
             } else if (wParam == kCommandConfirmTimer) {
                 KillTimer(hwnd_, kCommandConfirmTimer);
                 commandGate_.Cancel();
@@ -470,8 +485,16 @@ private:
             hoverLockRow_ = -1;
             adminActionHovered_ = false;
             return 0;
-        case WM_MOUSEWHEEL:
-            if (page_ == Page::Launcher && !actionsOpen_ && !results_.empty()) {
+        case WM_MOUSEWHEEL: {
+            POINT wheelPoint{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};  // screen coordinates
+            ScreenToClient(hwnd_, &wheelPoint);
+            if (page_ == Page::Launcher && !actionsOpen_ && PointInPreview(ToDip(wheelPoint.x), ToDip(wheelPoint.y))) {
+                // US-045: the wheel over the panel scrolls it, never the results.
+                wheelDelta_ += GET_WHEEL_DELTA_WPARAM(wParam);
+                const int steps = wheelDelta_ / WHEEL_DELTA;
+                wheelDelta_ %= WHEEL_DELTA;
+                ScrollPreview(-static_cast<float>(steps) * 48.0f);
+            } else if (page_ == Page::Launcher && !actionsOpen_ && !results_.empty()) {
                 wheelDelta_ += GET_WHEEL_DELTA_WPARAM(wParam);
                 const int steps = wheelDelta_ / WHEEL_DELTA;
                 wheelDelta_ %= WHEEL_DELTA;
@@ -484,6 +507,7 @@ private:
                 ScrollSettings(-static_cast<float>(delta) / static_cast<float>(WHEEL_DELTA) * 36.0f);
             }
             return 0;
+        }
         case WM_SETCURSOR:
             if (LOWORD(lParam) == HTCLIENT) {
                 POINT point{};
@@ -497,8 +521,8 @@ private:
                 }
                 const bool text = page_ == Page::Launcher && !actionsOpen_ &&
                     y < kSearchHeight && x >= kTextLeft && x < width_ - 86;
-                const bool button = page_ == Page::Settings ||
-                    ResultAtPoint(x, y) >= 0 || y >= FooterTop() || x > width_ - 84;
+                const bool button = page_ == Page::Settings || (!PointInPreview(x, y) &&
+                    (ResultAtPoint(x, y) >= 0 || y >= FooterTop() || x > width_ - 84));
                 SetCursor(LoadCursorW(nullptr, text ? IDC_IBEAM : button ? IDC_HAND : IDC_ARROW));
                 return TRUE;
             }
@@ -571,6 +595,7 @@ private:
             KillTimer(hwnd_, kHotkeyTimer);
             KillTimer(hwnd_, kRenderRetryTimer);
             KillTimer(hwnd_, kTrimTimer);
+            ClosePreview(true);  // a load still in flight posts to a dead window and frees its own result
             if (hotkeyRegistered_) UnregisterHotKey(hwnd_, kHotkeyId);
             RemoveTrayIcon();
             PostQuitMessage(0);
@@ -673,6 +698,16 @@ private:
                 settings_.enableTimeZones = ReadDword(key, L"TimeZonesEnabled", 1) != 0;
                 settings_.enablePomodoro = ReadDword(key, L"PomodoroEnabled", 1) != 0;
                 settings_.pomodoroLog = ReadDword(key, L"PomodoroLog", 1) != 0;
+                // US-045: preview panel. No old-format migration needed - this
+                // setting didn't exist before SettingsVersion 2, so it's read
+                // unconditionally here rather than inside the version-gated
+                // hotkey migration block above.
+                settings_.enablePreview = ReadDword(key, L"PreviewEnabled", 1) != 0;
+                settings_.previewOpen = ReadDword(key, L"PreviewOpen", 0) != 0;
+                settings_.previewHotkey.modifiers =
+                    static_cast<uint16_t>(ReadDword(key, L"PreviewMod", quicklaunch::kModControl));
+                settings_.previewHotkey.key = static_cast<uint16_t>(ReadDword(key, L"PreviewKey", 'P'));
+                settings_.previewHotkey.disabled = ReadDword(key, L"PreviewOff", 0) != 0;
                 settings_.runAtStartup = ReadDword(key, L"RunAtStartup", 0) != 0;
                 settings_.vaultSearchEnabled = ReadDword(key, L"VaultSearchEnabled", 1) != 0;
                 settings_.taskAddEnabled = ReadDword(key, L"TaskAddEnabled", 1) != 0;
@@ -912,6 +947,7 @@ private:
                     break;
                 }
             }
+            SchedulePreview();
         }
         ResetCaret();
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -991,6 +1027,11 @@ private:
                 {L"TimeZonesEnabled", settings_.enableTimeZones ? 1u : 0u},
                 {L"PomodoroEnabled", settings_.enablePomodoro ? 1u : 0u},
                 {L"PomodoroLog", settings_.pomodoroLog ? 1u : 0u},
+                {L"PreviewEnabled", settings_.enablePreview ? 1u : 0u},
+                {L"PreviewOpen", settings_.previewOpen ? 1u : 0u},
+                {L"PreviewMod", settings_.previewHotkey.modifiers},
+                {L"PreviewKey", settings_.previewHotkey.key},
+                {L"PreviewOff", settings_.previewHotkey.disabled ? 1u : 0u},
                 {L"RunAtStartup", settings_.runAtStartup ? 1u : 0u},
                 {L"ObsidianEnabled", settings_.obsidianEnabled ? 1u : 0u},
                 {L"VaultSearchEnabled", settings_.vaultSearchEnabled ? 1u : 0u},
@@ -1368,6 +1409,7 @@ private:
         if (backdropApplied_ && contrastOn == highContrast_ && allowBlur == allowBlur_) {
             return;
         }
+        if (contrastOn != highContrast_) ReleasePreviewLayout();  // its effect brushes use contrast colours
         highContrast_ = contrastOn;
         allowBlur_ = allowBlur;
         backdropApplied_ = true;
@@ -1420,13 +1462,32 @@ private:
         MONITORINFO info{sizeof(info)};
         GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &info);
         const float workHeight = ToDip(info.rcWork.bottom - info.rcWork.top);
-        width_ = (std::min)(kWidth, ToDip(info.rcWork.right - info.rcWork.left) - 32.0f);
+        const float workLeft = ToDip(info.rcWork.left);
+        const float workWidth = ToDip(info.rcWork.right - info.rcWork.left);
+        width_ = (std::min)(kWidth, workWidth - 32.0f);
         visibleRows_ = std::clamp(static_cast<int>(
             (workHeight - 64 - kSearchHeight - kSectionHeight - kFooterHeight - 8) / kRowHeight),
             1, kVisibleRows);
         height_ = ResultsTop() + visibleRows_ * kRowHeight + 8 + kFooterHeight;
-        const int width = ToPixel(width_), height = ToPixel(height_);
-        const int x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2;
+        // US-045: width_ stays the launcher area; the side panel adds
+        // panelWidth_ to its right. Too narrow a work area shows the panel as
+        // an overlay over the results instead, at the launcher's own width.
+        const float centeredLeft = workLeft + (workWidth - width_) / 2;
+        float windowWidth = width_, windowLeft = centeredLeft;
+        panelWidth_ = 0;
+        previewOverlay_ = false;
+        if (PreviewVisible()) {
+            const auto place = leanlauncher::preview::PanelGeometry(workLeft, workWidth, width_, centeredLeft);
+            previewOverlay_ = place.overlay;
+            panelWidth_ = place.overlay ? 0.0f : leanlauncher::preview::kPanelWidth;
+            windowWidth = place.windowWidthDip;
+            windowLeft = place.windowLeftDip;
+        }
+        const int width = ToPixel(windowWidth), height = ToPixel(height_);
+        // Closed (or overlay): keep the pixel-exact centring used before the
+        // panel existed, so the launcher doesn't shift by a rounding pixel.
+        const int x = panelWidth_ > 0 ? ToPixel(windowLeft)
+            : info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2;
         const int idealY = info.rcWork.top + (info.rcWork.bottom - info.rcWork.top) * 20 / 100;
         const int y = (std::max)(static_cast<int>(info.rcWork.top) + 8,
             (std::min)(idealY, static_cast<int>(info.rcWork.bottom) - height - 8));
@@ -1538,7 +1599,9 @@ private:
     static constexpr int kRowPomodoroFocusMinutes = 57;
     static constexpr int kRowPomodoroBreakMinutes = 58;
     static constexpr int kRowPomodoroLog = 59;
-    static constexpr int kSettingsMaxRow = 59;
+    static constexpr int kRowPreviewHotkey = 60;   // US-045
+    static constexpr int kRowPreviewEnabled = 61;
+    static constexpr int kSettingsMaxRow = 61;
     // SEARCH & FEATURES card rows in screen order. A row's position comes from
     // its rank here, not its number, so feature toggles (NFR-018) are added by
     // appending one entry - see settings_layout.h for the geometry.
@@ -1548,6 +1611,7 @@ private:
         kRowSystemCommandsEnabled, kRowSystemCommandsPrefix, kRowTypedUrlsEnabled, kRowPathCompletionEnabled,
         kRowUnitConverterEnabled, kRowTimeZonesEnabled,
         kRowPomodoroEnabled, kRowPomodoroPrefix, kRowPomodoroFocusMinutes, kRowPomodoroBreakMinutes, kRowPomodoroLog,
+        kRowPreviewEnabled, kRowPreviewHotkey,
     };
     static constexpr int kSearchRowCount = static_cast<int>(std::size(kSearchRows));
     static constexpr int SearchRowRank(int row) {
@@ -1891,6 +1955,10 @@ private:
         obsidianExpandedSection_ = -1;
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
+        // PreviewVisible() is false on this page, so an open side panel
+        // shrinks the window back to the launcher's own width.
+        if (panelWidth_ > 0 || previewOverlay_) ResizeAndPosition();
+        ClosePreview(false);  // nothing to show on this page; reloaded on the way back
         // FindKnownVaults() calls fs::exists() per known vault; run it off
         // the UI thread so a disconnected network-drive vault can't stall
         // Settings opening. knownVaults_ keeps its previous value (fine -
@@ -1927,6 +1995,8 @@ private:
         obsidianExpandedSection_ = -1;
         settingsScroll_ = 0.0f;
         settingsDraggingScroll_ = false;
+        if (PreviewVisible()) ResizeAndPosition();  // re-widen for a remembered open panel
+        SchedulePreview();
         ResetCaret();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -1947,6 +2017,7 @@ private:
         CancelCommandConfirm();
         recycleBinItems_ = -1;  // re-query next time the row shows
         ReleasePathCompletion();
+        ClosePreview(false);  // NFR-018: content goes; the remembered open state stays
         if (GetCapture() == hwnd_) ReleaseCapture();
         KillTimer(hwnd_, kCaretTimer);
         ShowWindow(hwnd_, SW_HIDE);
@@ -1979,7 +2050,14 @@ private:
         UpdateResults();
     }
 
+    // Every way the result list is rebuilt ends here, so the preview (US-045)
+    // follows the selection whichever branch BuildResults() returns from.
     void UpdateResults() {
+        BuildResults();
+        SchedulePreview();
+    }
+
+    void BuildResults() {
         results_.clear();
         hoverLockRow_ = -1;
         int topAppScore = -1;
@@ -2648,6 +2726,7 @@ private:
         if (!settings_.enableSystemCommands) CancelCommandConfirm();
         if (!settings_.enableTimeZones) timeZones_.Clear();
         if (!settings_.enablePomodoro) EndPomodoro(leanlauncher::pomodoro::EndReason::Stopped);
+        if (!settings_.enablePreview) ClosePreview(true);
         UpdateResults();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
@@ -3084,6 +3163,7 @@ private:
         EnsureVisible();
         PrepareVisibleIcons();
         InvalidateRect(hwnd_, nullptr, FALSE);
+        SchedulePreview();
     }
 
     void ResetToDefaults() {
@@ -3577,6 +3657,15 @@ private:
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
+        if (row == kRowPreviewEnabled) {
+            settings_.enablePreview = !settings_.enablePreview;
+            SaveSettings();
+            // NFR-018: turning the panel off frees its timer, buffers,
+            // layouts and bitmaps, and drops any load still in flight.
+            if (!settings_.enablePreview) ClosePreview(true);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
         if (row == kRowTimeZonesEnabled) {
             settings_.enableTimeZones = !settings_.enableTimeZones;
             SaveSettings();
@@ -3619,7 +3708,7 @@ private:
             BeginEditingRow(row, *field);
             return;
         }
-        if (row < 4) {
+        if (row < 4 || row == kRowPreviewHotkey) {
             // Keyboard shortcut rows: enter recording mode.
             recordingRow_ = row;
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -3709,7 +3798,7 @@ private:
             return;
         }
         quicklaunch::HotkeyBinding proposed;
-        if (recordingRow_ <= 1) {
+        if (recordingRow_ <= 1 || recordingRow_ == kRowPreviewHotkey) {
             proposed = {modifiers, static_cast<uint16_t>(key)};
         } else {
             proposed = {modifiers, 0};
@@ -3747,6 +3836,7 @@ private:
             else if (recordingRow_ == 1) settings_.actionsHotkey = proposed;
             else if (recordingRow_ == 2) settings_.administratorHotkey = proposed;
             else if (recordingRow_ == 3) settings_.quickLaunchHotkey = proposed;
+            else if (recordingRow_ == kRowPreviewHotkey) settings_.previewHotkey = proposed;
             if (recordingRow_ == 0) RegisterShortcut();
             recordingRow_ = -1;
             SaveSettings();
@@ -3754,7 +3844,8 @@ private:
             return;
         }
 
-        if (recordingRow_ <= 1 && quicklaunch::IsSystemReserved(proposed.modifiers, proposed.key)) {
+        if ((recordingRow_ <= 1 || recordingRow_ == kRowPreviewHotkey) &&
+            quicklaunch::IsSystemReserved(proposed.modifiers, proposed.key)) {
             settingsStatus_ = L"That shortcut is reserved by Windows.";
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
@@ -3765,13 +3856,16 @@ private:
             return;
         }
 
-        if (recordingRow_ == 1 && quicklaunch::IsReservedInApp(proposed)) {
+        if ((recordingRow_ == 1 || recordingRow_ == kRowPreviewHotkey) && quicklaunch::IsReservedInApp(proposed)) {
             settingsStatus_ = L"That shortcut is reserved for text editing.";
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
 
-        if (const wchar_t* conflict = quicklaunch::HasInternalConflict(recordingRow_, proposed, settings_)) {
+        // Preview panel is row 4 in HasInternalConflict's row scheme, not
+        // kRowPreviewHotkey (60) - that's the on-screen Settings row ID.
+        const int conflictRow = (recordingRow_ == kRowPreviewHotkey) ? 4 : recordingRow_;
+        if (const wchar_t* conflict = quicklaunch::HasInternalConflict(conflictRow, proposed, settings_)) {
             settingsStatus_ = conflict;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
@@ -3816,6 +3910,13 @@ private:
                 return;
             }
             settings_.quickLaunchHotkey = proposed;
+        } else if (recordingRow_ == kRowPreviewHotkey) {
+            if (CheckHotkeyTaken(proposed.modifiers, proposed.key)) {
+                settingsStatus_ = L"That shortcut is used by another application.";
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return;
+            }
+            settings_.previewHotkey = proposed;
         }
 
         recordingRow_ = -1;
@@ -3823,14 +3924,573 @@ private:
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
-    bool MatchesActionsHotkey(WPARAM key, bool control, bool shift, bool alt) const {
-        if (settings_.actionsHotkey.disabled || settings_.actionsHotkey.key == 0) return false;
+    static bool MatchesBinding(const quicklaunch::HotkeyBinding& binding, WPARAM key,
+            bool control, bool shift, bool alt) {
+        if (binding.disabled || binding.key == 0) return false;
         uint16_t mods = 0;
         if (control) mods |= quicklaunch::kModControl;
         if (alt) mods |= quicklaunch::kModAlt;
         if (shift) mods |= quicklaunch::kModShift;
-        return mods == settings_.actionsHotkey.modifiers &&
-               static_cast<uint16_t>(key) == settings_.actionsHotkey.key;
+        return mods == binding.modifiers && static_cast<uint16_t>(key) == binding.key;
+    }
+
+    bool MatchesActionsHotkey(WPARAM key, bool control, bool shift, bool alt) const {
+        return MatchesBinding(settings_.actionsHotkey, key, control, shift, alt);
+    }
+
+    bool MatchesPreviewHotkey(WPARAM key, bool control, bool shift, bool alt) const {
+        return settings_.enablePreview &&
+               MatchesBinding(settings_.previewHotkey, key, control, shift, alt);
+    }
+
+    // US-045: the panel shows only on the launcher page, with the toggle on
+    // and the remembered open state set. A disabled Ctrl+P binding doesn't
+    // hide a panel that was left open - the remembered state still applies.
+    bool PreviewVisible() const {
+        return settings_.enablePreview && settings_.previewOpen && page_ == Page::Launcher;
+    }
+
+    // The panel's area: the side strip right of the launcher, or the results
+    // area when it's drawn as an overlay on a narrow work area.
+    D2D1_RECT_F PreviewRect() const {
+        if (previewOverlay_) return D2D1::RectF(8, ResultsTop(), width_ - 8, FooterTop());
+        return D2D1::RectF(width_, 0, width_ + panelWidth_, height_);
+    }
+
+    void TogglePreview() {
+        if (!settings_.enablePreview) return;
+        settings_.previewOpen = !settings_.previewOpen;
+        SaveSettings();
+        ResizeAndPosition();
+        // Opening loads the selection straight away (no debounce: it's one
+        // keypress, not a stream of selection changes); closing frees it all.
+        if (PreviewVisible()) RequestPreview();
+        else ClosePreview(true);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    // ---- US-045 preview loading (Task 6) --------------------------------------
+    // What DrawPreviewPanel draws. Built on a short-lived worker thread (the
+    // US-043 RequestPathListing pattern) from plain data only - the worker
+    // never touches Direct2D, DirectWrite or window state.
+    struct PreviewContent {
+        unsigned generation = 0;
+        leanlauncher::preview::PreviewKind kind = leanlauncher::preview::PreviewKind::None;
+        std::wstring title;
+        std::wstring propertyLine;
+        std::wstring body;
+        std::wstring status;  // non-empty: shown instead of the body
+        bool truncated = false;
+        bool todayNote = false;  // a capture row's target is today's daily note
+        // US-046 images. The worker hands over plain premultiplied BGRA
+        // pixels, never a COM object: the UI thread makes the ID2D1Bitmap
+        // from them once, then drops them (see PreviewImageBitmap).
+        std::wstring imageKey;   // the thumbnail cache key: path|last write|size
+        std::wstring caption;    // "name · W×H · size"
+        std::vector<BYTE> pixels;
+        UINT pixelWidth = 0, pixelHeight = 0;
+        int thumbnailSize = 0;   // the requested box, in pixels
+        std::vector<std::wstring> cachedKeys;  // the worker skips the thumbnail for these
+    };
+    // At most 2 thumbnails, most recent last, so going back to the previous
+    // image is quick. UI thread only; freed by ClosePreview and DiscardTarget.
+    struct PreviewImage {
+        std::wstring key, caption;
+        ComPtr<ID2D1Bitmap> bitmap;
+    };
+
+    // Loading starts 80 ms after the selection stops changing, so holding an
+    // arrow key reads nothing until it's let go.
+    void SchedulePreview() {
+        if (!PreviewVisible()) return;
+        SetTimer(hwnd_, kPreviewDebounceTimer, 80, nullptr);
+    }
+
+    // The row's own label, as the results list shows it (for rows with
+    // nothing to read: commands, URLs, capture rows and so on).
+    std::wstring PreviewCategoryLabel(const AppEntry& app) const {
+        switch (app.category) {
+        case AppCategory::Command: return L"Command";
+        case AppCategory::Url: return L"URL";
+        case AppCategory::Pomodoro: return L"Timer";
+        case AppCategory::Calculator: return L"Calculator";
+        case AppCategory::TaskAdd: return settings_.taskPillLabel;
+        case AppCategory::NoteAdd: return settings_.noteAddPillLabel;
+        case AppCategory::LogAdd: return settings_.logPillLabel;
+        case AppCategory::NoteJump: return settings_.vaultSearchPillLabel;
+        case AppCategory::WebSearch: return settings_.webSearchPillLabel;
+        default: return L"";
+        }
+    }
+
+    void RequestPreview() {
+        namespace pv = leanlauncher::preview;
+        KillTimer(hwnd_, kPreviewDebounceTimer);
+        if (!PreviewVisible() || !IsWindowVisible(hwnd_)) return;
+        if (selected_ < 0 || selected_ >= static_cast<int>(results_.size()) || results_[selected_] >= apps_.size()) {
+            ClosePreview(false);  // nothing selected: drop loads in flight, show an empty panel
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        const AppEntry& app = apps_[results_[selected_]];
+        // The results list is rebuilt for many reasons (an index update, a
+        // pin) without the selection changing; keep what's shown (and its
+        // scroll position) or already loading for the same row.
+        const bool captureRow = app.category == AppCategory::TaskAdd || app.category == AppCategory::NoteAdd ||
+                                app.category == AppCategory::LogAdd;
+        // A capture row's name carries the typed text: keying on it would
+        // reload the target note (and reset its scroll) on every keystroke.
+        std::wstring key = pv::PreviewKey(static_cast<int>(app.category), app.path, app.name, obsidianVaultPath_,
+                                          !(captureRow && !app.path.empty()));
+        if (key == previewKey_) return;
+        previewKey_ = std::move(key);
+        auto content = std::make_unique<PreviewContent>();
+        content->title = app.category == AppCategory::NoteJump && !app.parameters.empty() ? app.parameters : app.name;
+        std::wstring path;
+        switch (app.category) {
+        case AppCategory::NoteJump:
+            content->kind = pv::PreviewKind::Note;
+            if (app.path.empty() || obsidianVaultPath_.empty()) {
+                content->kind = pv::PreviewKind::None;
+                content->body = PreviewCategoryLabel(app);
+            } else if (leanlauncher::obsidian::IsUnsafeVaultRelativePath(app.path)) {
+                content->status = L"This note is outside the vault";
+            } else {
+                // ResolveNoteAbsolutePath appends ".md" itself. Obsidian is never started.
+                path = leanlauncher::obsidian::ResolveNoteAbsolutePath(obsidianVaultPath_, app.path);
+            }
+            break;
+        case AppCategory::Folder:
+            content->kind = pv::PreviewKind::Folder;
+            content->propertyLine = app.path;
+            path = app.path;
+            if (!path.empty() && path.back() != L'\\' && path.back() != L'/') path += L'\\';
+            break;
+        case AppCategory::File:
+            content->kind = pv::ClassifyPreview(app.path, false, false, false);
+            if (content->kind == pv::PreviewKind::None) {
+                content->propertyLine = app.path;  // AC7: the full path, as for a folder
+                content->status = L"No preview for this file type";
+            } else {
+                path = app.path;
+            }
+            if (content->kind == pv::PreviewKind::Image) {
+                // 384 DIP, kept to the 256-512 px the thumbnail cache serves well.
+                content->thumbnailSize = std::clamp(ToPixel(384), 256, 512);
+                // The worker checks the file's time and size (no disk access
+                // here) and skips the thumbnail if one of these still matches.
+                for (const auto& image : previewImages_) content->cachedKeys.push_back(image.key);
+            }
+            break;
+        case AppCategory::Application:
+        case AppCategory::System:
+            content->kind = pv::PreviewKind::App;
+            content->propertyLine = app.category == AppCategory::System ? L"System" : L"Application";
+            content->body = app.path;
+            path = app.path;
+            break;
+        case AppCategory::TaskAdd:
+        case AppCategory::NoteAdd:
+        case AppCategory::LogAdd:
+            content->kind = pv::PreviewKind::None;
+            content->body = PreviewCategoryLabel(app);
+            if (app.path.empty()) break;  // no vault yet: the row's label only
+            // app.path is already absolute (CaptureTargetPath); still refuse
+            // one that isn't inside the vault. The preview only reads: the
+            // capture creates a missing daily note, never the preview.
+            content->kind = pv::PreviewKind::Note;
+            content->body.clear();
+            content->title = fs::path(app.path).stem().wstring();
+            if (!pv::IsNoteInsideVault(app.path, obsidianVaultPath_)) {
+                content->propertyLine = app.path;  // the loaded note's own property line replaces it otherwise
+                content->status = L"This note is outside the vault";
+            } else {
+                content->todayNote = _wcsicmp(app.path.c_str(), CaptureTargetPath(L"").c_str()) == 0;
+                path = app.path;
+            }
+            break;
+        default:
+            content->kind = pv::PreviewKind::None;
+            content->body = PreviewCategoryLabel(app);
+            if (app.category == AppCategory::Url) content->propertyLine = app.path;  // the full URL
+            break;
+        }
+        content->generation = previewGate_.Next();  // anything older in flight is now stale
+        if (path.empty()) {  // nothing to read: show it now
+            ShowPreviewContent(std::move(content));
+            return;
+        }
+        if (previewThreadsRunning_ >= 4) {
+            // Several reads are stuck (a slow network share); try again shortly
+            // rather than start a fifth. The stale results drop on arrival.
+            content->status = L"Loading\u2026";
+            ShowPreviewContent(std::move(content));
+            previewKey_.clear();  // not loaded yet: the retry must not be skipped
+            SetTimer(hwnd_, kPreviewDebounceTimer, 250, nullptr);
+            return;
+        }
+        const HWND hwnd = hwnd_;
+        try {
+            std::thread([hwnd, path, content = std::move(content)]() mutable {
+                // COM for the shell thumbnail and WIC (US-046). Every COM
+                // object LoadPreview makes is local to it and gone before
+                // CoUninitialize; the content holds plain data only.
+                const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+                LoadPreview(*content, path);
+                // Ownership passes to the UI thread only if the post succeeds;
+                // a window already destroyed makes it fail, and it's freed here.
+                if (PostMessageW(hwnd, kPreviewReadyMessage, 0, reinterpret_cast<LPARAM>(content.get()))) {
+                    content.release();
+                }
+                content.reset();
+                if (SUCCEEDED(com)) CoUninitialize();
+            }).detach();
+            ++previewThreadsRunning_;
+        } catch (const std::system_error&) {
+            // No thread: the content went with the failed callable; retry later.
+            previewKey_.clear();
+            SetTimer(hwnd_, kPreviewDebounceTimer, 250, nullptr);
+        }
+    }
+
+    // Runs on the preview worker: bounded reads only (64 KB, one folder
+    // listing, the version resource), nothing written, nothing downloaded.
+    static void LoadPreview(PreviewContent& content, const std::wstring& path) {
+        namespace pv = leanlauncher::preview;
+        try {
+            switch (content.kind) {
+            case pv::PreviewKind::Note:
+            case pv::PreviewKind::Text: {
+                pv::TextPreview text = pv::BuildTextPreview(pv::ReadPreviewBytes(path), content.kind == pv::PreviewKind::Note,
+                                                           content.todayNote);
+                content.propertyLine = std::move(text.propertyLine);
+                content.body = std::move(text.body);
+                content.status = std::move(text.status);
+                content.truncated = text.truncated;
+                break;
+            }
+            case pv::PreviewKind::Folder: {
+                const PathListing listing = ListFolder(path);
+                if (listing.error == ERROR_ACCESS_DENIED) content.status = L"Access denied";
+                else if (listing.error != 0 && listing.error != ERROR_FILE_NOT_FOUND) content.status = L"Folder not found";
+                else content.body = pv::FolderSummary(listing.entries, 20, listing.truncated);
+                break;
+            }
+            case pv::PreviewKind::App: {
+                const std::wstring version = AppFileVersion(path);
+                if (!version.empty()) content.body += L"\n\nVersion " + version;
+                break;
+            }
+            case pv::PreviewKind::Image:
+                // The only place a thumbnail handler runs: ClassifyPreview's
+                // image extensions, never arbitrary file types.
+                LoadImagePreview(content, path);
+                break;
+            case pv::PreviewKind::None:
+                break;
+            }
+        } catch (...) {
+            content.body.clear();
+            content.status = L"Can't preview this item";
+        }
+    }
+
+    // US-046, on the preview worker: the Windows thumbnail (cache) for an
+    // image, scaled down to the requested box if the shell handed back a
+    // bigger one, as premultiplied BGRA pixels. Online-only files are never
+    // thumbnailed or read. No thumbnail means a status, never a full decode.
+    static void LoadImagePreview(PreviewContent& content, const std::wstring& path) {
+        namespace pv = leanlauncher::preview;
+        WIN32_FILE_ATTRIBUTE_DATA info{};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) {
+            content.status = L"File not found";
+            return;
+        }
+        if (pv::IsCloudPlaceholder(info.dwFileAttributes)) {
+            content.status = L"Not downloaded - open to download";
+            return;
+        }
+        const unsigned long long size = (static_cast<unsigned long long>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+        content.imageKey = path + L"|" + std::to_wstring((static_cast<unsigned long long>(info.ftLastWriteTime.dwHighDateTime) << 32) |
+            info.ftLastWriteTime.dwLowDateTime) + L"|" + std::to_wstring(size);
+        if (std::find(content.cachedKeys.begin(), content.cachedKeys.end(), content.imageKey) != content.cachedKeys.end()) {
+            return;  // unchanged since it was cached: the UI draws its bitmap
+        }
+        content.status = L"No thumbnail for this image";
+        ComPtr<IShellItemImageFactory> shell;
+        ComPtr<IWICImagingFactory> wic;
+        HBITMAP hbitmap = nullptr;
+        const int box = content.thumbnailSize;
+        if (FAILED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&shell))) ||
+                FAILED(shell->GetImage({box, box}, SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK, &hbitmap)) || !hbitmap) {
+            return;
+        }
+        ComPtr<IWICBitmap> thumbnail;
+        const bool converted = SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) &&
+            SUCCEEDED(wic->CreateBitmapFromHBITMAP(hbitmap, nullptr, WICBitmapUsePremultipliedAlpha, &thumbnail));
+        DeleteObject(hbitmap);
+        UINT width = 0, height = 0;
+        if (!converted || FAILED(thumbnail->GetSize(&width, &height)) || !width || !height) return;
+        const pv::FitSize fit = pv::FitImage(static_cast<float>(width), static_cast<float>(height),
+            static_cast<float>(box), static_cast<float>(box));
+        const UINT fitWidth = (std::max)(1u, static_cast<UINT>(std::lround(fit.width)));
+        const UINT fitHeight = (std::max)(1u, static_cast<UINT>(std::lround(fit.height)));
+        ComPtr<IWICBitmapSource> source = thumbnail;
+        ComPtr<IWICBitmapScaler> scaler;
+        if (fitWidth < width || fitHeight < height) {
+            if (FAILED(wic->CreateBitmapScaler(&scaler)) ||
+                    FAILED(scaler->Initialize(thumbnail.Get(), fitWidth, fitHeight, WICBitmapInterpolationModeFant))) return;
+            source = scaler;
+        }
+        ComPtr<IWICBitmapSource> bgra;
+        if (FAILED(WICConvertBitmapSource(GUID_WICPixelFormat32bppPBGRA, source.Get(), &bgra))) return;
+        std::vector<BYTE> pixels(static_cast<size_t>(fitWidth) * fitHeight * 4);
+        if (FAILED(bgra->CopyPixels(nullptr, fitWidth * 4, static_cast<UINT>(pixels.size()), pixels.data()))) return;
+        // The image's own dimensions for the caption, parsed from at most the
+        // first 64 KB (the bounded reader: never blocks other apps, never
+        // recalls). No codec runs, so the extension gate holds.
+        const auto dims = pv::ImageDimensions(pv::ReadPreviewBytes(path).bytes);
+        content.status.clear();
+        content.pixels = std::move(pixels);
+        content.pixelWidth = fitWidth;
+        content.pixelHeight = fitHeight;
+        content.caption = pv::ImageCaption(path, dims ? dims->first : 0, dims ? dims->second : 0, size);
+    }
+
+    // "FileVersion" from an .exe's version resource, or empty. Online-only
+    // files are skipped: reading the resource would download them.
+    static std::wstring AppFileVersion(const std::wstring& path) {
+        if (path.size() < 4 || _wcsicmp(path.c_str() + path.size() - 4, L".exe") != 0) return {};
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || leanlauncher::preview::IsCloudPlaceholder(attributes)) return {};
+        DWORD ignored = 0;
+        const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
+        if (size == 0) return {};
+        std::vector<BYTE> data(size);
+        if (!GetFileVersionInfoW(path.c_str(), 0, size, data.data())) return {};
+        struct Translation { WORD language; WORD codePage; };
+        Translation* translations = nullptr;
+        UINT length = 0;
+        if (VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation", reinterpret_cast<void**>(&translations), &length) &&
+                translations && length >= sizeof(Translation)) {
+            wchar_t key[64];
+            swprintf_s(key, L"\\StringFileInfo\\%04x%04x\\FileVersion", translations[0].language, translations[0].codePage);
+            wchar_t* value = nullptr;
+            UINT valueLength = 0;
+            if (VerQueryValueW(data.data(), key, reinterpret_cast<void**>(&value), &valueLength) && value && valueLength > 1) {
+                return std::wstring(value, wcsnlen(value, valueLength));
+            }
+        }
+        VS_FIXEDFILEINFO* fixed = nullptr;
+        if (VerQueryValueW(data.data(), L"\\", reinterpret_cast<void**>(&fixed), &length) && fixed && length >= sizeof(VS_FIXEDFILEINFO)) {
+            return std::to_wstring(HIWORD(fixed->dwFileVersionMS)) + L"." + std::to_wstring(LOWORD(fixed->dwFileVersionMS)) + L"." +
+                   std::to_wstring(HIWORD(fixed->dwFileVersionLS)) + L"." + std::to_wstring(LOWORD(fixed->dwFileVersionLS));
+        }
+        return {};
+    }
+
+    // UI thread only: the new content replaces the old, and the old layout
+    // (Task 7) is rebuilt for it on the next paint.
+    void ShowPreviewContent(std::unique_ptr<PreviewContent> content) {
+        preview_ = std::move(content);
+        previewScroll_ = 0;
+        ReleasePreviewLayout();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    // NFR-018: drops everything the panel holds, thumbnails included (US-046:
+    // they're freed when the launcher hides, too). `free` is true when the
+    // panel closed or the toggle went off, false when the launcher hides or
+    // there's nothing to show. A worker still reading finishes on its own
+    // (reads are bounded) and its result is deleted when it arrives.
+    void ClosePreview([[maybe_unused]] bool free) {
+        KillTimer(hwnd_, kPreviewDebounceTimer);
+        previewGate_.Invalidate();
+        previewKey_.clear();
+        preview_.reset();
+        ReleasePreviewLayout();
+        previewScroll_ = 0;
+        previewImages_.clear();
+    }
+
+    // The shown image's cache entry: found by key (moved to most recent), or
+    // made from the worker's pixels on first draw (which then go; the cache
+    // keeps 2 at most). Neither, e.g. after the target was lost or the entry
+    // was evicted meanwhile: the image loads again.
+    const PreviewImage* PreviewImageEntry() {
+        for (auto it = previewImages_.begin(); it != previewImages_.end(); ++it) {
+            if (it->key != preview_->imageKey) continue;
+            std::rotate(it, it + 1, previewImages_.end());
+            return &previewImages_.back();
+        }
+        if (preview_->pixels.empty()) {
+            previewKey_.clear();
+            SchedulePreview();
+            preview_->status = L"Loading…";  // asked once; the reload replaces this content
+            return nullptr;
+        }
+        PreviewImage image{preview_->imageKey, preview_->caption, nullptr};
+        const HRESULT made = target_->CreateBitmap(D2D1::SizeU(preview_->pixelWidth, preview_->pixelHeight), preview_->pixels.data(),
+            preview_->pixelWidth * 4, D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+            D2D1_ALPHA_MODE_PREMULTIPLIED), static_cast<float>(dpi_), static_cast<float>(dpi_)), &image.bitmap);
+        std::vector<BYTE>().swap(preview_->pixels);
+        if (FAILED(made)) {
+            preview_->status = L"Can't show this image";  // not retried on every paint
+            return nullptr;
+        }
+        if (previewImages_.size() >= 2) previewImages_.erase(previewImages_.begin());
+        previewImages_.push_back(std::move(image));
+        return &previewImages_.back();
+    }
+
+    // The thumbnail at the top of the body, centred, fitted to the card with
+    // its aspect ratio kept and never past 1:1 at this DPI, with its caption below.
+    void DrawPreviewImage(const D2D1_RECT_F& body) {
+        const PreviewImage* entry = PreviewImageEntry();
+        if (!entry) {
+            if (!preview_->status.empty()) Text(preview_->status, body, hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
+            return;
+        }
+        ID2D1Bitmap* bitmap = entry->bitmap.Get();
+        const D2D1_SIZE_U pixels = bitmap->GetPixelSize();
+        const float scale = 96.0f / static_cast<float>(dpi_);
+        const auto fit = leanlauncher::preview::FitImage(pixels.width * scale, pixels.height * scale,
+            body.right - body.left, body.bottom - body.top - 26);
+        if (fit.width <= 0) return;
+        const float left = std::round(body.left + (body.right - body.left - fit.width) / 2);
+        const D2D1_RECT_F image = D2D1::RectF(left, body.top, left + fit.width, body.top + fit.height);
+        target_->DrawBitmap(bitmap, image, 1, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        Text(entry->caption, D2D1::RectF(body.left, image.bottom + 8, body.right, image.bottom + 26), hintFormat_.Get(),
+            Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
+
+    void ReleasePreviewLayout() {
+        previewLayout_.Reset();
+        previewAccent_.Reset();
+        previewMuted_.Reset();
+        previewLayoutWidth_ = previewMaxScroll_ = 0;
+    }
+
+    // Is the point over the open panel? Its clicks, hover and wheel belong to
+    // the panel, never to a result row underneath (overlay) or beside it.
+    bool PointInPreview(float x, float y) const {
+        if (!PreviewVisible()) return false;
+        const auto area = PreviewRect();
+        return x >= area.left && x < area.right && y >= area.top && y < area.bottom;
+    }
+
+    void ScrollPreview(float delta) {
+        if (!previewLayout_) return;
+        const float scroll = std::clamp(previewScroll_ + delta, 0.0f, previewMaxScroll_);
+        if (scroll == previewScroll_) return;
+        previewScroll_ = scroll;
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    // Builds the body layout once per content (and panel width): light
+    // markdown for notes, monospace for Text files, only about the first 8 KB,
+    // wrapping even inside long lines with no spaces.
+    void EnsurePreviewLayout(float width) {
+        namespace pv = leanlauncher::preview;
+        if (previewLayout_ && previewLayoutWidth_ == width) return;
+        ReleasePreviewLayout();
+        if (!preview_ || !target_) return;
+        const pv::ScannedText laid = pv::BodyForLayout(preview_->body, preview_->kind == pv::PreviewKind::Note, preview_->truncated);
+        IDWriteTextFormat* format = preview_->kind == pv::PreviewKind::Text ? previewMonoFormat_.Get() : resultFormat_.Get();
+        if (FAILED(writeFactory_->CreateTextLayout(laid.text.c_str(), static_cast<UINT32>(laid.text.size()), format,
+                (std::max)(1.0f, width), 100000.0f, &previewLayout_))) return;
+        previewLayoutWidth_ = width;
+        previewLayout_->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+        // resultFormat_ is Medium for result names; body text reads better Normal.
+        previewLayout_->SetFontWeight(DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_RANGE{0, static_cast<UINT32>(laid.text.size())});
+        for (const auto& span : laid.spans) {
+            const DWRITE_TEXT_RANGE range{static_cast<UINT32>(span.start), static_cast<UINT32>(span.length)};
+            switch (span.style) {
+            case pv::SpanStyle::Heading1:
+            case pv::SpanStyle::Heading2:
+            case pv::SpanStyle::Heading3:
+                previewLayout_->SetFontSize(span.style == pv::SpanStyle::Heading1 ? 20.0f
+                    : span.style == pv::SpanStyle::Heading2 ? 17.0f : 15.0f, range);
+                previewLayout_->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, range);
+                break;
+            case pv::SpanStyle::Bold: previewLayout_->SetFontWeight(DWRITE_FONT_WEIGHT_BOLD, range); break;
+            case pv::SpanStyle::Italic: previewLayout_->SetFontStyle(DWRITE_FONT_STYLE_ITALIC, range); break;
+            case pv::SpanStyle::Code: previewLayout_->SetFontFamilyName(L"Consolas", range); break;
+            case pv::SpanStyle::Link:
+            case pv::SpanStyle::Tag:
+            case pv::SpanStyle::Muted: {
+                auto& brush = span.style == pv::SpanStyle::Muted ? previewMuted_ : previewAccent_;
+                if (!brush) target_->CreateSolidColorBrush(span.style == pv::SpanStyle::Muted ? Muted()
+                    : highContrast_ ? SystemColor(COLOR_HOTLIGHT) : D2D1::ColorF(0x7C9CFF), &brush);
+                if (brush) previewLayout_->SetDrawingEffect(brush.Get(), range);
+                break;
+            }
+            }
+        }
+    }
+
+    // The panel: its own card fill (the overlay first paints the window
+    // background so the results underneath don't show through), a title, the
+    // property line, then the body clipped and scrolled, or a centred status.
+    void DrawPreviewPanel() {
+        if (!PreviewVisible()) return;
+        const D2D1_RECT_F area = PreviewRect();
+        D2D1_RECT_F card = area;
+        if (previewOverlay_) {
+            Fill(area, highContrast_ ? SystemColor(COLOR_WINDOW) : D2D1::ColorF(0x252527));  // square: no row shows at the corners
+        } else {
+            Line(area.left + 0.5f, area.top + 8, area.left + 0.5f, area.bottom - 8,
+                highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.12f));
+            card = D2D1::RectF(area.left + 8, area.top + 8, area.right - 8, area.bottom - 8);
+        }
+        Fill(card, highContrast_ ? SystemColor(COLOR_BTNFACE) : D2D1::ColorF(1, 1, 1, 0.035f), 8);
+        if (!preview_) return;
+        const float left = card.left + 12, right = card.right - 12;
+        float top = card.top + 10;
+        Text(preview_->title, D2D1::RectF(left, top, right, top + 24), resultFormat_.Get(), Foreground());
+        top += 24;
+        if (!preview_->propertyLine.empty()) {
+            // Long paths wrap at any character (they have no spaces to break on),
+            // capped at 3 lines with an ellipsis; the body moves down to fit.
+            auto layout = Layout(preview_->propertyLine, hintFormat_.Get(), right - left, 1024);
+            if (layout) {
+                layout->SetWordWrapping(DWRITE_WORD_WRAPPING_CHARACTER);
+                DWRITE_TEXT_METRICS metrics{};
+                layout->GetMetrics(&metrics);
+                const UINT32 lines = (std::max)(1u, metrics.lineCount);
+                const float lineHeight = (std::max)(18.0f, metrics.height / static_cast<float>(lines));
+                const float height = lineHeight * static_cast<float>((std::min)(lines, 3u));
+                layout->SetMaxHeight(height);
+                DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+                ComPtr<IDWriteInlineObject> ellipsis;
+                writeFactory_->CreateEllipsisTrimmingSign(hintFormat_.Get(), &ellipsis);
+                layout->SetTrimming(&trimming, ellipsis.Get());
+                brush_->SetColor(Muted());
+                target_->DrawTextLayout(D2D1::Point2F(left, top), layout.Get(), brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                top += height;
+            }
+        }
+        const D2D1_RECT_F body = D2D1::RectF(left, top + 8, right, card.bottom - 12);
+        if (body.bottom <= body.top) return;
+        if (!preview_->status.empty()) {
+            Text(preview_->status, body, hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_CENTER);
+            return;
+        }
+        if (preview_->kind == leanlauncher::preview::PreviewKind::Image) {
+            DrawPreviewImage(body);
+            return;
+        }
+        EnsurePreviewLayout(right - left);
+        if (!previewLayout_) return;
+        DWRITE_TEXT_METRICS metrics{};
+        previewLayout_->GetMetrics(&metrics);
+        previewBodyHeight_ = body.bottom - body.top;
+        previewMaxScroll_ = (std::max)(0.0f, metrics.height - previewBodyHeight_);
+        previewScroll_ = std::clamp(previewScroll_, 0.0f, previewMaxScroll_);
+        target_->PushAxisAlignedClip(body, D2D1_ANTIALIAS_MODE_ALIASED);
+        brush_->SetColor(Foreground());
+        target_->DrawTextLayout(D2D1::Point2F(body.left, body.top - previewScroll_), previewLayout_.Get(), brush_.Get());
+        target_->PopAxisAlignedClip();
     }
 
     bool MatchesAdministratorHotkey(bool control, bool shift, bool alt) const {
@@ -4014,6 +4674,12 @@ private:
             return 0;
         }
         if (MatchesActionsHotkey(key, control, shift, alt)) { ToggleActions(); return 0; }
+        if (MatchesPreviewHotkey(key, control, shift, alt)) {
+            // Held down, Ctrl+P toggles once: auto-repeats (lParam bit 30,
+            // "key was already down") neither flap the width nor rewrite the registry.
+            if ((lParam & 0x40000000) == 0) TogglePreview();
+            return 0;
+        }
         if (actionsOpen_) {
             if (key == VK_UP || key == VK_DOWN || key == VK_TAB) {
                 actionSelected_ = (actionSelected_ + (key == VK_UP || (key == VK_TAB && shift) ? ActionCount() - 1 : 1)) % ActionCount();
@@ -4074,8 +4740,16 @@ private:
             if (!shift && CompleteSelectedPath()) return 0;
             MoveSelection(shift ? -1 : 1, true);
             return 0;
-        case VK_PRIOR: MoveSelection(-visibleRows_, false); return 0;
-        case VK_NEXT: MoveSelection(visibleRows_, false); return 0;
+        case VK_PRIOR:
+        case VK_NEXT:
+            // US-045: Shift+PgUp/PgDn scroll the preview; plain PgUp/PgDn keep
+            // moving through the results.
+            if (shift && PreviewVisible()) {
+                ScrollPreview((key == VK_NEXT ? 1.0f : -1.0f) * (std::max)(24.0f, previewBodyHeight_ - 24));
+                return 0;
+            }
+            MoveSelection(key == VK_NEXT ? visibleRows_ : -visibleRows_, false);
+            return 0;
         case VK_LEFT: input_.Move(false, shift, control); ResetCaret(); return 0;
         case VK_RIGHT: input_.Move(true, shift, control); ResetCaret(); return 0;
         case VK_HOME: input_.MoveTo(0, shift); ResetCaret(); return 0;
@@ -4692,7 +5366,7 @@ private:
     }
 
     int ResultAtPoint(float x, float y) const {
-        if (page_ != Page::Launcher) return -1;
+        if (page_ != Page::Launcher || PointInPreview(x, y)) return -1;
         if (x < 8 || x > width_ - 12 || y < ResultsTop() || y >= FooterTop() - 8) return -1;
         float top = ResultsTop();
         for (int i = firstVisible_; i < static_cast<int>(results_.size()); ++i) {
@@ -4873,6 +5547,7 @@ private:
             }
             return;
         }
+        if (PointInPreview(x, y)) return;  // US-045: the panel isn't a button
         if (y < kSearchHeight) {
             if (x > width_ - 84 && x < width_ - 52 && !input_.text.empty()) {
                 input_.Clear();
@@ -4930,7 +5605,7 @@ private:
         if (const int result = ResultAtPoint(x, y); result >= 0) {
             selected_ = result;
             LaunchSelected(true);
-        } else if (y >= FooterTop() && x < width_ / 2) {
+        } else if (y >= FooterTop() && x < width_ / 2 && !PointInPreview(x, y)) {
             LaunchSelected(true);
         }
     }
@@ -4946,6 +5621,7 @@ private:
         }
         if (const int result = ResultAtPoint(x, y); result >= 0) {
             selected_ = result;
+            SchedulePreview();
             OpenActionsAt(x, y);
         } else {
             ResetCaret();
@@ -5068,11 +5744,13 @@ private:
             }
             selected_ = result;
             InvalidateRect(hwnd_, nullptr, FALSE);
+            SchedulePreview();
         }
     }
 
-    bool CreateFormat(float size, DWRITE_FONT_WEIGHT weight, ComPtr<IDWriteTextFormat>& format) {
-        if (FAILED(writeFactory_->CreateTextFormat(L"Segoe UI", nullptr, weight,
+    bool CreateFormat(float size, DWRITE_FONT_WEIGHT weight, ComPtr<IDWriteTextFormat>& format,
+        const wchar_t* family = L"Segoe UI") {
+        if (FAILED(writeFactory_->CreateTextFormat(family, nullptr, weight,
                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"", &format))) return false;
         format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         return true;
@@ -5355,6 +6033,10 @@ private:
 
     void DiscardTarget() {
         for (auto& item : iconCache_) item.second.bitmap.Reset();
+        ReleasePreviewLayout();  // its drawing-effect brushes belong to this target
+        // Thumbnails belong to this target too. Their pixels are gone once
+        // drawn, so a shown image loads again on the next paint (US-046).
+        previewImages_.clear();
         brush_.Reset();
         target_.Reset();
     }
@@ -6588,6 +7270,12 @@ private:
             DrawSettingsRow(kRowPomodoroLog, searchRowY(kRowPomodoroLog), L"Log finished Pomodoros",
                 L"Add finished focus timers to your log heading - only if today's note exists",
                 {}, true, settings_.pomodoroLog);
+            DrawSettingsRow(kRowPreviewEnabled, searchRowY(kRowPreviewEnabled), L"Preview panel",
+                L"A note, image, or file preview next to your results",
+                {}, true, settings_.enablePreview);
+            DrawSettingsRow(kRowPreviewHotkey, searchRowY(kRowPreviewHotkey), L"Preview panel shortcut",
+                L"Show or hide a preview of the selected result",
+                quicklaunch::FormatBinding(settings_.previewHotkey));
         }
 
         if (settingsCategory_ == SettingsCategory::All || settingsCategory_ == SettingsCategory::Obsidian) {
@@ -6773,6 +7461,7 @@ private:
             } else {
                 DrawSearch();
                 DrawResults();
+                DrawPreviewPanel();
                 DrawFooter();
                 DrawActions();
                 if (ShouldShowHotkeyWarning()) {
@@ -6781,7 +7470,7 @@ private:
             }
             brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, 0.24f));
             target_->DrawRoundedRectangle(
-                D2D1::RoundedRect(D2D1::RectF(0.5f, 0.5f, width_ - 0.5f, height_ - 0.5f), 8, 8),
+                D2D1::RoundedRect(D2D1::RectF(0.5f, 0.5f, width_ + panelWidth_ - 0.5f, height_ - 0.5f), 8, 8),
                 brush_.Get(), 1);
             const HRESULT result = target_->EndDraw();
             if (FAILED(result)) DiscardTarget();
@@ -6792,7 +7481,11 @@ private:
 
     HWND hwnd_ = nullptr;
     UINT dpi_ = 96;
-    float width_ = kWidth;
+    float width_ = kWidth;  // the launcher area; the window is width_ + panelWidth_ wide
+    // US-045 preview panel: kPanelWidth in side mode, 0 when closed or when
+    // the panel is drawn as an overlay over the results (previewOverlay_).
+    float panelWidth_ = 0;
+    bool previewOverlay_ = false;
     float height_ = 482;
     int visibleRows_ = kVisibleRows;
     ComPtr<ID2D1Factory> factory_;
@@ -6800,6 +7493,7 @@ private:
     ComPtr<ID2D1HwndRenderTarget> target_;
     ComPtr<ID2D1SolidColorBrush> brush_;
     ComPtr<IDWriteTextFormat> searchFormat_, resultFormat_, hintFormat_, calcResultFormat_;
+    ComPtr<IDWriteTextFormat> previewMonoFormat_;  // US-045: Text files in the preview panel
     std::unordered_map<std::wstring, IconEntry> iconCache_;
     std::thread iconThread_;
     std::mutex iconMutex_;
@@ -6832,6 +7526,19 @@ private:
     std::wstring pathRequestedFolder_;
     unsigned pathGeneration_ = 0;
     int pathThreadsRunning_ = 0;
+    // US-045 preview (Task 6): the shown content, the stale-result gate, and
+    // the workers still reading. All UI-thread only; freed by ClosePreview.
+    std::unique_ptr<PreviewContent> preview_;
+    leanlauncher::preview::PreviewGate previewGate_;
+    int previewThreadsRunning_ = 0;
+    std::wstring previewKey_;  // the row shown or loading (category|path|name|vault)
+    float previewScroll_ = 0;
+    // The body layout (built once per content and width) and the brushes its
+    // drawing effects hold. Freed by ReleasePreviewLayout.
+    ComPtr<IDWriteTextLayout> previewLayout_;
+    ComPtr<ID2D1SolidColorBrush> previewAccent_, previewMuted_;
+    float previewLayoutWidth_ = 0, previewBodyHeight_ = 0, previewMaxScroll_ = 0;
+    std::vector<PreviewImage> previewImages_;  // US-046: at most 2 thumbnails
     std::unordered_set<std::wstring> iconPending_;
     std::vector<AppEntry> apps_;
     std::vector<size_t> results_, recent_;

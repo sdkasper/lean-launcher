@@ -14,6 +14,7 @@
 #include "../src/converter.h"
 #include "../src/timezones.h"
 #include "../src/pomodoro.h"
+#include "../src/preview.h"
 #include "reference_scorer.h"
 
 #include <chrono>
@@ -3727,6 +3728,69 @@ int main() {
     }
 
     // -----------------------------------------------------------------------------
+    // US-045: preview panel settings (Task 4) - defaults, hotkey conflicts, export/import
+    // -----------------------------------------------------------------------------
+    {
+        takeoff::Settings s;
+        Check(s.enablePreview && !s.previewOpen && s.previewHotkey.modifiers == takeoff::kModControl &&
+              s.previewHotkey.key == 'P', "preview defaults: on, closed, Ctrl+P");
+        const takeoff::HotkeyBinding ctrlK{takeoff::kModControl, 'K', false};
+        Check(takeoff::HasInternalConflict(4, ctrlK, s) != nullptr, "the preview key can't take the actions key");
+        takeoff::HotkeyBinding ctrlP{takeoff::kModControl, 'P', false};
+        Check(takeoff::HasInternalConflict(1, ctrlP, s) != nullptr, "the actions key can't take the preview key");
+        Check(takeoff::HasInternalConflict(4, {takeoff::kModControl, 'O', false}, s) == nullptr, "a free key is fine");
+        namespace io = leanlauncher::settings_io;
+        takeoff::Settings changed = s;
+        changed.enablePreview = false;
+        changed.previewHotkey = {takeoff::kModControl | takeoff::kModShift, 'P', false};
+        const auto back = io::ParseImport(io::ExportJson(changed, {}, {}, L"1.8.0"), s);
+        Check(back.ok && !back.settings.enablePreview && back.settings.previewHotkey == changed.previewHotkey,
+              "preview settings export and import");
+
+        // Controller ruling: rows 0, 1 and 3 also reject a binding that
+        // collides with the preview shortcut (reciprocal of row 4's checks).
+        Check(takeoff::HasInternalConflict(0, ctrlP, s) != nullptr,
+              "the launcher key can't take the preview key");
+        takeoff::Settings digitPreview = s;
+        digitPreview.previewHotkey = {takeoff::kModAlt, '3', false};
+        Check(takeoff::HasInternalConflict(3, {takeoff::kModAlt, 0, false}, digitPreview) != nullptr,
+              "quick launch can't take a digit the preview shortcut already uses");
+
+        // Fix round 1, item 1: row 2 (Admin) also gets the reciprocal check -
+        // Preview = Ctrl+Alt+Enter, proposing Admin = Ctrl+Alt is rejected.
+        takeoff::Settings previewEnter = s;
+        previewEnter.previewHotkey = {takeoff::kModControl | takeoff::kModAlt, takeoff::kVkReturn, false};
+        Check(takeoff::HasInternalConflict(2, {takeoff::kModControl | takeoff::kModAlt, 0, false}, previewEnter) != nullptr,
+              "admin can't take Enter+modifiers already used by the preview shortcut");
+
+        // Fix round 1, item 3: row 4 also rejects the launcher key, the admin
+        // combo (Enter + admin's modifiers), and the quick-launch combo (a
+        // digit + quick launch's modifiers).
+        Check(takeoff::HasInternalConflict(4, {takeoff::kModAlt, takeoff::kVkSpace, false}, s) != nullptr,
+              "the preview key can't take the launcher key");
+        Check(takeoff::HasInternalConflict(4, {takeoff::kModControl, takeoff::kVkReturn, false}, s) != nullptr,
+              "the preview key can't take the admin combo");
+        Check(takeoff::HasInternalConflict(4, {takeoff::kModAlt, '5', false}, s) != nullptr,
+              "the preview key can't take the quick launch combo");
+
+        // Fix round 1, item 3: importing a preview shortcut of Ctrl+C is
+        // skipped - it's reserved for text editing (HotkeyProblem's row-4
+        // IsReservedInApp check).
+        const std::string previewCtrlC =
+            R"({"format":"lean-launcher-settings","schemaVersion":1,"settings":{"PreviewMod":2,"PreviewKey":67}})";
+        io::ImportResult reservedPreview = io::ParseImport(previewCtrlC, s);
+        Check(reservedPreview.ok && reservedPreview.settings.previewHotkey == s.previewHotkey &&
+              reservedPreview.skipped.size() == 1,
+              "an imported preview shortcut of Ctrl+C is skipped (reserved for text editing)");
+
+        // Fix round 1, item 4: PreviewOpen is window state, not a preference -
+        // it must never be exported or imported (same idea as RunAtStartup).
+        const std::string previewExported = io::ExportJson(s, {}, {}, L"1.8.0");
+        Check(previewExported.find("PreviewOpen") == std::string::npos,
+              "PreviewOpen is window state and is never exported");
+    }
+
+    // -----------------------------------------------------------------------------
     // US-047: offline unit converter (pure logic in src/converter.h)
     // -----------------------------------------------------------------------------
     {
@@ -3916,6 +3980,277 @@ int main() {
         Check(written.find("25 min - write intro") != std::string::npos && written.find("- 09:00: start") != std::string::npos,
               "the line is added under the log heading and nothing else is lost");
         fs::remove_all(pomoDir, pomoEc);
+    }
+
+    // -----------------------------------------------------------------------------
+    // US-045: preview panel (pure logic in src/preview.h)
+    // -----------------------------------------------------------------------------
+    {
+        namespace pv = leanlauncher::preview;
+        auto styleAt = [](const pv::ScannedText& s, const std::wstring& needle) {
+            const size_t at = s.text.find(needle);
+            for (const auto& span : s.spans) {
+                if (at != std::wstring::npos && at >= span.start && at < span.start + span.length) return span.style;
+            }
+            return pv::SpanStyle::Muted;  // "no span" sentinel for these tests
+        };
+        const auto s = pv::ScanMarkdown(L"## Log\n- 09:12 standup with [[Team]]\n- [ ] call **Bob**\n- [x] ship #release\n"
+                                        L"Use `code` here\n```\nfenced\n```\n> [!note] Callout\n| a | b |\n");
+        Check(s.text.find(L"## ") == std::wstring::npos && s.text.find(L"Log") == 0, "heading markers are removed");
+        Check(styleAt(s, L"Log") == pv::SpanStyle::Heading2, "## is a level-2 heading");
+        Check(s.text.find(L"• 09:12") != std::wstring::npos, "bullets become •");
+        Check(s.text.find(L"☐ call") != std::wstring::npos && s.text.find(L"☑ ship") != std::wstring::npos,
+              "checkboxes become ☐ and ☑");
+        Check(s.text.find(L"**") == std::wstring::npos && styleAt(s, L"Bob") == pv::SpanStyle::Bold, "**bold**");
+        Check(s.text.find(L"[[") == std::wstring::npos && styleAt(s, L"Team") == pv::SpanStyle::Link, "[[links]] keep their text");
+        Check(styleAt(s, L"#release") == pv::SpanStyle::Tag, "#tags");
+        Check(styleAt(s, L"code") == pv::SpanStyle::Code && styleAt(s, L"fenced") == pv::SpanStyle::Code, "inline and fenced code");
+        Check(s.text.find(L"> [!note] Callout") != std::wstring::npos && s.text.find(L"| a | b |") != std::wstring::npos,
+              "callouts and tables stay plain text");
+        Check(pv::ScanMarkdown(L"price is 5 # not a tag").text.find(L"# not") != std::wstring::npos &&
+              pv::ScanMarkdown(L"a*b*c").spans.size() <= 1, "stray # and * don't break the text");
+
+        // Task 7: only about the first 8 KB is laid out, cut at a line break.
+        Check(pv::CutAtLineBreak(L"short", 8) == 5, "short text isn't cut");
+        Check(pv::CutAtLineBreak(L"aaaa\nbbbb\ncccc", 12) == 10, "cut just after the last line break that fits");
+        Check(pv::CutAtLineBreak(L"a\nbbbbbbbbbbbbbbbbbbb", 12) == 12, "a break too early is ignored (one long minified line)");
+        Check(pv::CutAtLineBreak(L"abc\xD83D\xDE00zz", 4) == 3, "a surrogate pair isn't split");
+        const std::wstring longBody(20000, L'x');
+        auto laid = pv::BodyForLayout(longBody, false, false);
+        Check(laid.text.size() < 8300 && laid.text.find(L"Preview shows the start of the file") != std::wstring::npos &&
+              laid.spans.size() == 1 && laid.spans[0].style == pv::SpanStyle::Muted &&
+              laid.spans[0].start + laid.spans[0].length == laid.text.size(), "a long body is cut and says so, muted");
+        laid = pv::BodyForLayout(L"# Head\nbody\n", true, true);
+        Check(laid.text == L"Head\nbody\n\nPreview shows the start of the file" && laid.spans.size() == 2 &&
+              laid.spans[0].style == pv::SpanStyle::Heading1 && laid.spans[1].style == pv::SpanStyle::Muted,
+              "a read truncated at 64 KB ends with the start-of-file notice");
+        laid = pv::BodyForLayout(longBody, false, true);
+        Check(laid.text.find(L"64 KB") == std::wstring::npos &&
+              laid.text.find(L"Preview shows the start of the file") != std::wstring::npos,
+              "both cuts at once still give the one truthful notice");
+        laid = pv::BodyForLayout(L"# Head\n**b**", true, false);
+        Check(laid.text == L"Head\nb" && laid.spans.size() == 2, "a short note is laid out whole, no notice");
+        Check(pv::BodyForLayout(L"", false, true).text == L"Preview shows the start of the file", "notice alone for an empty cut body");
+
+        const auto fm = pv::SplitFrontmatter(L"---\ncreated: 2026-09-24T09:01\ntags:\n  - bj/daily\n  - work\n---\n# Title\nbody");
+        Check(fm.propertyLine == L"bj/daily · work · created 2026-09-24 09:01", "frontmatter becomes one line");
+        Check(fm.body == L"# Title\nbody", "the body follows the frontmatter");
+        Check(pv::SplitFrontmatter(L"no frontmatter").body == L"no frontmatter", "notes without frontmatter are unchanged");
+        const auto onlyFm = pv::SplitFrontmatter(L"---\ntags: [a, b]\n---\n");
+        Check(onlyFm.propertyLine == L"a · b" && onlyFm.body.empty(), "inline tag lists and an empty body");
+        Check(pv::SplitFrontmatter(L"---\nunclosed: yes\nbody").body == L"---\nunclosed: yes\nbody",
+              "unclosed frontmatter is shown as text");
+
+        using PK = pv::PreviewKind;
+        Check(pv::ClassifyPreview(L"D:\\v\\Note.md", false, true, false) == PK::Note, "vault notes are notes");
+        Check(pv::ClassifyPreview(L"C:\\x\\readme.MD", false, false, false) == PK::Note, "a loose .md file gets the light markdown");
+        Check(pv::ClassifyPreview(L"C:\\x\\run.PS1", false, false, false) == PK::Text, "extension check is case-insensitive");
+        Check(pv::ClassifyPreview(L"C:\\x\\a.json", false, false, false) == PK::Text, "json is text");
+        Check(pv::ClassifyPreview(L"C:\\x\\photo.JPEG", false, false, false) == PK::Image, "jpeg is an image");
+        Check(pv::ClassifyPreview(L"C:\\x\\movie.mp4", false, false, false) == PK::None, "other files get path details only");
+        Check(pv::ClassifyPreview(L"C:\\x", true, false, false) == PK::Folder, "folders");
+        Check(pv::ClassifyPreview(L"C:\\x\\app.exe", false, false, true) == PK::App, "apps");
+        Check(pv::IsCloudPlaceholder(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS) && pv::IsCloudPlaceholder(FILE_ATTRIBUTE_OFFLINE) &&
+              pv::IsCloudPlaceholder(FILE_ATTRIBUTE_RECALL_ON_OPEN) && !pv::IsCloudPlaceholder(FILE_ATTRIBUTE_NORMAL),
+              "online-only cloud files are detected");
+        Check(pv::DecodeText("caf\xc3\xa9") == L"caf\u00e9", "UTF-8");
+        Check(pv::DecodeText("\xef\xbb\xbfhi") == L"hi", "UTF-8 with BOM");
+        Check(pv::DecodeText(std::string("\xff\xfeh\0i\0", 6)) == L"hi", "UTF-16 LE with BOM (PowerShell/Notepad files)");
+        Check(pv::DecodeText("caf\xe9") == L"caf\u00e9", "invalid UTF-8 falls back to cp1252");
+        Check(pv::DecodeText("caf\xe9 au lait") == L"caf\u00e9 au lait",
+              "a genuinely invalid byte mid-buffer (not a trailing truncation) still falls back to cp1252");
+        Check(pv::DecodeText("caf\x80") == L"caf\u20ac", "an orphan continuation byte (not a lead byte) falls back to cp1252");
+        Check(pv::DecodeText("caf\xc3", true) == L"caf", "a truncated 64 KB cut mid 2-byte UTF-8 char keeps the valid UTF-8 prefix");
+        Check(pv::DecodeText("a\xe2\x82", true) == L"a", "a truncated 64 KB cut after 2 of 3 bytes of a UTF-8 char keeps the valid UTF-8 prefix");
+        Check(pv::DecodeText("caf\xc3", false) == L"caf\u00c3", "an untruncated file ending in a lead byte is not trimmed, and falls back to cp1252");
+        Check(pv::LooksBinary(std::string("MZ\0\x90", 4)) && !pv::LooksBinary("plain text"), "NUL bytes mean binary");
+
+        const fs::path previewDir = fs::temp_directory_path() / L"ll_preview_test";
+        std::error_code pvEc;
+        fs::remove_all(previewDir, pvEc);
+        fs::create_directories(previewDir, pvEc);
+        const std::wstring big = (previewDir / L"big.txt").wstring();
+        { std::ofstream f(big, std::ios::binary); f << std::string(100 * 1024, 'a'); }
+        auto read = pv::ReadPreviewBytes(big);
+        Check(read.bytes.size() == pv::kMaxPreviewBytes && read.truncated, "reads stop at 64 KB and say so");
+        const std::wstring smallFile = (previewDir / L"small.txt").wstring();
+        { std::ofstream f(smallFile, std::ios::binary); f << "hello"; }
+        read = pv::ReadPreviewBytes(smallFile);
+        Check(read.bytes == "hello" && !read.truncated && read.error == 0, "small files are read whole");
+        {
+            // Another app holding the file open for writing must not block the preview.
+            HANDLE writer = CreateFileW(smallFile.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, OPEN_EXISTING, 0, nullptr);
+            Check(pv::ReadPreviewBytes(smallFile).bytes == "hello", "a file open for writing elsewhere still previews");
+            if (writer != INVALID_HANDLE_VALUE) CloseHandle(writer);
+        }
+        Check(pv::ReadPreviewBytes((previewDir / L"missing.txt").wstring()).error != 0, "a missing file reports an error");
+        fs::remove_all(previewDir, pvEc);
+
+        // Side panel when it fits; the window keeps its left edge, and shifts left
+        // only as far as needed to stay on the monitor.
+        auto place = pv::PanelGeometry(0, 1920, 750, 585);
+        Check(!place.overlay && place.windowWidthDip == 1170 && place.windowLeftDip == 585, "fits: keeps its left edge");
+        place = pv::PanelGeometry(0, 1400, 750, 325);
+        Check(!place.overlay && place.windowLeftDip == 1400 - 16 - 1170, "near the right edge: shifts left to fit");
+        place = pv::PanelGeometry(1920, 1920, 750, 1920 + 585);
+        Check(!place.overlay && place.windowLeftDip == 1920 + 585, "a second monitor to the right works the same");
+        place = pv::PanelGeometry(0, 1100, 750, 175);
+        Check(place.overlay && place.windowWidthDip == 750 && place.windowLeftDip == 175, "narrow screens use the overlay");
+
+        // US-046: thumbnails fit the panel, keep their shape, and never grow.
+        auto fit = pv::FitImage(384, 288, 380, 600);
+        Check(fit.width == 380 && fit.height > 284.99f && fit.height < 285.01f, "a wide thumbnail shrinks to the panel width");
+        fit = pv::FitImage(300, 600, 380, 300);
+        Check(fit.width == 150 && fit.height == 300, "a tall thumbnail shrinks to the panel height");
+        fit = pv::FitImage(64, 48, 380, 600);
+        Check(fit.width == 64 && fit.height == 48, "a small image is never scaled up past 1:1");
+        fit = pv::FitImage(0, 48, 380, 600);
+        Check(fit.width == 0 && fit.height == 0, "no size, nothing drawn");
+        fit = pv::FitImage(64, 48, 380, -5);
+        Check(fit.width == 0 && fit.height == 0, "no room, nothing drawn");
+        Check(pv::FormatFileSize(0) == L"0 bytes" && pv::FormatFileSize(1) == L"1 byte" &&
+              pv::FormatFileSize(1023) == L"1023 bytes", "file sizes under 1 KB are in bytes");
+        Check(pv::FormatFileSize(1536) == L"1.5 KB" && pv::FormatFileSize(200 * 1024) == L"200 KB" &&
+              pv::FormatFileSize(5ull * 1024 * 1024 + 300 * 1024) == L"5.3 MB" &&
+              pv::FormatFileSize(3ull << 30) == L"3.0 GB", "file sizes in KB, MB and GB");
+        Check(pv::ImageCaption(L"C:\\pics\\cat.png", 4000, 3000, 2048) == L"cat.png \u00B7 4000\u00D73000 \u00B7 2.0 KB",
+              "caption: name, dimensions, size");
+        Check(pv::ImageCaption(L"cat.webp", 0, 0, 10) == L"cat.webp \u00B7 10 bytes", "caption without known dimensions");
+
+        // US-046 fix round 1: dimensions from hand-built headers. Each header is
+        // minimal, so every shorter prefix must fail: a parser reading past the
+        // end would find the real size there and pass it back.
+        {
+            const auto bytes = [](std::initializer_list<int> values) {
+                std::string out;
+                for (int v : values) out += static_cast<char>(v);
+                return out;
+            };
+            const auto is = [](const std::optional<std::pair<uint32_t, uint32_t>>& d, uint32_t w, uint32_t h) {
+                return d && d->first == w && d->second == h;
+            };
+            const std::string zeros12(12, '\0');
+            const std::string png = bytes({0x89, 'P', 'N', 'G', 13, 10, 26, 10, 0, 0, 0, 13, 'I', 'H', 'D', 'R',
+                0, 0, 0x06, 0x40, 0, 0, 0x03, 0x84});
+            const std::string gif = bytes({'G', 'I', 'F', '8', '9', 'a', 0x40, 0x06, 0x84, 0x03});
+            const std::string bmp = "BM" + zeros12 + bytes({40, 0, 0, 0, 64, 0, 0, 0, 0xD0, 0xFF, 0xFF, 0xFF});
+            const std::string bmpCore = "BM" + zeros12 + bytes({12, 0, 0, 0, 64, 0, 48, 0, 0, 0, 0, 0});
+            const std::string jpeg = bytes({0xFF, 0xD8, 0xFF, 0xE0, 0, 16}) + std::string(14, 'j') +
+                bytes({0xFF, 0xC4, 0, 4, 0x07, 0xD0, 0xFF, 0xFF, 0xC2, 0, 17, 8, 0x07, 0xD0, 0x04, 0xB0});
+            const std::string riff = bytes({'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'});
+            const std::string vp8 = riff + bytes({'V', 'P', '8', ' ', 0, 0, 0, 0, 0, 0, 0, 0x9D, 0x01, 0x2A,
+                0x80, 0x42, 0xE0, 0x01});  // 640 (with scale bits set) x 480
+            const std::string vp8l = riff + bytes({'V', 'P', '8', 'L', 0, 0, 0, 0, 0x2F, 0x8F, 0xC1, 0x4A, 0x00});
+            const std::string vp8x = riff + bytes({'V', 'P', '8', 'X', 0, 0, 0, 0, 0, 0, 0, 0, 0x87, 0x13, 0, 0xB7, 0x0B, 0});
+            Check(is(pv::ImageDimensions(png), 1600, 900), "PNG dimensions from IHDR");
+            Check(is(pv::ImageDimensions(gif), 1600, 900), "GIF logical screen size");
+            Check(is(pv::ImageDimensions(bmp), 64, 48), "BMP info header, top-down height made positive");
+            Check(is(pv::ImageDimensions(bmpCore), 64, 48), "BMP core header");
+            Check(is(pv::ImageDimensions(jpeg), 1200, 2000), "JPEG SOF2 after APP0, skipping DHT (C4)");
+            Check(is(pv::ImageDimensions(vp8), 640, 480), "WebP lossy (VP8)");
+            Check(is(pv::ImageDimensions(vp8l), 400, 300), "WebP lossless (VP8L)");
+            Check(is(pv::ImageDimensions(vp8x), 5000, 3000), "WebP extended (VP8X)");
+            bool prefixesFail = true;
+            for (const std::string* header : {&png, &gif, &bmp, &jpeg, &vp8, &vp8l, &vp8x}) {
+                for (size_t n = 0; n < header->size(); ++n) {
+                    if (pv::ImageDimensions(std::string_view(header->data(), n))) prefixesFail = false;
+                }
+            }
+            Check(prefixesFail, "truncated headers never read past their end");
+            Check(!pv::ImageDimensions(bytes({0xFF, 0xD8, 0xFF, 0xDA, 0, 8, 0xFF, 0xC0, 0, 17, 8, 0, 1, 0, 1, 3, 1})),
+                  "JPEG: scan data before any SOF gives no size");
+            Check(!pv::ImageDimensions(bytes({0xFF, 0xD8, 0xFF, 0xE1, 0, 1, 0xFF, 0xC0, 0, 17, 8, 0, 1, 0, 1})),
+                  "JPEG: a segment length under 2 is rejected");
+            Check(!pv::ImageDimensions(bytes({0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xF0, 0xFF, 0xC0, 0, 17, 8, 0, 1, 0, 1})),
+                  "JPEG: a length past the end stops the scan");
+            Check(!pv::ImageDimensions(bytes({0xFF, 0xD8, 0xFF, 0xFF, 0xFF, 0xFF})), "JPEG: only fill bytes");
+            Check(!pv::ImageDimensions(bytes({0xFF, 0xD8, 0x12, 0x34})), "JPEG: garbage after SOI");
+            Check(!pv::ImageDimensions(png.substr(0, 12) + "IDAT" + png.substr(16)), "PNG without IHDR first");
+            Check(!pv::ImageDimensions(riff + "ABCD" + std::string(20, '\0')), "WebP with an unknown chunk");
+            Check(!pv::ImageDimensions("hello, this is not an image at all") && !pv::ImageDimensions(""),
+                  "text and empty input give no size");
+            Check(!pv::ImageDimensions(bytes({'G', 'I', 'F', '8', '9', 'a', 0, 0, 5, 0})), "zero width is unknown");
+        }
+
+        pv::PreviewGate gate;
+        const unsigned first = gate.Next();
+        const unsigned second = gate.Next();
+        Check(!gate.IsCurrent(first) && gate.IsCurrent(second), "only the latest request is current (arrow held down)");
+        gate.Invalidate();
+        Check(!gate.IsCurrent(second), "hiding the launcher drops results in flight");
+
+        std::vector<leanlauncher::typed::PathEntry> entries;
+        for (int i = 0; i < 25; ++i) entries.push_back({L"file" + std::to_wstring(i), false, false});
+        entries.push_back({L"Sub", true, false});
+        entries.push_back({L".hidden", false, true});
+        const std::wstring summary = pv::FolderSummary(entries);
+        Check(summary.rfind(L"\U0001F4C1 Sub\n", 0) == 0, "folders first");
+        Check(summary.find(L".hidden") == std::wstring::npos, "hidden items are left out");
+        Check(summary.find(L"and 6 more") != std::wstring::npos, "20 shown, the rest counted");
+        Check(summary.find(L"6+ more") == std::wstring::npos, "a complete listing has no + after the count");
+        Check(pv::FolderSummary(entries, 20, true).find(L"and 6+ more") != std::wstring::npos,
+              "a listing cut at the entry cap says the count is a minimum");
+
+        // Final review: capture-row keys ignore the typed text, other rows keep the name.
+        Check(pv::PreviewKey(7, L"C:\\V\\Daily\\d.md", L"Add task: a", L"C:\\V", false) ==
+              pv::PreviewKey(7, L"C:\\V\\Daily\\d.md", L"Add task: ab", L"C:\\V", false),
+              "typing more capture text doesn't reload the target note");
+        Check(pv::PreviewKey(7, L"C:\\V\\a.md", L"x", L"C:\\V", false) != pv::PreviewKey(7, L"C:\\V\\b.md", L"x", L"C:\\V", false),
+              "another capture target is another preview");
+        Check(pv::PreviewKey(7, L"C:\\V\\a.md", L"x", L"C:\\V", false) != pv::PreviewKey(8, L"C:\\V\\a.md", L"x", L"C:\\V", false),
+              "the category is part of the key");
+        Check(pv::PreviewKey(7, L"C:\\V\\a.md", L"x", L"C:\\V", false) != pv::PreviewKey(7, L"C:\\V\\a.md", L"x", L"D:\\W", false),
+              "the vault is part of the key");
+        Check(pv::PreviewKey(1, L"C:\\a", L"x", L"", true) != pv::PreviewKey(1, L"C:\\a", L"y", L"", true),
+              "other rows still include the name");
+
+        // Final review: an absolute capture target must stay inside the vault.
+        Check(pv::IsNoteInsideVault(L"C:\\Vault\\Daily\\2026-09-24.md", L"C:\\Vault"), "a daily note inside the vault");
+        Check(pv::IsNoteInsideVault(L"c:/vault/Inbox/Tasks.md", L"C:\\Vault\\"), "slashes, case and a trailing separator don't matter");
+        Check(!pv::IsNoteInsideVault(L"C:\\Vault2\\x.md", L"C:\\Vault"), "a sibling folder with the same prefix is outside");
+        Check(!pv::IsNoteInsideVault(L"C:\\Vault\\..\\x.md", L"C:\\Vault"), "a .. segment is refused");
+        Check(!pv::IsNoteInsideVault(L"C:\\Vault\\x.md:stream", L"C:\\Vault"), "an alternate data stream is refused");
+        Check(!pv::IsNoteInsideVault(L"C:\\Vault", L"C:\\Vault") && !pv::IsNoteInsideVault(L"C:\\Vault\\", L"C:\\Vault"),
+              "the vault folder itself is not a note");
+        Check(!pv::IsNoteInsideVault(L"C:\\x.md", L""), "no vault, nothing is inside it");
+
+        // Task 6: what the preview thread builds from a read.
+        pv::ReadResult raw;
+        raw.placeholder = true;
+        auto text = pv::BuildTextPreview(raw, false);
+        Check(text.status == L"Not downloaded - open to download" && text.body.empty(), "an online-only file is never shown, only named");
+        raw = {};
+        raw.bytes = std::string("MZ\0\x90", 4);
+        Check(pv::BuildTextPreview(raw, false).status == L"Binary file - no preview", "binary files get no preview");
+        raw = {};
+        raw.error = ERROR_FILE_NOT_FOUND;
+        Check(pv::BuildTextPreview(raw, false).status == L"File not found", "a missing file says so");
+        Check(pv::BuildTextPreview(raw, true, true).status == L"Today's note doesn't exist yet",
+              "a capture row's daily note that isn't there yet says so");
+        raw.error = ERROR_PATH_NOT_FOUND;
+        Check(pv::BuildTextPreview(raw, true, true).status == L"Today's note doesn't exist yet",
+              "a missing daily-note folder is the same case");
+        Check(pv::BuildTextPreview(raw, true, false).status == L"File not found", "another missing note is just not found");
+        raw = {};
+        raw.error = ERROR_ACCESS_DENIED;
+        Check(pv::BuildTextPreview(raw, true).status == L"Access denied", "a locked-down file says so");
+        raw = {};
+        raw.bytes = "---\ntags: [a, b]\n---\n# Title\nBody";
+        text = pv::BuildTextPreview(raw, true);
+        Check(!text.propertyLine.empty() && text.body == L"# Title\nBody" && text.status.empty(), "notes split off their frontmatter");
+        text = pv::BuildTextPreview(raw, false);
+        Check(text.propertyLine.empty() && text.body.rfind(L"---\n", 0) == 0, "plain text files keep their first lines as they are");
+        raw.bytes = "---\ntags: [a]\n---\n";
+        text = pv::BuildTextPreview(raw, true);
+        Check(!text.propertyLine.empty() && text.body.empty() && text.status.empty(), "a note that's only frontmatter shows its property line");
+        raw = {};
+        Check(pv::BuildTextPreview(raw, false).status == L"Empty file", "an empty file is never a blank panel");
+        raw.bytes = std::string(pv::kMaxPreviewBytes - 1, 'a') + "\xc3";
+        raw.truncated = true;
+        text = pv::BuildTextPreview(raw, false);
+        Check(text.truncated && text.body.size() == pv::kMaxPreviewBytes - 1 && text.body.back() == L'a',
+            "a 64 KB cut mid-character stays UTF-8 and keeps the truncated flag");
     }
 
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";

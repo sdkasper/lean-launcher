@@ -44,6 +44,7 @@
 - **Path completion** - type `C:\Us`, `%APPDATA%\Mi`, `~\Doc`, or `\\server\share\` to browse that folder right in the results; `Tab` completes, `Enter` opens, `Shift+Enter` opens the typed path. Folders load in the background, so an unreachable share never freezes the launcher.
 - **Unit and time zone converter** - `5 km in mi`, `72 f to c`, `3 GB in GiB`, `time in Tokyo`, `10am PST in CET`. Offline, with daylight saving from Windows' own time zone rules.
 - **Pomodoro timer** - `pomo 25 write intro` starts a focus timer with a tray reminder; finished timers are logged to today's note if it exists (the timer never creates a note or starts Obsidian).
+- **Preview panel** - press `Ctrl+P` to show the selected note, text file, folder, or image beside the results, read straight from disk (Obsidian is never started, and nothing is written to disk). Notes get light formatting (larger bold headings, bullets, ☐/☑ checkboxes, bold/italic, `[[links]]` and `#tags` in the accent colour); any `.md` file shows this way. Long files show only the start, with a "Preview shows the start of the file" notice, since the panel reads at most 64 KB. Images show a thumbnail plus their dimensions and size below it. A long path wraps onto up to three lines under the title. Online-only cloud files show "Not downloaded - open to download" and are never downloaded. Scroll the panel with the mouse wheel or Shift+PgUp/PgDn; plain PgUp/PgDn still move through the results. On a narrow screen the panel shows as an overlay instead of widening the window. The panel stays open until you press `Ctrl+P` again; whether it's open is remembered between launches, though that isn't part of a settings export. Turn the panel, or its shortcut, off in Settings > Search.
 - **Built-in Calculator** - Instantly evaluate mathematical expressions (e.g. `125 * 8`, `sqrt(144)`, `2^10`, `(10 + 20) * 3`). Press `Enter` to copy the result to the clipboard and close, or `Ctrl+C` to copy directly.
 - **Keyboard-First** - Launch, elevate to admin (`Ctrl+Enter`), and trigger quick-launch slots (`Alt+1`-`8`) without touching your mouse.
 - **Privacy First** - Zero telemetry, zero analytics, and zero background services. Search history is never written to disk.
@@ -83,6 +84,7 @@ Entirely optional and off by default until you point it at a vault.
 | `Alt+1` ... `Alt+8` | Quick-launch visible result |
 | `Ctrl+C` | Copy selected text or calculation result |
 | `Ctrl+K` | Open actions menu (copy path, copy calculation, admin, etc.) |
+| `Ctrl+P` | Toggle the preview panel |
 | `Escape` | Clear query or close |
 
 *Hotkeys, and every Obsidian action's prefix, can be customized anytime from the in-app Settings (gear icon).*

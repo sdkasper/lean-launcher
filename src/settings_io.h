@@ -69,6 +69,7 @@ inline constexpr HotkeyField kHotkeys[] = {
     {"Actions", &Settings::actionsHotkey, true, 1},
     {"Admin", &Settings::administratorHotkey, false, 2},
     {"Quick", &Settings::quickLaunchHotkey, false, 3},
+    {"Preview", &Settings::previewHotkey, true, 4},
 };
 
 inline constexpr BoolField kBools[] = {
@@ -83,6 +84,10 @@ inline constexpr BoolField kBools[] = {
     {"TimeZonesEnabled", &Settings::enableTimeZones},
     {"PomodoroEnabled", &Settings::enablePomodoro},
     {"PomodoroLog", &Settings::pomodoroLog},
+    {"PreviewEnabled", &Settings::enablePreview},
+    // PreviewOpen is window state (whether the panel is currently expanded),
+    // not a preference - like RunAtStartup, it's never exported or imported.
+    // Its registry load/save stays in launcher.h's LoadSettings/SaveSettings.
     {"ObsidianEnabled", &Settings::obsidianEnabled},
     {"VaultSearchEnabled", &Settings::vaultSearchEnabled},
     {"TaskAddEnabled", &Settings::taskAddEnabled},
@@ -403,7 +408,11 @@ inline const wchar_t* PrefixConflict(const Settings& s) {
 inline const wchar_t* HotkeyProblem(const HotkeyField& field, const HotkeyBinding& proposed, const Settings& candidate) {
     if (proposed.disabled) return nullptr;
     if (field.hasKey && takeoff::IsSystemReserved(proposed.modifiers, proposed.key)) return L"reserved by Windows";
-    if (field.row == 1 && takeoff::IsReservedInApp(proposed)) return L"used by text editing";
+    // Row 4 (Preview) is matched the same way as row 1 (Actions): a local
+    // WM_KEYDOWN check while the search box has focus, not a global
+    // RegisterHotKey. So it can steal the same text-editing combos
+    // (Ctrl+A/C/V/X/Z/L) out of the search box the same way Actions can.
+    if ((field.row == 1 || field.row == 4) && takeoff::IsReservedInApp(proposed)) return L"used by text editing";
     return takeoff::HasInternalConflict(field.row, proposed, candidate);
 }
 
