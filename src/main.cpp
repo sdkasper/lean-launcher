@@ -105,6 +105,13 @@ constexpr UINT_PTR kPomodoroTickTimer = 8;
 constexpr UINT_PTR kPomodoroEndTimer = 9;
 // Starts a preview load 80 ms after the selection stops changing (US-045).
 constexpr UINT_PTR kPreviewDebounceTimer = 10;
+// Releases the render target and the Direct2D factory once the launcher has been
+// hidden this long, so the resident process gives back the GPU driver's memory (US-053).
+constexpr UINT_PTR kGraphicsReleaseTimer = 11;
+#ifndef LEANLAUNCHER_GRAPHICS_RELEASE_MS
+#define LEANLAUNCHER_GRAPHICS_RELEASE_MS (15 * 60 * 1000)  // measurement builds may pass a shorter delay
+#endif
+constexpr UINT kGraphicsReleaseDelayMs = LEANLAUNCHER_GRAPHICS_RELEASE_MS;
 
 struct AppEntry {
     std::wstring name;

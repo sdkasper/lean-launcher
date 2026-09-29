@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.0.2] - 2026-09-29
+
+### Changed
+- **Graphics memory is released while the launcher is hidden** - after the launcher has been hidden for 15 minutes (or has never been opened for 15 minutes after starting), it releases its Direct2D render target and factory, which hands back the graphics driver's memory: about 35 MB of private bytes on a test machine with a dedicated graphics card. Nothing visible is lost. The next time you open the launcher the graphics are rebuilt before the window appears, which took about 125 ms on the test machine; opening it again within 15 minutes is unchanged. The release never happens while the launcher is visible. The README now explains private bytes versus the working set that Task Manager shows by default.
+
 ## [2.0.1] - 2026-09-29
 
 ### Fixed

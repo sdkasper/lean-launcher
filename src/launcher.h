@@ -39,6 +39,8 @@ public:
         // Create the hardware render target while still hidden so the first
         // visible frame does not stall on device setup.
         EnsureTarget();
+        // Never shown yet counts as hidden: give the graphics back if nobody opens it.
+        SetTimer(hwnd_, kGraphicsReleaseTimer, kGraphicsReleaseDelayMs, nullptr);
         RegisterShortcut();
         UpdateTrayIcon();
         takeoff::CleanupOldUpdates();
@@ -367,6 +369,9 @@ private:
                 KillTimer(hwnd_, kCommandConfirmTimer);
                 commandGate_.Cancel();
                 InvalidateRect(hwnd_, nullptr, FALSE);
+            } else if (wParam == kGraphicsReleaseTimer) {
+                KillTimer(hwnd_, kGraphicsReleaseTimer);
+                if (!IsWindowVisible(hwnd_)) ReleaseGraphics();
             } else if (wParam == kTrimTimer) {
                 KillTimer(hwnd_, kTrimTimer);
                 if (!IsWindowVisible(hwnd_)) {
@@ -603,6 +608,7 @@ private:
             KillTimer(hwnd_, kHotkeyTimer);
             KillTimer(hwnd_, kRenderRetryTimer);
             KillTimer(hwnd_, kTrimTimer);
+            KillTimer(hwnd_, kGraphicsReleaseTimer);
             ClosePreview(true);  // a load still in flight posts to a dead window and frees its own result
             if (hotkeyRegistered_) UnregisterHotKey(hwnd_, kHotkeyId);
             RemoveTrayIcon();
@@ -1528,6 +1534,7 @@ private:
 
     void Show() {
         KillTimer(hwnd_, kTrimTimer);
+        KillTimer(hwnd_, kGraphicsReleaseTimer);
         page_ = Page::Launcher;
         hotkeyWarningDismissed_ = false;
         input_.Clear();
@@ -1558,6 +1565,9 @@ private:
         ReloadSnippetsIfChanged();
         UpdateResults();
         ResizeAndPosition();
+        // After an idle release (US-053) the target is rebuilt here, before the
+        // window appears, so the first frame is drawn rather than shown blank.
+        EnsureTarget();
         ShowWindow(hwnd_, SW_SHOWNORMAL);
         SetForegroundWindow(hwnd_);
         SetFocus(hwnd_);
@@ -2079,6 +2089,8 @@ private:
         // After a while hidden, release idle pages so the resident process
         // stays cheap. Quick toggles never wait: showing kills this timer.
         SetTimer(hwnd_, kTrimTimer, 10000, nullptr);
+        // Much later, give the graphics back too (US-053); Show() cancels this.
+        SetTimer(hwnd_, kGraphicsReleaseTimer, kGraphicsReleaseDelayMs, nullptr);
     }
 
     void InvalidateSearch() {
@@ -6483,6 +6495,11 @@ private:
 
     bool EnsureTarget() {
         if (target_) return true;
+        // The factory is released with the target after an idle spell (US-053).
+        if (!factory_ &&
+            FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, factory_.GetAddressOf()))) {
+            return false;
+        }
         RECT rect{};
         GetClientRect(hwnd_, &rect);
         auto properties = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
@@ -6512,6 +6529,17 @@ private:
         previewImages_.clear();
         brush_.Reset();
         target_.Reset();
+    }
+
+    // US-053: while the launcher stays hidden, the hardware render target (and with
+    // it the GPU driver's memory) is the largest thing it holds. Everything that
+    // depends on it is rebuilt lazily by EnsureTarget() on the next show; the
+    // device-loss path already relies on the same rebuild. Never runs while visible.
+    void ReleaseGraphics() {
+        if (IsWindowVisible(hwnd_)) return;
+        DiscardTarget();
+        factory_.Reset();
+        SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1), static_cast<SIZE_T>(-1));
     }
 
     D2D1_COLOR_F Foreground() const {

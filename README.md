@@ -35,7 +35,7 @@
 
 ### Launcher Core
 
-- **Ultra-Lightweight** - Built in pure C++, Win32, and Direct2D. No Electron, no Chromium runtime. The entire executable is under 1 MB. Memory depends on what it indexes: on a test machine with a large vault it used about 70 MB with file search off and about 130 MB with full-disk file search on. Turning File search off frees its index straight away.
+- **Ultra-Lightweight** - Built in pure C++, Win32, and Direct2D. No Electron, no Chromium runtime. The entire executable is under 1 MB. Memory depends on what it indexes: on a test machine with a large vault it used about 70 MB with file search off and about 130 MB with full-disk file search on. Turning File search off frees its index straight away. Those figures are private bytes (memory the launcher has claimed). Task Manager's default Memory column shows the working set instead, which is much smaller (often under 10 MB while the launcher sits hidden) because Windows moves idle pages out; use the Details tab's "Commit size" column to see private bytes. After the launcher has been hidden for 15 minutes it also gives back its graphics resources (about 35 MB on a test machine with a dedicated graphics card) and rebuilds them the next time you open it, which takes roughly a tenth of a second.
 - **Instant Search** - In-memory indexing and weighted fuzzy matching return results in under a millisecond.
 - **Smart Matching** - Finds apps by acronyms and prefixes: `vsc` → Visual Studio Code, `tm` → Task Manager, `wu` → Windows Update, `dev man` → Device Manager
 - **System Tools Included** - Instantly launch Control Panel applets, Windows Settings, Device Manager, and Services alongside desktop apps.
