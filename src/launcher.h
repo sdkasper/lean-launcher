@@ -3034,11 +3034,15 @@ private:
                 if (!in || in.gcount() != static_cast<std::streamsize>(bytes.size())) { ++skipped; continue; }
             }
             incomingBytes += bytes.size();
-            sn::ParseResult parsed = sn::ParseSnippets(bytes);
+            sn::ParseResult parsed = sn::ParseSnippets(bytes, true);
             skipped += parsed.warnings.size();
             for (auto& snippet : parsed.snippets) {
-                if (sn::LooksLikeEspansoVariable(snippet.replace)) ++skipped;
-                else incoming.push_back(std::move(snippet));
+                if (sn::LooksLikeEspansoVariable(snippet.replace)) {
+                    ++skipped;
+                } else {
+                    snippet.source = it->path().filename().wstring();
+                    incoming.push_back(std::move(snippet));
+                }
             }
             ++files;
         }
@@ -3055,6 +3059,7 @@ private:
         // Nothing is dropped silently: entries the parser cannot keep are counted and shown in the prompt.
         const std::filesystem::path file = SnippetsFilePath();
         std::vector<sn::Snippet> current;
+        std::string trailingComments;
         size_t unreadable = 0;
         const sn::FileState fileState = sn::ClassifyPath(file);
         if (fileState == sn::FileState::Error) {
@@ -3075,12 +3080,13 @@ private:
                 settingsStatus_ = L"Couldn't read your snippets file; nothing changed.";
                 return;
             }
-            sn::ParseResult parsed = sn::ParseSnippets(bytes);
+            sn::ParseResult parsed = sn::ParseSnippets(bytes, true);
             unreadable = parsed.warnings.size();
             current = std::move(parsed.snippets);
+            trailingComments = std::move(parsed.trailingComments);
         }
         const sn::MergeResult merged = sn::MergeSnippets(std::move(current), incoming);
-        const std::string yaml = sn::SerializeSnippets(merged.merged);
+        const std::string yaml = sn::SerializeSnippets(merged.merged, trailingComments);
         if (merged.overflow > 0 || !sn::ImportWithinLimits(yaml.size(), merged.merged.size())) {
             // The size shown is that of the capped file that would be written, not of the full set.
             settingsStatus_ = L"The import would exceed the snippet limits (" +

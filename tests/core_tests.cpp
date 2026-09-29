@@ -4781,6 +4781,75 @@ int main() {
               "the prefix and path round-trip through export and import");
     }
 
+    // US-052 (v2.0.1): the Espanso import keeps comments and groups new snippets by source file
+    {
+        namespace sn = leanlauncher::snippets;
+        const std::string yaml =
+            "# my header\n"
+            "matches:\n"
+            "\n"
+            "# LEAN PRODUCTIVITY\n"
+            "  - trigger: \",lp\"\n"
+            "    replace: \"LeanProductivity\"\n"
+            "\n"
+            "  # Invoices\n"
+            "  - trigger: \",inv\"\n"
+            "    replace: |\n"
+            "      Hi,\n"
+            "      # not a comment\n"
+            "      bye\n"
+            "\n"
+            "# VARIABLES\n"
+            "  # about the next one\n"
+            "  - trigger: \",date\"\n"
+            "    replace: \"x\"\n"
+            "    vars:\n"
+            "      - name: d\n"
+            "\n"
+            "  - trigger: \",after\"\n"
+            "    replace: \"after\"\n"
+            "# the end\n";
+        const auto plain = sn::ParseSnippets(yaml);
+        Check(plain.snippets.size() == 3 && plain.snippets[0].comments.empty() && plain.trailingComments.empty(),
+              "by default the parser drops comments, so the running index never carries them");
+        const auto kept = sn::ParseSnippets(yaml, true);
+        Check(kept.snippets.size() == 3 && kept.warnings.size() == 1, "comment capture does not change which items load");
+        Check(kept.snippets[0].comments == "# my header\n# LEAN PRODUCTIVITY",
+              "comments above an item, including ones before matches:, stay with it");
+        Check(kept.snippets[1].comments == "  # Invoices" && kept.snippets[1].replace == L"Hi,\n# not a comment\nbye\n",
+              "an indented comment stays indented and a # line inside a | block is text, not a comment");
+        Check(kept.snippets[2].comments == "# VARIABLES",
+              "a section header of a skipped item moves to the next item; its indented comment is dropped");
+        Check(kept.trailingComments == "# the end", "comments after the last item are kept");
+
+        const std::string written = sn::SerializeSnippets(kept.snippets, kept.trailingComments);
+        Check(written.find("matches:\n\n# my header\n# LEAN PRODUCTIVITY\n  - trigger: \",lp\"") == 0 &&
+              written.find("\n\n# VARIABLES\n  - trigger: \",after\"") != std::string::npos,
+              "serialize puts a blank line before each item and its comments directly above it");
+        const auto again = sn::ParseSnippets(written, true);
+        Check(again.warnings.empty() && again.snippets.size() == 3 && again.trailingComments == "# the end" &&
+              again.snippets[0].comments == kept.snippets[0].comments &&
+              again.snippets[1].comments == kept.snippets[1].comments &&
+              again.snippets[2].comments == kept.snippets[2].comments &&
+              again.snippets[1].replace == kept.snippets[1].replace,
+              "serialize then parse keeps comments and text (a second import changes nothing)");
+        Check(sn::SerializeSnippets(again.snippets, again.trailingComments) == written,
+              "rewriting an already structured file is stable");
+
+        sn::Snippet keepMe{L":ex", L"e", L"", "# keep", L""};
+        sn::Snippet dup{L":ex", L"d", L"", "", L"3SS.yml"};
+        sn::Snippet a{L":aa", L"1", L"", "# A", L"3SS.yml"};
+        sn::Snippet b{L":bb", L"2", L"", "", L"3SS.yml"};
+        sn::Snippet c{L":cc", L"3", L"", "", L"base.yml"};
+        const auto merged = sn::MergeSnippets({keepMe}, {dup, a, b, c});
+        Check(merged.added == 3 && merged.duplicates == 1 && merged.merged.size() == 4, "merge counts are unchanged");
+        Check(merged.merged[0].comments == "# keep", "an existing snippet keeps its comments");
+        Check(merged.merged[1].comments == "# From Espanso: 3SS.yml\n# A" && merged.merged[2].comments.empty() &&
+              merged.merged[3].comments == "# From Espanso: base.yml",
+              "the first snippet added from each Espanso file gets one header, above its own comments");
+        Check(merged.merged[1].source.empty(), "the import-only source is not kept on merged snippets");
+    }
+
     // US-050: Espanso import confirmation text, filters and limits
     {
         namespace sn = leanlauncher::snippets;
@@ -4788,8 +4857,9 @@ int main() {
         Check(text.find(L"Add 3 snippets from Espanso (2 already exist, 1 entry skipped)?") == 0,
               "the import prompt states added, existing and skipped counts with correct grammar");
         Check(text.find(L"snippets-before-import-20260929-101500.yml") != std::wstring::npos &&
-              text.find(L"comments in it are lost") != std::wstring::npos,
-              "the import prompt names the backup file and warns that comments are lost");
+              text.find(L"comments and layout of your file are kept") != std::wstring::npos &&
+              text.find(L"are lost") == std::wstring::npos,
+              "the import prompt names the backup file and says comments and layout are kept");
         Check(text.find(L"can't read") == std::wstring::npos && text.find(L"Import limit reached") == std::wstring::npos,
               "the import prompt has no unreadable-entry or limit note when there is nothing to report");
         Check(sn::EspansoImportPrompt(1, 0, 2, 0, L"b.yml", false).find(L"Add 1 snippet from Espanso (0 already exist, 2 entries skipped)?") == 0,

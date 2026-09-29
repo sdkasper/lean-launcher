@@ -32,11 +32,19 @@ struct Snippet {
     std::wstring trigger;
     std::wstring replace;
     std::wstring label;
+    // Only filled by ParseSnippets(yaml, keepComments = true), for the Espanso
+    // import: the comment lines above the item ("# SECTION" at column 0, other
+    // comments indented by two spaces), joined by '\n'. The running index never
+    // carries them.
+    std::string comments;
+    // Import only: the Espanso file this snippet came from.
+    std::wstring source;
 };
 
 struct ParseResult {
     std::vector<Snippet> snippets;
     std::vector<std::wstring> warnings;
+    std::string trailingComments;  // comment lines after the last item (keepComments only)
 };
 
 // Why a trigger cannot be used, or nullptr when it is fine.
@@ -201,7 +209,34 @@ inline bool ReadBlock(const std::vector<std::string_view>& lines, size_t& i, siz
     return true;
 }
 
+inline void JoinLines(std::string& dst, std::string_view more) {
+    if (more.empty()) return;
+    if (!dst.empty()) dst.push_back('\n');
+    dst.append(more);
+}
+
+// A comment line, kept verbatim but re-indented to column 0 or two spaces.
+inline void AddCommentLine(std::string& dst, std::string_view line) {
+    std::string text = IndentOf(line) == 0 ? "" : "  ";
+    text.append(Trim(line));
+    JoinLines(dst, text);
+}
+
+// Only the column-0 lines: the section headers that outlive a skipped item.
+inline std::string SectionLines(std::string_view comments) {
+    std::string out;
+    for (size_t pos = 0; pos <= comments.size();) {
+        size_t end = comments.find('\n', pos);
+        if (end == std::string_view::npos) end = comments.size();
+        const std::string_view line = comments.substr(pos, end - pos);
+        if (!line.empty() && line.front() == '#') JoinLines(out, line);
+        pos = end + 1;
+    }
+    return out;
+}
+
 struct Item {
+    std::string comments;
     size_t line = 0;
     size_t dashIndent = 0;
     size_t keyIndent = 0;  // 0 until the first key line fixes it
@@ -216,7 +251,7 @@ struct Item {
 // items have "trigger", "replace" and "label". Any other key (vars, word,
 // triggers, ...) skips that whole item with a warning, so an item is never
 // half-applied. Never throws; malformed input yields warnings.
-inline ParseResult ParseSnippets(std::string_view yaml) {
+inline ParseResult ParseSnippets(std::string_view yaml, bool keepComments = false) {
     using namespace detail;
     ParseResult result;
     if (yaml.size() > kMaxFileBytes) {
@@ -236,12 +271,14 @@ inline ParseResult ParseSnippets(std::string_view yaml) {
     }
 
     std::unordered_set<std::wstring> seen;
+    std::string pending;  // comment lines waiting for the next item
+    std::string orphan;   // section headers of skipped items, passed on to the next item
     bool capWarned = false;
     bool inMatches = false;
     bool haveItem = false;
     Item item;
 
-    const auto finish = [&]() {
+    const auto finishItem = [&]() {
         if (!haveItem) return;
         haveItem = false;
         const std::wstring where = L"line " + std::to_wstring(item.line) + L": ";
@@ -282,17 +319,30 @@ inline ParseResult ParseSnippets(std::string_view yaml) {
         }
         result.snippets.push_back(std::move(snippet));
     };
+    const auto finish = [&]() {
+        if (!haveItem) return;
+        const size_t before = result.snippets.size();
+        finishItem();
+        if (!keepComments) return;
+        if (result.snippets.size() > before) result.snippets.back().comments = item.comments;
+        else JoinLines(orphan, SectionLines(item.comments));
+    };
 
     for (size_t i = 0; i < lines.size(); ++i) {
         const std::string_view line = lines[i];
         const std::string_view trimmed = Trim(line);
-        if (trimmed.empty() || trimmed.front() == '#') continue;
+        if (trimmed.empty()) continue;
+        if (trimmed.front() == '#') {
+            if (keepComments) AddCommentLine(pending, line);
+            continue;
+        }
         const size_t indent = IndentOf(line);
         const bool isDash = trimmed.front() == '-' && (trimmed.size() == 1 || trimmed[1] == ' ');
 
         if (indent == 0 && !isDash) {  // a top-level key
             finish();
             inMatches = trimmed.substr(0, 8) == "matches:" && TrailingIsEmpty(trimmed.substr(8));
+            if (!inMatches) pending.clear();  // comments about another top-level key
             continue;
         }
         if (!inMatches) continue;
@@ -302,6 +352,12 @@ inline ParseResult ParseSnippets(std::string_view yaml) {
             if (haveItem && indent > item.dashIndent) continue;  // a nested list inside the item
             finish();
             item = Item{};
+            if (keepComments) {
+                item.comments = std::move(orphan);
+                JoinLines(item.comments, pending);
+                orphan.clear();
+                pending.clear();
+            }
             item.line = i + 1;
             item.dashIndent = indent;
             haveItem = true;
@@ -365,6 +421,10 @@ inline ParseResult ParseSnippets(std::string_view yaml) {
         }
     }
     finish();
+    if (keepComments) {
+        result.trailingComments = std::move(orphan);
+        JoinLines(result.trailingComments, pending);
+    }
     return result;
 }
 
@@ -486,13 +546,21 @@ inline std::string QuoteYaml(const std::string& utf8) {
 }
 }  // namespace detail
 
-// The file format ParseSnippets reads, used by the Espanso import.
-inline std::string SerializeSnippets(const std::vector<Snippet>& list) {
+// The file format ParseSnippets reads, used by the Espanso import: one blank
+// line before each item, and the item's comment lines (if any) right above it.
+inline std::string SerializeSnippets(const std::vector<Snippet>& list, std::string_view trailingComments = {}) {
     std::string out = "matches:\n";
     for (const auto& s : list) {
+        out += "\n";
+        if (!s.comments.empty()) out += s.comments + "\n";
         out += "  - trigger: " + detail::QuoteYaml(obsidian::WideToUtf8(s.trigger)) + "\n";
         if (!s.label.empty()) out += "    label: " + detail::QuoteYaml(obsidian::WideToUtf8(s.label)) + "\n";
         out += "    replace: " + detail::QuoteYaml(obsidian::WideToUtf8(s.replace)) + "\n";
+    }
+    if (!trailingComments.empty()) {
+        out += "\n";
+        out.append(trailingComments);
+        out += "\n";
     }
     return out;
 }
@@ -562,23 +630,34 @@ inline std::wstring EspansoImportPrompt(size_t added, size_t duplicates, size_t 
     }
     if (!backupName.empty()) {
         text += L"\n\nYour current snippets file is saved first as " + backupName +
-                L" in the same folder and then rewritten in the standard format, so any comments in it are lost.";
+                L" in the same folder. The new snippets are added at the end, grouped by Espanso file, and the" +
+                L" comments and layout of your file are kept.";
     }
     return text;
 }
 
 // Existing snippets win: an incoming snippet with a trigger already present
-// is counted as a duplicate and dropped.
+// is counted as a duplicate and dropped. The first snippet added from each
+// Espanso file gets a "# From Espanso: <file>" header above its own comments,
+// so imported snippets stay grouped by file.
 inline MergeResult MergeSnippets(std::vector<Snippet> existing, const std::vector<Snippet>& incoming) {
     MergeResult result;
     result.merged = std::move(existing);
     std::unordered_set<std::wstring> triggers;
+    std::unordered_set<std::wstring> headed;
     for (const auto& s : result.merged) triggers.insert(s.trigger);
     for (const auto& s : incoming) {
         if (!triggers.insert(s.trigger).second) {
             ++result.duplicates;
         } else if (result.merged.size() < kMaxSnippets) {
-            result.merged.push_back(s);
+            Snippet added = s;
+            if (!added.source.empty() && headed.insert(added.source).second) {
+                std::string header = "# From Espanso: " + obsidian::WideToUtf8(added.source);
+                detail::JoinLines(header, added.comments);
+                added.comments = std::move(header);
+            }
+            added.source.clear();
+            result.merged.push_back(std::move(added));
             ++result.added;
         } else {
             ++result.overflow;

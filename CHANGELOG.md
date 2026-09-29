@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.0.1] - 2026-09-29
+
+### Fixed
+- **Import from Espanso keeps your structure** - the import used to merge every Espanso file into one flat list and rewrite your snippets file without its comments. It now groups the snippets it adds under a `# From Espanso: <file>` header for each Espanso file (for example `# From Espanso: 3SS.yml`), keeps the section comments from your Espanso files (such as `# Invoices`), and leaves the comments and layout of your own snippets file as they are. The written file has a blank line between snippets and uses `\n` for line breaks in multi-line text, so it is easy to read and edit. Section headers of entries that are skipped (for example ones that use variables) are kept and moved to the next snippet. Comments are only read during an import; nothing extra is held in memory while snippets run.
+
 ## [2.0.0] - 2026-09-29
 
 Snippets and a reorganised Settings page make this a milestone release. Nothing is removed: every setting, shortcut, and saved value keeps working, and settings exports from earlier versions import unchanged.
