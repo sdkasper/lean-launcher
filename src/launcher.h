@@ -155,7 +155,17 @@ private:
             return 0;
         case WM_HOTKEY:
             if (wParam == kHotkeyId) {
-                if (IsWindowVisible(hwnd_)) Hide(); else Show();
+                if (IsWindowVisible(hwnd_)) {
+                    // Stay-open mode: a visible but unfocused launcher comes to the front first.
+                    if (settings_.keepOpenOnFocusLoss && GetForegroundWindow() != hwnd_) {
+                        SetForegroundWindow(hwnd_);
+                        SetFocus(hwnd_);
+                    } else {
+                        Hide();
+                    }
+                } else {
+                    Show();
+                }
             }
             return 0;
         case kShowLauncherMessage:
@@ -337,7 +347,8 @@ private:
             if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) CheckPomodoro(true);
             return TRUE;
         case WM_ACTIVATE:
-            if (LOWORD(wParam) == WA_INACTIVE && IsWindowVisible(hwnd_) && !modalDialogOpen_) Hide();
+            if (LOWORD(wParam) == WA_INACTIVE &&
+                leanlauncher::window_behavior::ShouldHideOnDeactivate(settings_, IsWindowVisible(hwnd_), modalDialogOpen_)) Hide();
             return 0;
         case WM_SETFOCUS:
             // A hidden system caret exposes the insertion point to IME/accessibility.
@@ -697,6 +708,8 @@ private:
                         static_cast<int>(ReadDword(key, L"QuickLaunchHotkey", 0)));
                 }
                 settings_.showTrayIcon = ReadDword(key, L"ShowTrayIcon", 1) != 0;
+                settings_.keepOpenOnFocusLoss = ReadDword(key, L"KeepOpenOnFocusLoss", 0) != 0;
+                settings_.restoreLastQuery = ReadDword(key, L"RestoreLastQuery", 0) != 0;
                 // Fallback must match settings_.checkForUpdates's coded default (false,
                 // per NFR-003: no release pipeline yet, opt-in only). A fallback of 1
                 // here would silently re-enable background update checks the moment
@@ -1034,6 +1047,8 @@ private:
                 {L"QuickMod", settings_.quickLaunchHotkey.modifiers},
                 {L"QuickOff", settings_.quickLaunchHotkey.disabled ? 1u : 0u},
                 {L"ShowTrayIcon", settings_.showTrayIcon ? 1u : 0u},
+                {L"KeepOpenOnFocusLoss", settings_.keepOpenOnFocusLoss ? 1u : 0u},
+                {L"RestoreLastQuery", settings_.restoreLastQuery ? 1u : 0u},
                 {L"CheckForUpdates", settings_.checkForUpdates ? 1u : 0u},
                 {L"FileSearchEnabled", settings_.enableFileSearch ? 1u : 0u},
                 {L"WebSearchEnabled", settings_.enableWebSearch ? 1u : 0u},
@@ -1537,7 +1552,11 @@ private:
         KillTimer(hwnd_, kGraphicsReleaseTimer);
         page_ = Page::Launcher;
         hotkeyWarningDismissed_ = false;
-        input_.Clear();
+        if (settings_.restoreLastQuery && !IsWindowVisible(hwnd_)) {
+            leanlauncher::window_behavior::RestoreQuery(input_, lastQuery_);  // issue #6
+        } else {
+            input_.Clear();
+        }
         pendingSurrogate_ = 0;
         composition_.clear();
         textScroll_ = 0;
@@ -1663,7 +1682,9 @@ private:
     static constexpr int kRowSnippetsFile = 64;
     static constexpr int kRowSnippetsOpen = 65;
     static constexpr int kRowSnippetsImport = 66;
-    static constexpr int kSettingsMaxRow = 66;
+    static constexpr int kRowKeepOpenOnFocusLoss = 67;  // issue #6
+    static constexpr int kRowRestoreLastQuery = 68;
+    static constexpr int kSettingsMaxRow = 68;
     static constexpr int kRowCheckForUpdatesOnStart = 6;  // shown in About's UPDATES card
 
     // Every tab except Obsidian (an accordion) and About (fixed layout) is an
@@ -1681,6 +1702,7 @@ private:
     };
     static constexpr int kShortcutRows[] = {0, 1, 2, 3};
     static constexpr int kStartupRows[] = {4, 5};
+    static constexpr int kWindowRows[] = {kRowKeepOpenOnFocusLoss, kRowRestoreLastQuery};
     static constexpr int kBackupRows[] = {kRowAboutExportSettings, kRowAboutImportSettings};
     static constexpr int kSearchSourceRows[] = {7, 8, kRowWebSearchEngine};
     static constexpr int kSearchPrefixRows[] = {kRowFileSearchPrefix, kRowWebSearchPrefix, kRowAppSearchPrefix};
@@ -1697,6 +1719,7 @@ private:
     static constexpr SettingsCard kGeneralCards[] = {
         {L"KEYBOARD SHORTCUTS", kShortcutRows, static_cast<int>(std::size(kShortcutRows))},
         {L"STARTUP", kStartupRows, static_cast<int>(std::size(kStartupRows))},
+        {L"WINDOW", kWindowRows, static_cast<int>(std::size(kWindowRows))},
         {L"BACKUP", kBackupRows, static_cast<int>(std::size(kBackupRows))},
     };
     static constexpr SettingsCard kSearchCards[] = {
@@ -2072,6 +2095,7 @@ private:
                 ImmReleaseContext(hwnd_, context);
             }
         }
+        if (settings_.restoreLastQuery) lastQuery_ = input_.text;
         snippetTarget_ = nullptr;
         composing_ = false;
         pendingSurrogate_ = 0;
@@ -4082,6 +4106,19 @@ private:
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
+        if (row == kRowKeepOpenOnFocusLoss) {
+            settings_.keepOpenOnFocusLoss = !settings_.keepOpenOnFocusLoss;
+            SaveSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowRestoreLastQuery) {
+            settings_.restoreLastQuery = !settings_.restoreLastQuery;
+            if (!settings_.restoreLastQuery) lastQuery_.clear();  // NFR-018: nothing kept while off
+            SaveSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
         if (row == kRowPomodoroLog) {
             settings_.pomodoroLog = !settings_.pomodoroLog;
             SaveSettings();
@@ -5069,6 +5106,7 @@ private:
             if (editingRow_ >= 0) {
                 if (key == VK_RETURN) { CommitEditingRow(); return 0; }
                 if (key == VK_ESCAPE) { CancelEditingRow(); return 0; }
+                if (control && key == 'V') { PasteIntoSettingsField(); return 0; }
                 if (key == VK_LEFT) {
                     settingsEdit_.Move(false, shift, control);
                     ResetCaret();
@@ -5271,8 +5309,8 @@ private:
         }
     }
 
-    void Paste() {
-        if (!OpenClipboard(hwnd_)) return;
+    std::wstring ReadClipboardText() {
+        if (!OpenClipboard(hwnd_)) return {};
         std::wstring value;
         if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
             if (const auto* text = static_cast<const wchar_t*>(GlobalLock(data))) {
@@ -5285,8 +5323,21 @@ private:
             }
         }
         CloseClipboard();
-        value = leanlauncher::obsidian::PastedTextForInput(value);
+        return value;
+    }
+
+    void Paste() {
+        const std::wstring value = leanlauncher::obsidian::PastedTextForInput(ReadClipboardText());
         if (!value.empty()) { input_.Insert(value); OnQueryChanged(); }
+    }
+
+    // Ctrl+V while a Settings text field is being edited (issue #6).
+    void PasteIntoSettingsField() {
+        const std::wstring value = leanlauncher::obsidian::PastedTextForSettingsField(ReadClipboardText());
+        if (value.empty()) return;
+        settingsEdit_.Insert(value);
+        ResetCaret();
+        InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
     void HandleComposition(LPARAM flags) {
@@ -7708,6 +7759,10 @@ private:
                 L"Start Lean Launcher when you sign in to Windows", {}, true, settings_.runAtStartup);
             DrawSettingsRow(5, rowY(5), L"Notification area icon",
                 L"Show Lean Launcher in the hidden icons area", {}, true, settings_.showTrayIcon);
+            DrawSettingsRow(kRowKeepOpenOnFocusLoss, rowY(kRowKeepOpenOnFocusLoss), L"Stay open when clicking elsewhere",
+                L"Close with Esc, the hotkey or by launching something", {}, true, settings_.keepOpenOnFocusLoss);
+            DrawSettingsRow(kRowRestoreLastQuery, rowY(kRowRestoreLastQuery), L"Remember last search",
+                L"Reopen with your previous search selected, so typing replaces it", {}, true, settings_.restoreLastQuery);
             DrawSettingsRow(kRowAboutExportSettings, rowY(kRowAboutExportSettings), L"Export settings...",
                 L"Save your settings to a file, to move them to another PC", {}, false, false, true);
             DrawSettingsRow(kRowAboutImportSettings, rowY(kRowAboutImportSettings),
@@ -8065,6 +8120,7 @@ private:
     std::vector<std::wstring> recentPaths_;
     size_t baseAppsCount_ = 0;
     SearchInput input_;
+    std::wstring lastQuery_;  // kept only while "Remember last search" is on
     SearchInput settingsEdit_;  // scratch buffer for the Settings row currently being edited
     Settings settings_;
     std::wstring obsidianVaultPath_;

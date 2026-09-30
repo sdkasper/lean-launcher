@@ -76,6 +76,8 @@ inline constexpr HotkeyField kHotkeys[] = {
 inline constexpr BoolField kBools[] = {
     {"ShowTrayIcon", &Settings::showTrayIcon},
     {"CheckForUpdates", &Settings::checkForUpdates},
+    {"KeepOpenOnFocusLoss", &Settings::keepOpenOnFocusLoss},
+    {"RestoreLastQuery", &Settings::restoreLastQuery},
     {"FileSearchEnabled", &Settings::enableFileSearch},
     {"WebSearchEnabled", &Settings::enableWebSearch},
     {"SystemCommandsEnabled", &Settings::enableSystemCommands},

@@ -30,7 +30,10 @@ constexpr uint32_t kCacheMagic = 0x4C4C4649; // "LLFI"
 // Bumped to 2 (US-019): the cache now carries the exclusions file's mtime so a
 // cache written before an exclusions edit can be rejected instead of silently
 // keeping now-excluded content searchable forever.
-constexpr uint32_t kCacheFormatVersion = 2;
+//
+// Bumped to 3 (issue #4): cached normalized names are now accent-folded, so a
+// cache written before folding must be rebuilt.
+constexpr uint32_t kCacheFormatVersion = 3;
 
 template <typename T>
 void WriteRaw(std::ofstream& out, const T& value) {

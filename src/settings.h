@@ -42,6 +42,11 @@ struct Settings {
     bool runAtStartup = false;
     bool showTrayIcon = true;
     bool checkForUpdates = false;  // No release pipeline yet; user can opt in via Settings.
+    // Issue #6, both off by default. Stay open: clicking elsewhere no longer
+    // hides the launcher (Esc, the hotkey or launching something still does).
+    // Remember last search: the next open brings the previous query back, selected.
+    bool keepOpenOnFocusLoss = false;
+    bool restoreLastQuery = false;
     bool enableFileSearch = true;
     bool enableWebSearch = true;
     // US-041: lock/sleep/restart/... command rows. Off = no command rows.

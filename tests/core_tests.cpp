@@ -18,6 +18,7 @@
 #include "../src/pomodoro.h"
 #include "../src/preview.h"
 #include "../src/snippets.h"
+#include "../src/window_behavior.h"
 #include "reference_scorer.h"
 
 #include <chrono>
@@ -37,6 +38,20 @@ int main() {
     using namespace takeoff;
     Check(Normalize(L"  Visual-Studio.Code! ") == L"visual studio code", "normalization");
     Check(Normalize(L"!!!").empty(), "punctuation-only query");
+
+    // Issue #4: accent-insensitive search. Folding lives in Normalize so apps,
+    // files, notes and queries all get it at index time, at no per-compare cost.
+    Check(Normalize(L"âpre") == L"apre", "accent folding: a-circumflex");
+    Check(Normalize(L"Délivrance") == L"delivrance", "accent folding: e-acute, lowercased");
+    Check(Normalize(L"École Café Ñandú") == L"ecole cafe nandu", "accent folding: uppercase and mixed accents");
+    Check(Normalize(L"èêë") == L"eee", "accent folding: e-grave, circumflex, diaeresis all fold to e");
+    Check(Normalize(L"délivrance") == L"delivrance", "accent folding: decomposed (combining mark) input does not split the word");
+    Check(Normalize(L"й") == L"й", "accent folding leaves non-Latin scripts alone (Cyrillic short i keeps its breve)");
+    Check(MatchScore(Normalize(L"âpre"), Normalize(L"apre")) > 0, "unaccented query matches accented name");
+    Check(MatchScore(Normalize(L"apre"), Normalize(L"âpre")) > 0, "accented query matches unaccented name");
+    Check(MatchScore(Normalize(L"Café München"), Normalize(L"cafe munchen")) > 0, "multi-word accent-insensitive match");
+    // The file-index cache stores normalized names; old caches hold unfolded ones.
+    Check(takeoff::kCacheFormatVersion >= 3, "cache format bumped so pre-folding caches are rebuilt");
     Check(MatchScore(L"code", L"code") > MatchScore(L"code editor", L"code"), "exact first");
     Check(MatchScore(L"code editor", L"code") > MatchScore(L"visual code", L"code"), "prefix first");
     Check(MatchScore(L"visual studio code", L"vsc") > 0, "fuzzy match");
@@ -3133,6 +3148,17 @@ int main() {
         Check(CapturePreviewText(L"plain") == L"plain", "CapturePreviewText leaves a one-line capture unchanged");
         Check(PastedTextForInput(L"line1\r\nline2\r\n") == L"line1\\nline2",
             "PastedTextForInput turns pasted line breaks into \\n and drops breaks at the ends");
+        // Issue #6: Ctrl+V in a Settings text field. One-line fields (paths,
+        // formats, URLs, prefixes): first non-blank line, trimmed, never "\n".
+        Check(PastedTextForSettingsField(L"D:\\Vault\\Daily\r\n") == L"D:\\Vault\\Daily",
+            "settings paste drops the trailing newline copied with a line");
+        Check(PastedTextForSettingsField(L"  YYYY-MM-DD \t") == L"YYYY-MM-DD",
+            "settings paste trims surrounding whitespace");
+        Check(PastedTextForSettingsField(L"\r\n\r\nfirst\r\nsecond") == L"first",
+            "settings paste keeps only the first non-blank line of a multi-line clipboard");
+        Check(PastedTextForSettingsField(L"a\tb").find(L'\t') == std::wstring::npos,
+            "settings paste never inserts a tab");
+        Check(PastedTextForSettingsField(L" \r\n ").empty(), "settings paste of only whitespace is empty");
         Check(PastedTextForInput(L"notepad\r\n") == L"notepad",
             "PastedTextForInput leaves a single pasted line (with trailing newline) clean for normal search");
     }
@@ -3567,6 +3593,38 @@ int main() {
         Check(root.title == L"Standup", "BuildNoteItem extracts title for a vault-root note");
         Check(root.relativeRef == L"Standup", "BuildNoteItem relative ref for a vault-root note has no folder prefix");
         Check(root.folderDisplay.empty(), "BuildNoteItem folder display is empty for a vault-root note");
+
+        // Building an item must be lexical (no per-note disk access): fs::relative
+        // canonicalises both paths and cost ~400 us per note, so a 10k-note
+        // vault burned ~4 s of CPU per rescan (issue #7). Ceiling is ~10x the
+        // expected cost to stay flake-proof.
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            size_t refChars = 0;
+            for (int i = 0; i < 10000; ++i) {
+                refChars += BuildNoteItem(vaultRoot, vaultRoot / L"folder" / L"sub" /
+                    (std::to_wstring(i) + L".md")).relativeRef.size();
+            }
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            std::printf("[NoteIndex] 10000 BuildNoteItem calls: %.1f ms\n", ms);
+            Check(refChars > 0 && ms < 400.0, "BuildNoteItem stays cheap across 10000 notes (no disk access)");
+        }
+
+        // A trailing separator on the vault root still yields a clean ref. (Note
+        // paths always come from iterating the vault path itself, so the prefix
+        // matches exactly; no case-folding needed.)
+        const NoteItem slashRoot = BuildNoteItem(fs::path(L"D:\\Vault\\"), fs::path(L"D:\\Vault\\Sub\\Note.md"));
+        Check(slashRoot.relativeRef == L"Sub/Note", "BuildNoteItem tolerates a trailing separator on the vault root");
+        Check(slashRoot.folderDisplay == L"Sub", "BuildNoteItem folder display is clean for a trailing-separator root");
+
+        // The index holds titles and paths only, so content edits must not
+        // wake the watcher (GitHub issue #7: rescan after every edit).
+        Check((kVaultWatchFilter & FILE_NOTIFY_CHANGE_LAST_WRITE) == 0,
+            "vault watcher ignores content edits (no LAST_WRITE)");
+        Check((kVaultWatchFilter & FILE_NOTIFY_CHANGE_FILE_NAME) != 0,
+            "vault watcher still sees note creates, renames and deletes");
+        Check((kVaultWatchFilter & FILE_NOTIFY_CHANGE_DIR_NAME) != 0,
+            "vault watcher still sees folder creates, renames and deletes");
     }
 
     {
@@ -3828,6 +3886,42 @@ int main() {
         Check(roundTrip.ok, "the exported file imports");
         Check(roundTrip.changed == 0 && roundTrip.skipped.empty(), "importing the defaults changes and skips nothing");
         Check(io::ExportJson(roundTrip.settings, {}, {}, L"1.8.0") == exported, "the imported settings export identically");
+
+        // Issue #6: two new window-behaviour settings, both off by default.
+        Check(!defaults.keepOpenOnFocusLoss && !defaults.restoreLastQuery,
+            "stay-open-on-focus-loss and remember-last-search are off by default");
+        takeoff::Settings behaviour = defaults;
+        behaviour.keepOpenOnFocusLoss = true;
+        behaviour.restoreLastQuery = true;
+        const std::string behaviourJson = io::ExportJson(behaviour, {}, {}, L"2.0.3");
+        Check(behaviourJson.find("KeepOpenOnFocusLoss") != std::string::npos &&
+              behaviourJson.find("RestoreLastQuery") != std::string::npos, "both behaviour settings are exported");
+        io::ImportResult behaviourBack = io::ParseImport(behaviourJson, defaults);
+        Check(behaviourBack.ok && behaviourBack.changed == 2 && behaviourBack.settings.keepOpenOnFocusLoss &&
+              behaviourBack.settings.restoreLastQuery, "both behaviour settings import");
+        {
+            using namespace leanlauncher::window_behavior;
+            takeoff::Settings off;
+            takeoff::Settings on;
+            on.keepOpenOnFocusLoss = true;
+            Check(ShouldHideOnDeactivate(off, true, false), "focus loss hides a visible launcher by default");
+            Check(!ShouldHideOnDeactivate(on, true, false), "focus loss does not hide when stay-open is on");
+            Check(!ShouldHideOnDeactivate(off, false, false), "an already hidden launcher is not hidden again");
+            Check(!ShouldHideOnDeactivate(off, true, true), "a modal dialog never hides the launcher");
+
+            takeoff::SearchInput box;
+            RestoreQuery(box, L"chrome");
+            Check(box.text == L"chrome" && box.HasSelection() && box.Start() == 0 && box.End() == 6,
+                "the remembered query comes back fully selected");
+            box.Insert(L"x");
+            Check(box.text == L"x", "typing replaces the selected remembered query");
+            RestoreQuery(box, L"abc");
+            box.Erase(true);
+            Check(box.text.empty(), "Backspace clears the selected remembered query");
+            takeoff::SearchInput empty;
+            RestoreQuery(empty, L"");
+            Check(empty.text.empty() && !empty.HasSelection(), "nothing remembered leaves the box empty");
+        }
 
         // A changed setting is applied; others are kept.
         takeoff::Settings custom = defaults;

@@ -10,6 +10,17 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.0.3] - 2026-09-30
+
+### Fixed
+- **High CPU after every edit in your Obsidian vault** - with Obsidian integration on, the launcher's note index rescanned the whole vault after every content change (including adding a line from the launcher) and did extra disk work for every note each time, which could use about 35% CPU for 15 to 20 seconds on a small laptop (#7). It now only rescans when a note or folder is created, renamed, or deleted, and building the list no longer touches the disk per note (10,000 notes took about 940 ms before and about 9 ms now in the test). This is separate from the File search setting: turning File search off never stopped the note index, which follows the Obsidian integration setting.
+- **Ctrl+V works in Settings text fields** - pasting into a text row such as the daily note overrides, prefixes, or the snippets file did nothing (#6). It now pastes the first line of the clipboard, trimmed.
+
+### Added
+- **Accent-insensitive search** - typing `apre` finds `âpre`, `delivrance` finds `délivrance`, `cafe` finds `Café`, and the other way round (#4). It works for apps, files, and notes. Only Latin letters are folded; letters without a plain base such as ø, æ, ł, and ß are unchanged, and other scripts are left alone. The file index rebuilds once after updating so its saved names match.
+- **Stay open when clicking elsewhere** - new opt-in setting (Settings > General > WINDOW, off by default): clicking another window no longer hides the launcher. `Esc`, the hotkey, or launching something still closes it. If the launcher is visible but not in front, the hotkey brings it to the front (#6).
+- **Remember last search** - new opt-in setting (Settings > General > WINDOW, off by default): reopening the launcher brings back your previous search with the text selected, so typing replaces it and `Enter` still works on it (#6). The text is only held in memory while the setting is on.
+
 ## [2.0.2] - 2026-09-29
 
 ### Changed

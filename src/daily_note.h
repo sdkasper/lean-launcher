@@ -311,6 +311,25 @@ inline std::wstring PastedTextForInput(std::wstring_view text) {
     return result;
 }
 
+// Settings text fields (paths, formats, URLs, prefixes) are one line, so a
+// paste keeps only the first non-blank line, trimmed, with tabs turned to
+// spaces (issue #6).
+inline std::wstring PastedTextForSettingsField(std::wstring_view text) {
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find_first_of(L"\r\n", pos);
+        if (end == std::wstring_view::npos) end = text.size();
+        std::wstring line(text.substr(pos, end - pos));
+        std::replace(line.begin(), line.end(), L'\t', L' ');
+        const size_t first = line.find_first_not_of(L' ');
+        if (first != std::wstring::npos) {
+            return line.substr(first, line.find_last_not_of(L' ') - first + 1);
+        }
+        pos = end + 1;
+    }
+    return {};
+}
+
 // Writes `lead` + the first line, then each extra line indented 2 spaces (the
 // content column after "- ") so Obsidian keeps it inside the same list item.
 // Blank extra lines are dropped - they would split the list.

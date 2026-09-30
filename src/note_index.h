@@ -27,6 +27,10 @@ namespace fs = std::filesystem;
 
 constexpr UINT kNotesReadyMessage = WM_APP + 9;
 
+// Names only: the index holds titles and paths, so a content edit must not
+// trigger a rescan (issue #7).
+constexpr DWORD kVaultWatchFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME;
+
 struct NoteItem {
     std::wstring title;
     std::wstring normTitle;
@@ -51,16 +55,17 @@ struct NoteIndexSnapshot {
 };
 
 // Builds a NoteItem from a vault root and an absolute note path. Purely
-// lexical (fs::relative/parent_path/stem don't touch disk), so this is
+// lexical (lexically_relative/parent_path/stem don't touch disk), so this is
 // unit-testable without a real filesystem.
 inline NoteItem BuildNoteItem(const fs::path& vaultRoot, const fs::path& notePath) {
     NoteItem item;
     item.title = notePath.stem().wstring();
     item.normTitle = takeoff::Normalize(item.title);
 
-    std::error_code ec;
-    fs::path rel = fs::relative(notePath, vaultRoot, ec);
-    if (ec || rel.empty()) rel = notePath.filename();
+    // lexically_relative, not fs::relative: the latter canonicalises both paths
+    // on disk (~400 us per note), which made every rescan of a big vault costly.
+    fs::path rel = notePath.lexically_relative(vaultRoot);
+    if (rel.empty() || *rel.begin() == L"..") rel = notePath.filename();
 
     std::wstring relativeRef = (rel.parent_path() / rel.stem()).wstring();
     std::replace(relativeRef.begin(), relativeRef.end(), L'\\', L'/');
@@ -232,8 +237,7 @@ private:
 
         HANDLE hVaultChange = INVALID_HANDLE_VALUE;
         if (!vaultPath_.empty()) {
-            hVaultChange = FindFirstChangeNotificationW(vaultPath_.c_str(), TRUE,
-                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE);
+            hVaultChange = FindFirstChangeNotificationW(vaultPath_.c_str(), TRUE, kVaultWatchFilter);
         }
 
         std::vector<HANDLE> waitHandles;

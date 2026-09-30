@@ -40,10 +40,32 @@ enum class AppCategory : uint8_t {
     Snippet    // US-050 snippet row (insert into the previous window)
 };
 
+inline bool IsCombiningMark(wchar_t ch) { return ch >= 0x0300 && ch <= 0x036F; }
+
+// Accent folding (issue #4): a Latin letter with diacritics becomes its plain
+// ASCII base letter ("e-acute" -> e). Only Latin blocks are folded and only when
+// the decomposition is an ASCII letter plus combining marks, so other scripts
+// (Cyrillic short i, Greek tonos, CJK) are left exactly as they are.
+inline wchar_t FoldAccent(wchar_t ch) {
+    const bool latin = (ch >= 0x00C0 && ch <= 0x024F) || (ch >= 0x1E00 && ch <= 0x1EFF);
+    if (!latin) return ch;
+    wchar_t decomposed[8];
+    const int n = FoldStringW(MAP_COMPOSITE, &ch, 1, decomposed, 8);
+    if (n < 2) return ch;
+    const wchar_t base = decomposed[0];
+    if (!((base >= L'a' && base <= L'z') || (base >= L'A' && base <= L'Z'))) return ch;
+    for (int i = 1; i < n; ++i) {
+        if (!IsCombiningMark(decomposed[i])) return ch;
+    }
+    return base;
+}
+
 inline std::wstring Normalize(std::wstring_view value) {
     std::wstring normalized;
     bool lastWasSpace = true;
     for (wchar_t ch : value) {
+        if (IsCombiningMark(ch)) continue;  // decomposed accent: part of the preceding letter
+        ch = FoldAccent(ch);
         if (iswalnum(ch)) {
             normalized.push_back(static_cast<wchar_t>(towlower(ch)));
             lastWasSpace = false;

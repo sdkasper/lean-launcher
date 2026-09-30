@@ -41,6 +41,7 @@
 #include "system_commands.h"
 #include "typed_input.h"
 #include "settings_io.h"
+#include "window_behavior.h"
 #include "converter.h"
 #include "timezones.h"
 #include "pomodoro.h"
