@@ -171,5 +171,7 @@ jobs:
           generate_release_notes: true
           append_body: true
           draft: false
-          prerelease: false
+          # A tag with a hyphen (v2.1.0-rc.1) is a pre-release: GitHub never
+          # reports it as the latest release, so no launcher is offered it.
+          prerelease: ${{ contains(steps.package.outputs.tag, '-') }}
 
