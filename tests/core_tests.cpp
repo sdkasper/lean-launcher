@@ -4139,6 +4139,28 @@ int main() {
         Check(!ParseMinisignPublicKey("", keyA) && !ParseMinisignPublicKey("RWTGLyYihjZP61Xr", keyA),
               "a short or empty public key is rejected");
 
+        // A real release: the files CI published for v2.1.0-rc.1, signed with the
+        // actual release key. Proves the key built into the launcher is the one the
+        // pipeline signs with and that the launcher accepts what CI produces.
+        {
+            const std::string realText =
+                "f6025f05d0eb20c2e74052ba047c8412e84bc3c0a2c8aa7d6f142de8befb3db3  LeanLauncher.exe  v2.1.0-rc.1\n";
+            const std::string realSig =
+                "untrusted comment: signature from minisign secret key\n"
+                "RWShv7QHXkVKEF7SCjLdHFXNYHxcd5lHl31bxgNLtcKWBX0C0zmIxg8BWyIHWkfh1C4eDthFLN02i6LsRqU7TadPlzoj7XIQdQs=\n"
+                "trusted comment: tag=v2.1.0-rc.1\n"
+                "sExLPF0+QA4ZlIcuEPP9j1BhZQqwX1ssX0/XpXEUamwYbilg1M9ilirCBSrPoQF6aHW+wXh9YCCE00cmKw4PDw==\n";
+            const std::string realHash = "f6025f05d0eb20c2e74052ba047c8412e84bc3c0a2c8aa7d6f142de8befb3db3";
+            Check(VerifyUpdate(releaseKey, realText, realSig, realHash, "v2.1.0-rc.1") == UpdateVerifyResult::Ok,
+                  "the signed v2.1.0-rc.1 release verifies against the built-in release key");
+            Check(VerifyUpdate(releaseKey, realText, realSig, realHash, "v2.1.0") == UpdateVerifyResult::WrongTag,
+                  "the rc signature does not verify as the final release");
+            Check(VerifyUpdateForInstall(releaseKey, realText, realSig, realHash, L"2.0.4") == UpdateVerifyResult::Ok,
+                  "the rc is newer than 2.0.4 for the install-time check");
+            Check(VerifyUpdate(keyA, realText, realSig, realHash, "v2.1.0-rc.1") == UpdateVerifyResult::WrongKey,
+                  "a throwaway test key does not accept the real release signature");
+        }
+
         // The install-time check takes the tag from the signed text and needs it to
         // be newer than the running version (no replaying an older signed release).
         Check(VerifyUpdateForInstall(keyA, signedText, goodSig, exeHash, L"2.0.4") == UpdateVerifyResult::Ok,
