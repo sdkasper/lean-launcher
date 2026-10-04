@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.0.4] - 2026-10-04
+
+### Fixed
+- **Typed paths and folders that would not open** - on some PCs, pressing `Enter` or clicking a folder in the path completion results (for example after typing `C:\Users\`) showed "Could not open this item", and `Shift+Enter` just closed the launcher (#11). If Windows' normal "open folder" action fails, the launcher now opens the folder with Explorer directly. `Shift+Enter` also shows "Could not open this path." instead of closing silently when nothing could be opened.
+
 ## [2.0.3] - 2026-09-30
 
 ### Fixed

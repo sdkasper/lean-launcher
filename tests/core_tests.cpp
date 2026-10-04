@@ -3867,6 +3867,17 @@ int main() {
         Check(ti::CompleteTypedPath(L"C:\\Users\\sa", L"sam.txt", false) == L"C:\\Users\\sam.txt",
               "completing a file adds no backslash");
         Check(ti::kMaxPathEntries == 2000, "listings are capped at 2,000 entries");
+
+        // Issue #11: the explorer.exe fallback for opening a folder.
+        Check(ti::ExplorerFolderArgs(L"C:\\Users\\Public") == L"\"C:\\Users\\Public\"",
+              "explorer fallback quotes the folder");
+        Check(ti::ExplorerFolderArgs(L"C:\\Users\\") == L"\"C:\\Users\"",
+              "explorer fallback drops the trailing backslash so it cannot escape the quote");
+        Check(ti::ExplorerFolderArgs(L"C:\\Program Files\\") == L"\"C:\\Program Files\"",
+              "explorer fallback keeps spaces inside the quotes");
+        Check(ti::ExplorerFolderArgs(L"C:\\") == L"C:\\", "explorer fallback leaves a drive root as is");
+        Check(ti::ExplorerFolderArgs(L"\\\\nas\\share\\") == L"\"\\\\nas\\share\"",
+              "explorer fallback handles a network share");
     }
 
     // -----------------------------------------------------------------------------

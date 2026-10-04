@@ -3593,8 +3593,29 @@ private:
         }
         if (target.empty()) return true;
         Hide();
-        ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        INT_PTR result = reinterpret_cast<INT_PTR>(
+            ShellExecuteW(nullptr, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+        if (result <= 32 && IsDirectoryPath(target)) result = OpenFolderWithExplorer(target);
+        if (result <= 32) {
+            Show();
+            status_ = L"Could not open this path.";
+            ResetCaret();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
         return true;
+    }
+
+    static bool IsDirectoryPath(const std::wstring& path) {
+        const DWORD attrs = GetFileAttributesW(path.c_str());
+        return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    }
+
+    // Fallback for when the shell's "open" verb fails on a folder (a broken or
+    // replaced default folder handler, issue #11): ask explorer.exe directly.
+    static INT_PTR OpenFolderWithExplorer(const std::wstring& folder) {
+        const std::wstring args = leanlauncher::typed::ExplorerFolderArgs(folder);
+        return reinterpret_cast<INT_PTR>(
+            ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL));
     }
 
     void EnsureVisible() {
@@ -5581,6 +5602,10 @@ private:
         if (result <= 32 && asAdministrator && !isProtocol) {
             result = reinterpret_cast<INT_PTR>(
                 ShellExecuteW(nullptr, L"open", fileToExec, params, dir, SW_SHOWNORMAL));
+        }
+
+        if (result <= 32 && app.category == takeoff::AppCategory::Folder && IsDirectoryPath(path)) {
+            result = OpenFolderWithExplorer(path);
         }
 
         if (result <= 32) {

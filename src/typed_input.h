@@ -227,5 +227,23 @@ inline std::wstring CompleteTypedPath(std::wstring_view typed, std::wstring_view
     return out;
 }
 
+// Command line for explorer.exe to open `folder`, the fallback when the
+// shell's own "open" verb for folders fails (a broken or replaced default
+// folder handler). The path is quoted, and a trailing backslash is dropped
+// because inside quotes `\"` would escape the closing quote; a drive root
+// ("C:\") has no spaces and must keep its backslash, so it stays unquoted.
+inline std::wstring ExplorerFolderArgs(std::wstring_view folder) {
+    while (folder.size() > 3 && folder.back() == L'\\') folder.remove_suffix(1);
+    std::wstring args;
+    if (folder.size() == 3 && folder[1] == L':' && folder[2] == L'\\') {
+        args.assign(folder);
+        return args;
+    }
+    args = L"\"";
+    args.append(folder);
+    args += L'"';
+    return args;
+}
+
 } // namespace typed
 } // namespace leanlauncher
