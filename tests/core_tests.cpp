@@ -2,6 +2,9 @@
 #include "../src/settings.h"
 #include "../src/updates.h"
 #include "../src/sha256.h"
+#include "../src/sha512.h"
+#include "../src/ed25519.h"
+#include "../src/minisign.h"
 #include "../src/update_apply.h"
 #include "../src/file_index.h"
 #include "../src/calculator.h"
@@ -386,13 +389,64 @@ int main() {
         "    {\"name\": \"Takeoff-v1.2.0.exe\", \"browser_download_url\": \"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.2.0/Takeoff-v1.2.0.exe\"}\n"
         "  ]\n"
         "}";
-    Check(ExtractAssetDownloadUrl(mockFallbackJson, L"v1.2.0") ==
-          L"https://github.com/akiraeng/takeoff-launcher/releases/download/v1.2.0/Takeoff-v1.2.0.exe",
-          "extract asset url secondary exe match");
+    // US-040: no fallback to another .exe, and no URL made up from the tag.
+    Check(ExtractAssetDownloadUrl(mockFallbackJson, L"v1.2.0").empty(),
+          "extract asset url: another .exe is never used as a fallback");
+    Check(ExtractAssetDownloadUrl("{}", L"v2.0.0").empty(),
+          "extract asset url: no asset means no URL, none is made up from the tag");
 
-    Check(ExtractAssetDownloadUrl("{}", L"v2.0.0") ==
-          L"https://github.com/sdkasper/lean-launcher/releases/download/v2.0.0/LeanLauncher.exe",
-          "extract asset url fallback URL from tag");
+    {
+        const std::string signedRelease =
+            "{\"tag_name\":\"v2.1.0\",\"assets\":[\n"
+            "{\"name\":\"LeanLauncher.exe.sha256\",\"browser_download_url\":\"https://github.com/sdkasper/lean-launcher/releases/download/v2.1.0/LeanLauncher.exe.sha256\"},\n"
+            "{\"name\":\"LeanLauncher.exe.minisig\",\"browser_download_url\":\"https://github.com/sdkasper/lean-launcher/releases/download/v2.1.0/LeanLauncher.exe.minisig\"},\n"
+            "{\"name\":\"LeanLauncher-v2.1.0.exe\",\"browser_download_url\":\"https://github.com/sdkasper/lean-launcher/releases/download/v2.1.0/LeanLauncher-v2.1.0.exe\"},\n"
+            "{\"name\":\"LeanLauncher.exe\",\"browser_download_url\":\"https://github.com/sdkasper/lean-launcher/releases/download/v2.1.0/LeanLauncher.exe\"}\n"
+            "]}";
+        const ReleaseAssets assets = ExtractReleaseAssets(signedRelease, L"v2.1.0");
+        const std::wstring base = L"https://github.com/sdkasper/lean-launcher/releases/download/v2.1.0/";
+        Check(assets.exe == base + L"LeanLauncher.exe", "release assets: the exe is matched by exact name");
+        Check(assets.sha256 == base + L"LeanLauncher.exe.sha256", "release assets: the signed hash file is found");
+        Check(assets.minisig == base + L"LeanLauncher.exe.minisig", "release assets: the signature file is found");
+
+        const ReleaseAssets unsigned_ = ExtractReleaseAssets(mockReleaseJson, L"v1.1.0");
+        Check(!unsigned_.exe.empty() && unsigned_.sha256.empty() && unsigned_.minisig.empty(),
+              "release assets: a release without signature files reports them missing");
+
+        const auto urlJson = [](const std::string& url) {
+            return "{\"assets\":[{\"name\":\"LeanLauncher.exe\",\"browser_download_url\":\"" + url + "\"}]}";
+        };
+        Check(ExtractAssetDownloadUrl(urlJson("http://github.com/sdkasper/lean-launcher/releases/download/v1/LeanLauncher.exe"),
+                  L"v1").empty(), "extract asset url: plain http is refused");
+        Check(ExtractAssetDownloadUrl(urlJson("https://evil.example/sdkasper/lean-launcher/releases/download/v1/LeanLauncher.exe"),
+                  L"v1").empty(), "extract asset url: another host is refused");
+        Check(ExtractAssetDownloadUrl(urlJson("https://github.com/someone/else/releases/download/v1/LeanLauncher.exe"),
+                  L"v1").empty(), "extract asset url: another repository is refused");
+        Check(ExtractAssetDownloadUrl(urlJson("https://github.com/sdkasper/lean-launcher/releases/download/v1/LeanLauncher.exe?x=1"),
+                  L"v1").empty(), "extract asset url: a query string is refused");
+        Check(ExtractAssetDownloadUrl(urlJson("https://github.com/sdkasper/lean-launcher/releases/download/../x/LeanLauncher.exe"),
+                  L"v1").empty(), "extract asset url: a .. segment is refused");
+        Check(ExtractAssetDownloadUrl(urlJson("https://github.com/sdkasper/lean-launcher/releases/download/v1/leanlauncher.exe"),
+                  L"v1").empty(), "extract asset url: the name match is exact, including case");
+    }
+
+    // US-040: where update files may come from.
+    Check(IsAllowedUpdateUrl(L"https://github.com/sdkasper/lean-launcher/releases/download/v2.1.0/LeanLauncher.exe"),
+          "update url: github.com over https is allowed");
+    Check(IsAllowedUpdateUrl(L"https://objects.githubusercontent.com/github-production-release-asset/x?y=1") &&
+          IsAllowedUpdateUrl(L"https://release-assets.githubusercontent.com/a/b"),
+          "update url: githubusercontent.com asset hosts are allowed");
+    Check(!IsAllowedUpdateUrl(L"http://github.com/x") && !IsAllowedUpdateUrl(L"ftp://github.com/x") &&
+          !IsAllowedUpdateUrl(L"//github.com/x") && !IsAllowedUpdateUrl(L"") && !IsAllowedUpdateUrl(L"https://"),
+          "update url: only https is allowed");
+    Check(!IsAllowedUpdateUrl(L"https://evil.com/github.com/x") && !IsAllowedUpdateUrl(L"https://github.com.evil.com/x") &&
+          !IsAllowedUpdateUrl(L"https://notgithub.com/x") && !IsAllowedUpdateUrl(L"https://githubusercontent.com/x") &&
+          !IsAllowedUpdateUrl(L"https://evilgithubusercontent.com/x"),
+          "update url: lookalike hosts are refused");
+    Check(!IsAllowedUpdateUrl(L"https://github.com@evil.com/x") && !IsAllowedUpdateUrl(L"https://github.com:8443/x") &&
+          !IsAllowedUpdateUrl(L"https://github.com\\@evil.com/x"),
+          "update url: user info and ports are refused");
+    Check(IsAllowedUpdateUrl(L"https://GitHub.com/x"), "update url: the host compare ignores case");
 
     // Staging path and executable validation checks
     const std::wstring stagingPath = GetUpdateStagingPath(L"v1.1.0");
@@ -432,6 +486,19 @@ int main() {
           NextUpdateState(2, false, true) == UpdateCheckState::Ready &&
           NextUpdateState(3, false, false) == UpdateCheckState::Failed,
           "update row: each verdict maps to its state");
+    // US-040: a release that could not be verified reads like an available one,
+    // with a warning under the row.
+    Check(NextUpdateState(4, false, false) == UpdateCheckState::Unverified &&
+          NextUpdateState(4, true, true) == UpdateCheckState::Unverified,
+          "update row: verdict 4 is an unverified update, even over an earlier one");
+    Check(UpdateRowText(UpdateCheckState::Unverified, L"v2.1.0") == L"v2.1.0 available - open release page",
+          "update row: an unverified update offers the release page");
+    Check(UpdateRowDescription(UpdateCheckState::Unverified, L"Last checked: today") == L"Update couldn't be verified",
+          "update row: the unverified warning replaces the last-checked text");
+    Check(UpdateRowDescription(UpdateCheckState::Ready, L"Last checked: today") == L"Last checked: today" &&
+          UpdateRowDescription(UpdateCheckState::Failed, L"") == L"",
+          "update row: other states keep the last-checked text");
+    Check(IsUpdateRowClickable(UpdateCheckState::Unverified), "update row: an unverified update can be clicked");
     Check(NextUpdateState(3, true, true) == UpdateCheckState::Ready &&
           NextUpdateState(3, false, true) == UpdateCheckState::Available,
           "update row: a failed re-check keeps an update that is already ready or available");
@@ -483,9 +550,11 @@ int main() {
 
     // Live WinHTTP GitHub query verification
     std::wstring liveTag, liveUrl, liveAssetUrl;
-    if (QueryLatestReleaseInfo(L"api.github.com", L"/repos/akiraeng/takeoff-launcher/releases/latest", liveTag, liveUrl, liveAssetUrl)) {
+    // (our own repo: the asset lookup only accepts sdkasper/lean-launcher downloads)
+    if (QueryLatestReleaseInfo(kDefaultApiHost, kDefaultApiPath, liveTag, liveUrl, liveAssetUrl)) {
         Check(!liveTag.empty(), "live GitHub query returned a release tag");
         Check(!liveAssetUrl.empty(), "live GitHub query returned an asset URL");
+        Check(IsAllowedUpdateUrl(liveAssetUrl), "the live asset URL is an allowed update URL");
         std::wcout << L"[LIVE TEST] Successfully queried GitHub API! Latest release: " 
                   << liveTag << L", asset: " << liveAssetUrl << L'\n';
 
@@ -499,6 +568,23 @@ int main() {
             Check(ValidateExecutableFile(testDownloadPath), "downloaded file is valid executable");
             DeleteFileW(testDownloadPath.c_str());
             std::wcout << L"[LIVE TEST] Successfully downloaded and validated update executable from GitHub!\n";
+        }
+
+        // The small-file download follows GitHub's redirect to its asset host by
+        // hand, so every release's zip checksum (a few dozen bytes) must arrive.
+        {
+            std::wstring checksumUrl = liveAssetUrl;
+            checksumUrl.replace(checksumUrl.rfind(L"LeanLauncher.exe"), 16,
+                                L"LeanLauncher-" + liveTag + L"-windows-x64.zip.sha256");
+            std::string checksumText;
+            Check(DownloadSmallText(checksumUrl, kMaxVerificationFileBytes, checksumText) &&
+                      checksumText.size() > 64 && checksumText.size() < kMaxVerificationFileBytes,
+                  "live: a small release file downloads through GitHub's redirect");
+            std::string tooSmallLimit;
+            Check(!DownloadSmallText(checksumUrl, 16, tooSmallLimit) && tooSmallLimit.empty(),
+                  "live: a file over the size limit is refused");
+            Check(!DownloadSmallText(L"http://github.com/sdkasper/lean-launcher", 1024, tooSmallLimit),
+                  "a plain http url is refused without a request");
         }
     } else if (QueryLatestReleaseTag(L"api.github.com", L"/repos/microsoft/terminal/releases/latest", liveTag, liveUrl)) {
         Check(!liveTag.empty(), "live GitHub query returned a release tag");
@@ -606,7 +692,12 @@ int main() {
         Check(std::wstring(RestartMessageFor(ApplyResult::NeedsFreshCheck)).find(L"Check for updates") != std::wstring::npos,
               "restart to update: the unverified message points at Check for updates");
         Check(RestartMessageFor(ApplyResult::Started)[0] == L'\0', "restart to update: no message when the update started");
-        for (ApplyResult r : {ApplyResult::UacDeclined, ApplyResult::NeedsFreshCheck, ApplyResult::Failed}) {
+        Check(RestartReactionFor(ApplyResult::NotVerified) == RestartReaction::StayMessageAndOpenReleases,
+              "restart to update: an update that fails verification shows a message and opens the releases page");
+        Check(std::wstring(RestartMessageFor(ApplyResult::NotVerified)).find(L"could not be verified") != std::wstring::npos,
+              "restart to update: the not-verified message says so");
+        for (ApplyResult r : {ApplyResult::UacDeclined, ApplyResult::NeedsFreshCheck, ApplyResult::Failed,
+                              ApplyResult::NotVerified}) {
             const std::wstring m = RestartMessageFor(r);
             Check(m.find(L'\u2014') == std::wstring::npos && m.find(L"--") == std::wstring::npos,
                   "restart to update: messages contain no em dash or double hyphen");
@@ -720,6 +811,9 @@ int main() {
 
         Check(IsStaleUpdateFileName(L"LeanLauncher_v1.9.1.exe"), "cleanup: a staged update exe is stale");
         Check(IsStaleUpdateFileName(L"leanlauncher_v1.9.1.EXE.tmp"), "cleanup: a partial download is stale");
+        Check(IsStaleUpdateFileName(L"LeanLauncher_v2.1.0.exe.sha256") && IsStaleUpdateFileName(L"LeanLauncher_v2.1.0.exe.minisig"),
+              "cleanup: staged verification files are stale too");
+        Check(!IsStaleUpdateFileName(L"LeanLauncher_v2.1.0.sha256"), "cleanup: only verification files of an update exe");
         Check(!IsStaleUpdateFileName(L"notes.txt"), "cleanup: other files are left alone");
         Check(!IsStaleUpdateFileName(L"LeanLauncher_v1.9.1.exe.bak"), "cleanup: only the known suffixes are removed");
         Check(!IsStaleUpdateFileName(L"other_LeanLauncher_v1.exe"), "cleanup: the name must start with the update prefix");
@@ -3878,6 +3972,243 @@ int main() {
         Check(ti::ExplorerFolderArgs(L"C:\\") == L"C:\\", "explorer fallback leaves a drive root as is");
         Check(ti::ExplorerFolderArgs(L"\\\\nas\\share\\") == L"\"\\\\nas\\share\"",
               "explorer fallback handles a network share");
+    }
+
+    // -----------------------------------------------------------------------------
+    // US-040: update signature verification (src/sha512.h, ed25519.h, minisign.h)
+    // -----------------------------------------------------------------------------
+    {
+        using namespace takeoff;
+        const auto fromHex = [](std::string_view hex) {
+            std::vector<uint8_t> bytes;
+            const auto nibble = [](char ch) { return ch <= '9' ? ch - '0' : ch - 'a' + 10; };
+            for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+                bytes.push_back(static_cast<uint8_t>(nibble(hex[i]) * 16 + nibble(hex[i + 1])));
+            }
+            return bytes;
+        };
+        const auto sha512Hex = [](std::string_view text) {
+            uint8_t digest[64];
+            Sha512 hasher;
+            hasher.Update(text.data(), text.size());
+            hasher.Final(digest);
+            std::string hex;
+            for (uint8_t byte : digest) {
+                static constexpr char kDigits[] = "0123456789abcdef";
+                hex.push_back(kDigits[byte >> 4]);
+                hex.push_back(kDigits[byte & 15]);
+            }
+            return hex;
+        };
+
+        // SHA-512 known answers (FIPS 180-4), including a two-block message.
+        Check(sha512Hex("abc") ==
+                  "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+                  "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+              "SHA-512 of abc");
+        Check(sha512Hex("") ==
+                  "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce"
+                  "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+              "SHA-512 of the empty string");
+        Check(sha512Hex("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu") ==
+                  "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018"
+                  "501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909",
+              "SHA-512 of a message longer than one block");
+
+        // Ed25519 known answers (RFC 8032 section 7.1, tests 1 and 2).
+        {
+            const auto pk1 = fromHex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+            const auto sig1 = fromHex(
+                "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b");
+            Check(Ed25519Verify(sig1.data(), nullptr, 0, pk1.data()), "RFC 8032 test 1 verifies");
+            const uint8_t one = 0x00;
+            Check(!Ed25519Verify(sig1.data(), &one, 1, pk1.data()), "RFC 8032 test 1 fails for another message");
+
+            const auto pk2 = fromHex("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c");
+            const auto sig2 = fromHex(
+                "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00");
+            const uint8_t msg2 = 0x72;
+            Check(Ed25519Verify(sig2.data(), &msg2, 1, pk2.data()), "RFC 8032 test 2 verifies");
+            auto flipped = sig2;
+            flipped[10] ^= 0x01;
+            Check(!Ed25519Verify(flipped.data(), &msg2, 1, pk2.data()), "a flipped signature bit fails");
+            Check(!Ed25519Verify(sig2.data(), &msg2, 1, pk1.data()), "a different public key fails");
+            auto nonCanonical = sig2;  // S + L is the same point but not a canonical signature
+            int carry = 0;
+            static constexpr int kOrder[32] = {0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7,
+                                               0xa2, 0xde, 0xf9, 0xde, 0x14, 0,    0,    0,    0,    0,    0,
+                                               0,    0,    0,    0,    0,    0,    0,    0,    0,    0x10};
+            for (int i = 0; i < 32; ++i) {
+                const int sum = nonCanonical[32 + i] + kOrder[i] + carry;
+                nonCanonical[32 + i] = static_cast<uint8_t>(sum & 255);
+                carry = sum >> 8;
+            }
+            Check(!Ed25519Verify(nonCanonical.data(), &msg2, 1, pk2.data()), "a non-canonical S is rejected");
+        }
+
+        // The release key compiled into the launcher.
+        MinisignPublicKey releaseKey;
+        Check(ParseMinisignPublicKey(kUpdatePublicKey, releaseKey), "the built-in release key parses");
+        static constexpr uint8_t kReleaseKeyId[8] = {0xA1, 0xBF, 0xB4, 0x07, 0x5E, 0x45, 0x4A, 0x10};
+        Check(std::memcmp(releaseKey.keyId, kReleaseKeyId, 8) == 0, "the built-in key has key ID 104A455E07B4BFA1");
+
+        // Fixtures made with minisign 0.12 and throwaway keys (never the release key):
+        // minisign -S -l -t "tag=v9.9.9" over the text below.
+        MinisignPublicKey keyA, keyB;
+        Check(ParseMinisignPublicKey("RWTGLyYihjZP61XrH9jrvsQm6Y7YodmR+UBYsrXQpFECTm+QPbtUFEGs", keyA) &&
+                  ParseMinisignPublicKey("RWSFqZbivfUAmjZ0tBuoMfQwQut0r3vAFkG1R8KbwCIxVw/iMOtg+CKB", keyB),
+              "the test keys parse");
+        const std::string exeHash = Sha256Hex("hello-exe", 9);
+        const std::string signedText = exeHash + "  LeanLauncher.exe  v9.9.9\n";
+        Check(exeHash == "8639ae81970a157f6e5b5a5c0fdd677c6a10d64ba1d0ee6d497f664632672e59", "the fixture hash is as signed");
+        const std::string goodSig =
+            "untrusted comment: signature from minisign secret key\n"
+            "RWTGLyYihjZP65X89DryX2aNJ2MTrmuli3jkTpHnWbkmU1YcUfb70HhY44EMEY19X3+uCJad55wf6P8VexQkdHfUvg/BxQlT1wQ=\n"
+            "trusted comment: tag=v9.9.9\n"
+            "TNAa5bpZRaH6pYiEdTEuhwl0ZpW/GvMjrfj/qbK698N+nmqjLqRgdZ3noP0vKyNh+ajkMkEmRFtPC1ZKX4LnDg==\n";
+        const std::string otherKeySig =
+            "untrusted comment: signature from minisign secret key\n"
+            "RWSFqZbivfUAmq4pXjt4x1NBcBySkTuanlXW4Va7AbY/LMWpTLk0T+YeFKM50T6v555RIqeIuZ8qYNaMTsBinOGntJJsCp/gCgA=\n"
+            "trusted comment: tag=v9.9.9\n"
+            "0EXL3jxtedzJ41ydTzHwCZR96SMljTlTSrVHI5/CvZtteT6N47RYrawyHXHy5xIpVca2C3KnfKmpqA01Wt18Cg==\n";
+        const std::string prehashedSig =
+            "untrusted comment: signature from minisign secret key\n"
+            "RUTGLyYihjZP692KSjxGYtHH/5BCxM2ZaaO0pvfggTBmuATXhFCXy8WNaBrXQtzz0ltMIviNHNwjRBglbdBLb+404j25CcJYWgU=\n"
+            "trusted comment: tag=v9.9.9\n"
+            "+2am6+LMf1lQ/V1Y3NG6aEjrZDYS7qi2LCkCFWCqEDD66z5Pcj5TvXHRaDAhz97WE68IuOqYqqe3eTREMqPfDA==\n";
+        // An empty `hash` means the real exe hash.
+        const auto verify = [&](const MinisignPublicKey& key, const std::string& text, const std::string& sig,
+                                const std::string& hash = std::string(), const std::string& tag = "v9.9.9") {
+            return VerifyUpdate(key, text, sig, hash.empty() ? exeHash : hash, tag);
+        };
+        const auto replaced = [](std::string text, const std::string& from, const std::string& to) {
+            const size_t at = text.find(from);
+            if (at != std::string::npos) text.replace(at, from.size(), to);
+            return text;
+        };
+
+        Check(verify(keyA, signedText, goodSig) == UpdateVerifyResult::Ok, "a valid release verifies");
+        Check(verify(keyA, replaced(signedText, "\n", "\r\n"), goodSig) == UpdateVerifyResult::BadSignature,
+              "the signed bytes must match exactly (a changed line ending is not the signed text)");
+        Check(verify(keyA, signedText, replaced(goodSig, "\n", "\r\n")) == UpdateVerifyResult::Ok,
+              "a signature file with Windows line endings still parses");
+
+        // The five cases the story names, plus the replay case.
+        Check(verify(keyA, signedText, goodSig, Sha256Hex("tampered-exe", 12)) == UpdateVerifyResult::HashMismatch,
+              "a tampered exe is rejected");
+        Check(verify(keyA, replaced(signedText, "8639", "8638"), goodSig) == UpdateVerifyResult::BadSignature,
+              "a tampered hash file is rejected");
+        Check(verify(keyA, signedText, otherKeySig) == UpdateVerifyResult::WrongKey,
+              "a signature from another key is rejected");
+        Check(verify(keyB, signedText, goodSig) == UpdateVerifyResult::WrongKey,
+              "the right signature under another expected key is rejected");
+        {
+            MinisignPublicKey forged = keyB;  // key A's ID with key B's key bytes
+            std::memcpy(forged.keyId, keyA.keyId, sizeof(forged.keyId));
+            Check(verify(forged, signedText, goodSig) == UpdateVerifyResult::BadSignature,
+                  "a matching key ID does not make a different key trusted");
+        }
+        Check(verify(keyA, "", goodSig) == UpdateVerifyResult::BadSignature, "a missing hash file is rejected");
+        Check(verify(keyA, signedText, "") == UpdateVerifyResult::Malformed, "a missing signature file is rejected");
+        Check(verify(keyA, signedText, goodSig, exeHash, "v9.9.8") == UpdateVerifyResult::WrongTag,
+              "a signed hash for another release tag (a replay) is rejected");
+        Check(verify(keyA, signedText, goodSig, exeHash, "") == UpdateVerifyResult::Malformed,
+              "an empty release tag is rejected");
+
+        // Damaged or unsupported signature files.
+        Check(verify(keyA, signedText, prehashedSig) == UpdateVerifyResult::Malformed,
+              "a prehashed (ED) signature is not accepted");
+        Check(verify(keyA, signedText, goodSig.substr(0, 90)) == UpdateVerifyResult::Malformed,
+              "a truncated signature file is rejected");
+        Check(verify(keyA, signedText, replaced(goodSig, "RWTG", "RW!G")) == UpdateVerifyResult::Malformed,
+              "bad base64 in the signature is rejected");
+        Check(verify(keyA, signedText, replaced(goodSig, "QlT1wQ=", "QlT1wA=")) == UpdateVerifyResult::BadSignature,
+              "a changed signature byte is rejected");
+        Check(verify(keyA, signedText, replaced(goodSig, "tag=v9.9.9", "tag=v9.9.8")) == UpdateVerifyResult::BadSignature,
+              "a changed trusted comment is rejected");
+        Check(verify(keyA, signedText, replaced(goodSig, "untrusted comment:", "comment:")) == UpdateVerifyResult::Malformed,
+              "a signature file without the untrusted comment line is rejected");
+        Check(verify(keyA, signedText, goodSig + "extra\n") == UpdateVerifyResult::Malformed,
+              "trailing content in the signature file is rejected");
+        Check(verify(keyA, signedText, std::string(2000, 'A')) == UpdateVerifyResult::Malformed,
+              "an oversized signature file is rejected");
+        Check(verify(keyA, std::string(2000, 'a'), goodSig) == UpdateVerifyResult::Malformed,
+              "an oversized hash file is rejected");
+        Check(verify(keyA, signedText, goodSig, "not-a-hash") == UpdateVerifyResult::Malformed,
+              "a malformed exe hash is rejected");
+        Check(!ParseMinisignPublicKey("", keyA) && !ParseMinisignPublicKey("RWTGLyYihjZP61Xr", keyA),
+              "a short or empty public key is rejected");
+
+        // The install-time check takes the tag from the signed text and needs it to
+        // be newer than the running version (no replaying an older signed release).
+        Check(VerifyUpdateForInstall(keyA, signedText, goodSig, exeHash, L"2.0.4") == UpdateVerifyResult::Ok,
+              "install check: a newer signed release passes");
+        Check(VerifyUpdateForInstall(keyA, signedText, goodSig, exeHash, L"v9.9.9") == UpdateVerifyResult::WrongTag &&
+                  VerifyUpdateForInstall(keyA, signedText, goodSig, exeHash, L"10.0.0") == UpdateVerifyResult::WrongTag,
+              "install check: the same or an older signed release is rejected");
+        Check(VerifyUpdateForInstall(keyA, "not a signed line", goodSig, exeHash, L"2.0.4") == UpdateVerifyResult::Malformed,
+              "install check: unparseable signed text is rejected");
+        Check(VerifyUpdateForInstall(keyA, signedText, goodSig, Sha256Hex("other", 5), L"2.0.4") == UpdateVerifyResult::HashMismatch,
+              "install check: another exe is rejected");
+        Check(VerifyUpdateForInstall(keyB, signedText, goodSig, exeHash, L"2.0.4") == UpdateVerifyResult::WrongKey,
+              "install check: another key is rejected");
+        {
+            std::string narrow;
+            Check(NarrowReleaseTag(L"v2.1.0", narrow) && narrow == "v2.1.0", "release tag: plain ASCII is kept");
+            Check(!NarrowReleaseTag(L"", narrow) && !NarrowReleaseTag(L"v2 1", narrow) &&
+                      !NarrowReleaseTag(L"v2.é", narrow) && !NarrowReleaseTag(std::wstring(65, L'v'), narrow),
+                  "release tag: empty, spaced, non-ASCII or oversized tags are rejected");
+        }
+
+        // The staged files on disk: what ApplyUpdateAndRestart and the elevated helper re-check.
+        {
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            const fs::path dir = fs::temp_directory_path(ec) / L"ll-us040-staged-test";
+            fs::remove_all(dir, ec);
+            fs::create_directories(dir, ec);
+            const std::wstring exePath = (dir / L"LeanLauncher_v9.9.9.exe").wstring();
+            const auto put = [](const std::wstring& path, const std::string& text) {
+                std::ofstream out(fs::path(path), std::ios::binary | std::ios::trunc);
+                out << text;
+            };
+            put(exePath, "hello-exe");
+            put(VerificationFilePath(exePath, kSha256FileSuffix), signedText);
+            put(VerificationFilePath(exePath, kMinisigFileSuffix), goodSig);
+
+            std::string fileHash;
+            Check(HashFileSha256(exePath, fileHash) && fileHash == exeHash, "staged: the exe file hashes to the signed hash");
+            Check(VerifyStagedUpdateFiles(keyA, exePath, fileHash, L"2.0.4") == UpdateVerifyResult::Ok,
+                  "staged: untouched files verify");
+            Check(VerifyStagedUpdateFiles(keyB, exePath, fileHash, L"2.0.4") == UpdateVerifyResult::WrongKey,
+                  "staged: another key does not verify");
+
+            put(exePath, "hello-exe, patched");
+            Check(HashFileSha256(exePath, fileHash) && fileHash != exeHash &&
+                      VerifyStagedUpdateFiles(keyA, exePath, fileHash, L"2.0.4") == UpdateVerifyResult::HashMismatch,
+                  "staged: an exe changed after the download is rejected");
+            put(exePath, "hello-exe");
+            HashFileSha256(exePath, fileHash);
+
+            put(VerificationFilePath(exePath, kSha256FileSuffix), replaced(signedText, "8639", "8638"));
+            Check(VerifyStagedUpdateFiles(keyA, exePath, fileHash, L"2.0.4") == UpdateVerifyResult::BadSignature,
+                  "staged: a changed hash file is rejected");
+            put(VerificationFilePath(exePath, kSha256FileSuffix), signedText);
+
+            put(VerificationFilePath(exePath, kMinisigFileSuffix), std::string(2000, 'A'));
+            Check(VerifyStagedUpdateFiles(keyA, exePath, fileHash, L"2.0.4") == UpdateVerifyResult::Malformed,
+                  "staged: an oversized signature file is rejected");
+            fs::remove(fs::path(VerificationFilePath(exePath, kMinisigFileSuffix)), ec);
+            Check(VerifyStagedUpdateFiles(keyA, exePath, fileHash, L"2.0.4") == UpdateVerifyResult::Malformed,
+                  "staged: a missing signature file is rejected");
+            put(VerificationFilePath(exePath, kMinisigFileSuffix), goodSig);
+            Check(VerifyStagedUpdateFiles(keyA, exePath, fileHash, L"2.0.4") == UpdateVerifyResult::Ok,
+                  "staged: restoring the files verifies again");
+            Check(!HashFileSha256((dir / L"missing.exe").wstring(), fileHash) &&
+                      !HashFileSha256(dir.wstring(), fileHash),
+                  "staged: a missing file or a folder cannot be hashed");
+            fs::remove_all(dir, ec);
+        }
     }
 
     // -----------------------------------------------------------------------------

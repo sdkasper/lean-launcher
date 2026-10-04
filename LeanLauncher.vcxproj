@@ -81,6 +81,9 @@
     <ClInclude Include="src\settings.h" />
     <ClInclude Include="src\updates.h" />
     <ClInclude Include="src\sha256.h" />
+    <ClInclude Include="src\sha512.h" />
+    <ClInclude Include="src\ed25519.h" />
+    <ClInclude Include="src\minisign.h" />
     <ClInclude Include="src\update_apply.h" />
     <ClInclude Include="src\calculator.h" />
     <ClInclude Include="src\preview.h" />

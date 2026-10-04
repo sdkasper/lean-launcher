@@ -17,6 +17,7 @@
 #include <winhttp.h>
 #include <shellapi.h>
 
+#include "minisign.h"
 #include "sha256.h"
 
 #pragma comment(lib, "winhttp.lib")
@@ -29,6 +30,10 @@ inline constexpr wchar_t kRepoUrl[] = L"https://github.com/sdkasper/lean-launche
 inline constexpr wchar_t kDefaultReleasesUrl[] = L"https://github.com/sdkasper/lean-launcher/releases";
 inline constexpr wchar_t kDefaultApiHost[] = L"api.github.com";
 inline constexpr wchar_t kDefaultApiPath[] = L"/repos/sdkasper/lean-launcher/releases/latest";
+// US-040: the minisign public key (key ID 104A455E07B4BFA1) that signs every
+// release's LeanLauncher.exe.sha256. A compile-time constant with no runtime
+// override (NFR-009).
+inline constexpr char kUpdatePublicKey[] = "RWShv7QHXkVKEAzaW1aa8XxLrSVCGpRt8eRHE3EqhiB0p5aA5jNQ6i5Q";
 
 inline std::wstring ExtractTagName(std::string_view json) {
     const std::string_view key = "\"tag_name\"";
@@ -88,7 +93,9 @@ inline bool IsNewerVersion(std::wstring_view remote, std::wstring_view current) 
 
 // What the About tab's update row (US-029) shows. Driven by both the
 // automatic startup check and the manual one - they share one worker.
-enum class UpdateCheckState { Idle, Checking, Downloading, UpToDate, Ready, Available, Failed };
+// Unverified (US-040): a newer release exists but could not be proven to be
+// the official one, so nothing was staged. It reads like Available.
+enum class UpdateCheckState { Idle, Checking, Downloading, UpToDate, Ready, Available, Failed, Unverified };
 
 // Posted from the update worker to the UI thread (lParam, owned by the
 // receiver). `path` is only set for a downloaded update.
@@ -112,11 +119,19 @@ inline std::wstring UpdateRowText(UpdateCheckState state, std::wstring_view tag)
         return tag.empty() ? std::wstring(L"Downloading update…") : L"Downloading " + DisplayTag(tag) + L"…";
     case UpdateCheckState::UpToDate: return L"Up to date";
     case UpdateCheckState::Ready: return DisplayTag(tag) + L" ready - Restart to update";
-    case UpdateCheckState::Available: return DisplayTag(tag) + L" available - open release page";
+    case UpdateCheckState::Available:
+    case UpdateCheckState::Unverified: return DisplayTag(tag) + L" available - open release page";
     case UpdateCheckState::Failed: return L"Check failed - try again";
     case UpdateCheckState::Idle: break;
     }
     return L"Check now";
+}
+
+// The description under the About tab's update row: the unverified warning
+// replaces the "last checked" text while it applies.
+inline std::wstring UpdateRowDescription(UpdateCheckState state, std::wstring_view lastCheckText) {
+    if (state == UpdateCheckState::Unverified) return L"Update couldn't be verified";
+    return std::wstring(lastCheckText);
 }
 
 inline bool IsUpdateRowClickable(UpdateCheckState state) {
@@ -124,14 +139,15 @@ inline bool IsUpdateRowClickable(UpdateCheckState state) {
 }
 
 // The row state a finished check leads to. wParam-style verdict: 0 up to
-// date, 1 newer release but download failed, 2 downloaded and validated,
-// 3 check failed. A failed check (e.g. a network blip on the 24-hour
-// re-check) keeps an update that is already downloaded or available rather
-// than hiding it behind "Check failed".
+// date, 1 newer release but download failed, 2 downloaded and verified,
+// 3 check failed, 4 newer release that could not be verified. A failed check
+// (e.g. a network blip on the 24-hour re-check) keeps an update that is
+// already downloaded or available rather than hiding it behind "Check failed".
 inline UpdateCheckState NextUpdateState(uintptr_t verdict, bool hadDownloaded, bool hadAvailable) {
     switch (verdict) {
     case 2: return UpdateCheckState::Ready;
     case 1: return UpdateCheckState::Available;
+    case 4: return UpdateCheckState::Unverified;
     case 0: return UpdateCheckState::UpToDate;
     default:
         if (hadDownloaded) return UpdateCheckState::Ready;
@@ -172,20 +188,16 @@ inline bool ShouldCheckForUpdates(uint64_t lastCheckSeconds, uint64_t currentSec
     return (currentSeconds - lastCheckSeconds) >= k24HoursInSeconds;
 }
 
-inline std::wstring ExtractAssetDownloadUrl(std::string_view json, std::wstring_view tag,
-                                           std::wstring_view preferredName = L"LeanLauncher.exe") {
+// US-040: only an asset whose file name is exactly `assetName` is ever
+// returned, and only from this repo's release downloads over https. There is no
+// fallback to another .exe and no URL is made up from the tag: a release
+// without the asset simply has nothing to install.
+inline std::wstring ExtractAssetDownloadUrl(std::string_view json, std::wstring_view /*tag*/,
+                                           std::wstring_view assetName = L"LeanLauncher.exe") {
+    static constexpr std::wstring_view kDownloadPrefix =
+        L"https://github.com/sdkasper/lean-launcher/releases/download/";
     const std::string_view urlKey = "\"browser_download_url\"";
     size_t pos = 0;
-    std::wstring fallbackExeUrl;
-
-    auto toLowerW = [](std::wstring_view s) {
-        std::wstring out;
-        out.reserve(s.size());
-        for (wchar_t c : s) out.push_back(towlower(c));
-        return out;
-    };
-
-    const std::wstring targetLower = toLowerW(preferredName);
 
     while ((pos = json.find(urlKey, pos)) != std::string_view::npos) {
         pos += urlKey.size();
@@ -199,41 +211,62 @@ inline std::wstring ExtractAssetDownloadUrl(std::string_view json, std::wstring_
         std::string rawUrl = std::string(json.substr(pos, end - pos));
         pos = end + 1;
 
+        // A plain ASCII URL only: anything with an escape or a control
+        // character is not a download link this launcher would have made.
+        if (!std::all_of(rawUrl.begin(), rawUrl.end(), [](char ch) {
+                const unsigned char c = static_cast<unsigned char>(ch);
+                return c > 0x20 && c < 0x7F && ch != '\\';
+            })) {
+            continue;
+        }
         std::wstring url(rawUrl.begin(), rawUrl.end());
-        std::wstring urlLower = toLowerW(url);
-
-        // Match the asset filename (final path segment) exactly against
-        // preferredName - a substring/"contains" match would let a checksum
-        // sidecar like "LeanLauncher.exe.sha256" (which contains
-        // "leanlauncher.exe") win over the real executable if it's
-        // enumerated first, permanently breaking auto-update.
-        const size_t lastSlash = urlLower.find_last_of(L'/');
-        const std::wstring_view assetName = (lastSlash == std::wstring::npos)
-            ? std::wstring_view(urlLower)
-            : std::wstring_view(urlLower).substr(lastSlash + 1);
-        if (assetName == targetLower) {
-            return url;
+        if (url.size() <= kDownloadPrefix.size() || url.compare(0, kDownloadPrefix.size(), kDownloadPrefix) != 0 ||
+            url.find(L"..") != std::wstring::npos || url.find_first_of(L"?#") != std::wstring::npos) {
+            continue;
         }
-        // If it's an .exe file, save as secondary fallback
-        if (fallbackExeUrl.empty() && urlLower.size() >= 4 &&
-            urlLower.compare(urlLower.size() - 4, 4, L".exe") == 0) {
-            fallbackExeUrl = url;
-        }
-    }
 
-    if (!fallbackExeUrl.empty()) {
-        return fallbackExeUrl;
-    }
-
-    if (!tag.empty()) {
-        std::wstring fallback = L"https://github.com/sdkasper/lean-launcher/releases/download/";
-        fallback += tag;
-        fallback += L"/";
-        fallback += preferredName;
-        return fallback;
+        // Match the asset filename (final path segment) exactly - a
+        // substring match would let "LeanLauncher.exe.sha256" win over the
+        // real executable if it is listed first.
+        const size_t lastSlash = url.find_last_of(L'/');
+        if (std::wstring_view(url).substr(lastSlash + 1) == assetName) return url;
     }
 
     return {};
+}
+
+// The three files of a release that an update needs (US-040). Any of them may
+// be empty when the release does not carry that asset.
+struct ReleaseAssets {
+    std::wstring exe;
+    std::wstring sha256;
+    std::wstring minisig;
+};
+
+inline ReleaseAssets ExtractReleaseAssets(std::string_view json, std::wstring_view tag) {
+    return {ExtractAssetDownloadUrl(json, tag, L"LeanLauncher.exe"),
+            ExtractAssetDownloadUrl(json, tag, L"LeanLauncher.exe.sha256"),
+            ExtractAssetDownloadUrl(json, tag, L"LeanLauncher.exe.minisig")};
+}
+
+// Update files may only come from GitHub over https: no other scheme, no
+// port, no user info, and a host that is github.com or one of its
+// githubusercontent.com asset hosts (where release downloads redirect to).
+inline bool IsAllowedUpdateUrl(std::wstring_view url) {
+    static constexpr std::wstring_view kScheme = L"https://";
+    if (url.size() <= kScheme.size() || url.compare(0, kScheme.size(), kScheme) != 0) return false;
+    const std::wstring_view rest = url.substr(kScheme.size());
+    const size_t end = rest.find_first_of(L"/?#");
+    std::wstring host(rest.substr(0, end));
+    if (host.empty() || host.find_first_of(L"@:\\ ") != std::wstring::npos) return false;
+    for (wchar_t& ch : host) {
+        if (ch >= 0x7F || ch <= L' ') return false;
+        ch = static_cast<wchar_t>(towlower(ch));
+    }
+    static constexpr std::wstring_view kAssetHostSuffix = L".githubusercontent.com";
+    return host == L"github.com" ||
+        (host.size() > kAssetHostSuffix.size() &&
+         host.compare(host.size() - kAssetHostSuffix.size(), kAssetHostSuffix.size(), kAssetHostSuffix) == 0);
 }
 
 inline bool ValidateExecutableFile(const std::wstring& filePath) {
@@ -480,9 +513,262 @@ inline bool DownloadUpdateFile(std::wstring_view initialUrl, const std::wstring&
     return false;
 }
 
+// ---- US-040: signed update verification -------------------------------------
+
+inline constexpr size_t kMaxVerificationFileBytes = 1024;
+inline constexpr wchar_t kSha256FileSuffix[] = L".sha256";
+inline constexpr wchar_t kMinisigFileSuffix[] = L".minisig";
+
+// The two verification files are staged next to the update exe, under its name.
+inline std::wstring VerificationFilePath(const std::wstring& exePath, const wchar_t* suffix) {
+    return exePath + suffix;
+}
+
+// The release tag as the plain ASCII text the signature covers.
+inline bool NarrowReleaseTag(std::wstring_view tag, std::string& out) {
+    out.clear();
+    if (tag.empty() || tag.size() > 64) return false;
+    for (wchar_t ch : tag) {
+        if (ch <= L' ' || ch >= 0x7F) return false;
+        out.push_back(static_cast<char>(ch));
+    }
+    return true;
+}
+
+// Decides whether a downloaded update may be installed by this running
+// version: the key, signature, signed tag and exe hash must all check out, and
+// the signed release must be newer than `currentVersion` (so an older signed
+// release cannot be replayed as an "update"). The tag is taken from the signed
+// text, which VerifyUpdate then checks the signature against.
+inline UpdateVerifyResult VerifyUpdateForInstall(const MinisignPublicKey& key, std::string_view signedText,
+                                                 std::string_view signatureFile, std::string_view exeSha256Hex,
+                                                 std::wstring_view currentVersion) {
+    minisign_detail::SignedText parsed;
+    if (!minisign_detail::ParseSignedText(signedText, parsed)) return UpdateVerifyResult::Malformed;
+    const UpdateVerifyResult result = VerifyUpdate(key, signedText, signatureFile, exeSha256Hex, parsed.tag);
+    if (result != UpdateVerifyResult::Ok) return result;
+    const std::wstring tag(parsed.tag.begin(), parsed.tag.end());
+    return IsNewerVersion(tag, currentVersion) ? UpdateVerifyResult::Ok : UpdateVerifyResult::WrongTag;
+}
+
+// A regular file of at most kMaxVerificationFileBytes (no directory, no reparse point).
+inline bool ReadSmallFile(const std::wstring& path, std::string& out) {
+    out.clear();
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    BY_HANDLE_FILE_INFORMATION info{};
+    bool ok = GetFileInformationByHandle(file, &info) &&
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0 &&
+        info.nFileSizeHigh == 0 && info.nFileSizeLow > 0 && info.nFileSizeLow <= kMaxVerificationFileBytes;
+    if (ok) {
+        out.resize(info.nFileSizeLow);
+        DWORD got = 0;
+        ok = ReadFile(file, out.data(), info.nFileSizeLow, &got, nullptr) && got == info.nFileSizeLow;
+    }
+    CloseHandle(file);
+    if (!ok) out.clear();
+    return ok;
+}
+
+inline bool WriteSmallFile(const std::wstring& path, std::string_view text) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD wrote = 0;
+    const bool ok = WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &wrote, nullptr) &&
+        wrote == text.size();
+    CloseHandle(file);
+    return ok;
+}
+
+// SHA-256 of a whole file (at most `maxBytes`), as lowercase hex.
+inline bool HashFileSha256(const std::wstring& path, std::string& hex, uint64_t maxBytes = 64ull * 1024 * 1024) {
+    hex.clear();
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    BY_HANDLE_FILE_INFORMATION info{};
+    bool ok = GetFileInformationByHandle(file, &info) &&
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
+    const uint64_t size = (static_cast<uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+    ok = ok && size > 0 && size <= maxBytes;
+    if (ok) {
+        Sha256 hasher;
+        std::vector<uint8_t> buffer(1u << 16);
+        uint64_t done = 0;
+        while (ok && done < size) {
+            DWORD got = 0;
+            const DWORD want = static_cast<DWORD>((std::min<uint64_t>)(buffer.size(), size - done));
+            ok = ReadFile(file, buffer.data(), want, &got, nullptr) && got > 0;
+            if (ok) {
+                hasher.Update(buffer.data(), got);
+                done += got;
+            }
+        }
+        if (ok) hex = hasher.FinalHex();
+    }
+    CloseHandle(file);
+    return ok;
+}
+
+// Re-reads the staged verification files and checks them against `exeSha256Hex`
+// (the hash of the exe's actual bytes) with `key`.
+inline UpdateVerifyResult VerifyStagedUpdateFiles(const MinisignPublicKey& key, const std::wstring& exePath,
+                                                  std::string_view exeSha256Hex, std::wstring_view currentVersion) {
+    std::string signedText, signatureFile;
+    if (!ReadSmallFile(VerificationFilePath(exePath, kSha256FileSuffix), signedText) ||
+        !ReadSmallFile(VerificationFilePath(exePath, kMinisigFileSuffix), signatureFile)) {
+        return UpdateVerifyResult::Malformed;
+    }
+    return VerifyUpdateForInstall(key, signedText, signatureFile, exeSha256Hex, currentVersion);
+}
+
+// The check run right before an update is installed, with the release key built
+// into this launcher.
+inline UpdateVerifyResult VerifyStagedUpdate(const std::wstring& exePath, std::string_view exeSha256Hex) {
+    MinisignPublicKey key;
+    if (!ParseMinisignPublicKey(kUpdatePublicKey, key)) return UpdateVerifyResult::Malformed;
+    return VerifyStagedUpdateFiles(key, exePath, exeSha256Hex, kAppVersion);
+}
+
+namespace detail {
+struct InternetHandle {
+    HINTERNET handle = nullptr;
+    explicit InternetHandle(HINTERNET h = nullptr) : handle(h) {}
+    ~InternetHandle() { if (handle) WinHttpCloseHandle(handle); }
+    InternetHandle(const InternetHandle&) = delete;
+    InternetHandle& operator=(const InternetHandle&) = delete;
+};
+} // namespace detail
+
+// Downloads a small text file (at most `maxBytes`) into memory. https only, from
+// GitHub hosts only (IsAllowedUpdateUrl), following at most 3 redirects by hand
+// so every hop is checked.
+inline bool DownloadSmallText(std::wstring_view initialUrl, size_t maxBytes, std::string& out) {
+    out.clear();
+    detail::InternetHandle session(WinHttpOpen(L"LeanLauncher/0.1", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+    if (!session.handle) return false;
+    WinHttpSetTimeouts(session.handle, 10000, 10000, 10000, 10000);
+    DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+    WinHttpSetOption(session.handle, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy));
+
+    std::wstring url(initialUrl);
+    for (int hop = 0; hop < 4; ++hop) {
+        if (!IsAllowedUpdateUrl(url)) return false;
+        URL_COMPONENTS parts{};
+        parts.dwStructSize = sizeof(parts);
+        wchar_t hostName[256]{};
+        wchar_t urlPath[2048]{};
+        parts.lpszHostName = hostName;
+        parts.dwHostNameLength = static_cast<DWORD>(std::size(hostName));
+        parts.lpszUrlPath = urlPath;
+        parts.dwUrlPathLength = static_cast<DWORD>(std::size(urlPath));
+        if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &parts)) return false;
+
+        detail::InternetHandle connect(WinHttpConnect(session.handle, hostName, INTERNET_DEFAULT_HTTPS_PORT, 0));
+        if (!connect.handle) return false;
+        detail::InternetHandle request(WinHttpOpenRequest(connect.handle, L"GET", urlPath, nullptr, WINHTTP_NO_REFERER,
+                                                          WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
+        if (!request.handle) return false;
+        if (!WinHttpSendRequest(request.handle, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+            !WinHttpReceiveResponse(request.handle, nullptr)) {
+            return false;
+        }
+        DWORD status = 0;
+        DWORD statusSize = sizeof(status);
+        if (!WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                 WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX)) {
+            return false;
+        }
+        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+            DWORD locationBytes = 0;
+            WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX, nullptr,
+                                &locationBytes, WINHTTP_NO_HEADER_INDEX);
+            if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || locationBytes == 0 || locationBytes > 4096) return false;
+            std::vector<wchar_t> location(locationBytes / sizeof(wchar_t) + 1, L'\0');
+            if (!WinHttpQueryHeaders(request.handle, WINHTTP_QUERY_LOCATION, WINHTTP_HEADER_NAME_BY_INDEX,
+                                     location.data(), &locationBytes, WINHTTP_NO_HEADER_INDEX)) {
+                return false;
+            }
+            url = location.data();
+            continue;
+        }
+        if (status != 200) return false;
+
+        DWORD available = 0;
+        while (WinHttpQueryDataAvailable(request.handle, &available) && available > 0) {
+            if (out.size() + available > maxBytes) {
+                out.clear();
+                return false;
+            }
+            std::string chunk(available, '\0');
+            DWORD got = 0;
+            if (!WinHttpReadData(request.handle, chunk.data(), available, &got) || got == 0) {
+                out.clear();
+                return false;
+            }
+            out.append(chunk.data(), got);
+        }
+        if (out.empty()) return false;
+        return true;
+    }
+    return false;
+}
+
+enum class UpdateDownloadOutcome {
+    Verified,        // downloaded, signed by the release key, ready to install
+    DownloadFailed,  // nothing usable arrived (network, missing exe asset)
+    Unverified,      // downloaded or offered, but it could not be proven to be the official release
+};
+
+// Downloads the update exe and its two verification files and only reports
+// Verified when VerifyUpdate passes against the release key. On any other
+// outcome nothing is left in the staging folder.
+inline UpdateDownloadOutcome DownloadAndVerifyUpdate(const ReleaseAssets& assets, std::wstring_view tag,
+                                                     const std::wstring& stagingPath, std::string& sha256Out) {
+    sha256Out.clear();
+    if (assets.exe.empty() || stagingPath.empty()) return UpdateDownloadOutcome::DownloadFailed;
+    const std::wstring sha256Path = VerificationFilePath(stagingPath, kSha256FileSuffix);
+    const std::wstring minisigPath = VerificationFilePath(stagingPath, kMinisigFileSuffix);
+    const auto cleanup = [&] {
+        DeleteFileW(stagingPath.c_str());
+        DeleteFileW(sha256Path.c_str());
+        DeleteFileW(minisigPath.c_str());
+    };
+    cleanup();
+    // A release that does not carry both verification files cannot be proven
+    // official, so its exe is not even downloaded.
+    if (assets.sha256.empty() || assets.minisig.empty()) return UpdateDownloadOutcome::Unverified;
+
+    std::string exeSha256;
+    if (!DownloadUpdateFile(assets.exe, stagingPath, &exeSha256)) return UpdateDownloadOutcome::DownloadFailed;
+
+    std::string signedText, signatureFile;
+    if (!DownloadSmallText(assets.sha256, kMaxVerificationFileBytes, signedText) ||
+        !DownloadSmallText(assets.minisig, kMaxVerificationFileBytes, signatureFile)) {
+        cleanup();
+        return UpdateDownloadOutcome::DownloadFailed;
+    }
+
+    MinisignPublicKey key;
+    std::string narrowTag;
+    if (!ParseMinisignPublicKey(kUpdatePublicKey, key) || !NarrowReleaseTag(tag, narrowTag) ||
+        VerifyUpdate(key, signedText, signatureFile, exeSha256, narrowTag) != UpdateVerifyResult::Ok) {
+        cleanup();
+        return UpdateDownloadOutcome::Unverified;
+    }
+    if (!WriteSmallFile(sha256Path, signedText) || !WriteSmallFile(minisigPath, signatureFile)) {
+        cleanup();
+        return UpdateDownloadOutcome::DownloadFailed;
+    }
+    sha256Out = std::move(exeSha256);
+    return UpdateDownloadOutcome::Verified;
+}
+
 inline bool QueryLatestReleaseInfo(std::wstring_view host, std::wstring_view path,
                                   std::wstring& outTag, std::wstring& outHtmlUrl,
-                                  std::wstring& outAssetUrl) {
+                                  std::wstring& outAssetUrl, ReleaseAssets* outAssets = nullptr) {
     HINTERNET session = WinHttpOpen(L"LeanLauncher/0.1",
                                     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                     WINHTTP_NO_PROXY_NAME,
@@ -549,6 +835,7 @@ inline bool QueryLatestReleaseInfo(std::wstring_view host, std::wstring_view pat
                     }
                 }
                 outAssetUrl = ExtractAssetDownloadUrl(response, outTag);
+                if (outAssets) *outAssets = ExtractReleaseAssets(response, outTag);
                 success = true;
             }
         }
@@ -836,7 +1123,7 @@ inline bool FetchLatestReleaseJson(std::string& outJson) {
 
 // Outcome of "Restart to Update". Started: the update was swapped in place, or
 // the elevated helper was launched (either way the launcher should exit).
-enum class ApplyResult { Started, UacDeclined, NeedsFreshCheck, Failed };
+enum class ApplyResult { Started, UacDeclined, NeedsFreshCheck, Failed, NotVerified };
 
 enum class RestartReaction { ExitLauncher, StayWithMessage, StayMessageAndOpenReleases };
 
@@ -845,7 +1132,8 @@ inline RestartReaction RestartReactionFor(ApplyResult result) {
     case ApplyResult::Started: return RestartReaction::ExitLauncher;
     case ApplyResult::UacDeclined:
     case ApplyResult::NeedsFreshCheck: return RestartReaction::StayWithMessage;
-    case ApplyResult::Failed: break;
+    case ApplyResult::Failed:
+    case ApplyResult::NotVerified: break;
     }
     return RestartReaction::StayMessageAndOpenReleases;
 }
@@ -859,6 +1147,9 @@ inline const wchar_t* RestartMessageFor(ApplyResult result) {
     case ApplyResult::NeedsFreshCheck:
         return L"This update file has not been verified in this session. Use Check for updates in "
                L"Settings > About to download it again, then Restart to Update.";
+    case ApplyResult::NotVerified:
+        return L"The update could not be verified as the official release, so it was not installed. The releases "
+               L"page will open so you can download it.";
     case ApplyResult::Failed: break;
     }
     return L"The update could not be installed. The releases page will open so you can download it.";
@@ -873,6 +1164,14 @@ inline ApplyResult ApplyUpdateAndRestart(const std::wstring& updateExePath, cons
     if (!ValidateExecutableFile(updateExePath)) {
         return ApplyResult::Failed;
     }
+
+    // US-040: the staged file sat on disk since the download, so check it again
+    // right before it replaces the running exe - the hash pinned at download
+    // time (when known) and the signed release hash and signature.
+    std::string stagedSha256;
+    if (!HashFileSha256(updateExePath, stagedSha256)) return ApplyResult::Failed;
+    if (!expectedSha256.empty() && !Sha256HexMatches(expectedSha256, stagedSha256)) return ApplyResult::NotVerified;
+    if (VerifyStagedUpdate(updateExePath, stagedSha256) != UpdateVerifyResult::Ok) return ApplyResult::NotVerified;
 
     wchar_t currentExe[MAX_PATH]{};
     const DWORD exeLength = GetModuleFileNameW(nullptr, currentExe, MAX_PATH);
@@ -928,14 +1227,16 @@ inline ApplyResult ApplyUpdateAndRestart(const std::wstring& updateExePath, cons
 }
 
 // Files the download step leaves in %LOCALAPPDATA%\LeanLauncher\updates:
-// LeanLauncher_v<tag>.exe and its .tmp. Nothing else in that folder is touched.
+// LeanLauncher_v<tag>.exe, its .tmp, and the .sha256 / .minisig verification
+// files staged beside it. Nothing else in that folder is touched.
 inline bool IsStaleUpdateFileName(std::wstring_view name) {
     std::wstring lower(name);
     for (wchar_t& ch : lower) ch = static_cast<wchar_t>(towlower(ch));
     const auto endsWith = [&](std::wstring_view suffix) {
         return lower.size() > suffix.size() && lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) == 0;
     };
-    return lower.rfind(L"leanlauncher_v", 0) == 0 && (endsWith(L".exe") || endsWith(L".exe.tmp"));
+    return lower.rfind(L"leanlauncher_v", 0) == 0 &&
+        (endsWith(L".exe") || endsWith(L".exe.tmp") || endsWith(L".exe.sha256") || endsWith(L".exe.minisig"));
 }
 
 // Best effort and bounded. The elevated helper leaves the consumed update file

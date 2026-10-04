@@ -285,15 +285,12 @@ inline int RunApplyUpdateMode(const std::vector<std::wstring>& args) {
     if (!ValidateExecutableBuffer(bytes.data(), bytes.size())) {
         return fail(L"Update failed: the downloaded file is not a valid Lean Launcher program.", 1);
     }
-    // Confirm the exact bytes about to be installed with the published release.
-    // Fail closed: any doubt means nothing is installed.
-    std::string releaseJson;
-    if (!FetchLatestReleaseJson(releaseJson)) {
-        return fail(L"Update failed: could not confirm the update with GitHub. Check your internet connection "
-                    L"and try Restart to Update again.", 1);
-    }
-    if (!ReleaseJsonHasAssetDigest(releaseJson, actualHash)) {
-        return fail(L"Update failed: the update does not match the published release.", 1);
+    // US-040: confirm the exact bytes about to be installed against the release
+    // signature (the .sha256 and .minisig staged beside the update file; they
+    // are checked with the key built into this exe, so the user-writable
+    // folder is no weaker). Fail closed: any doubt means nothing is installed.
+    if (VerifyStagedUpdate(request->updatePath, actualHash) != UpdateVerifyResult::Ok) {
+        return fail(L"Update failed: the update could not be verified as the official release.", 1);
     }
     if (!detail::SwapExe(target, bytes, error)) {
         return fail(error, 1);

@@ -12,6 +12,12 @@ further down for reference.
 
 ## [Unreleased]
 
+### Added
+- **Signed update verification (US-040)** - every release now publishes `LeanLauncher.exe.sha256` (the exe's hash, the release tag) and `LeanLauncher.exe.minisig`, a [minisign](https://jedisct1.github.io/minisign/) signature made with a key that only the release pipeline holds. Before it offers "Restart to update", the launcher downloads both files and checks the signature against the public key built into it, the signed hash against the downloaded exe, and the signed tag against the release. The check is repeated right before the exe is replaced, including in the elevated installer, which no longer needs a second request to GitHub. An update that fails any check is deleted and never installed: the Updates row reads "open release page" and shows "Update couldn't be verified". You only ever need `LeanLauncher.exe`; the two small files are fetched by the launcher itself. A release must be signed for this version and later to update to it automatically.
+
+### Changed
+- The updater only takes the asset named exactly `LeanLauncher.exe` from this repository's releases over https, with no fallback to another `.exe`, and fetches the verification files only from GitHub hosts.
+
 ### Fixed
 - **Editing a Settings text field now shows the whole value** - the field being edited used to be a small right-aligned box that only showed the end of a long value (a vault path, a note override), and its caret was always drawn at the end even after you moved it with the arrow keys (#6). The field now takes the full width of the row, is left-aligned, scrolls to keep the caret in view, and shows the real caret position and selection.
 

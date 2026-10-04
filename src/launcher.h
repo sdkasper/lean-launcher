@@ -275,7 +275,8 @@ private:
         }
         case kUpdateCheckCompletedMessage: {
             // wParam: 0 up to date, 1 newer release but download failed,
-            // 2 downloaded and validated, 3 check failed (no usable answer).
+            // 2 downloaded and verified, 3 check failed (no usable answer),
+            // 4 newer release that could not be verified (US-040).
             std::unique_ptr<takeoff::UpdateCheckResult> result(reinterpret_cast<takeoff::UpdateCheckResult*>(lParam));
             const takeoff::UpdateCheckState next =
                 takeoff::NextUpdateState(wParam, updateDownloaded_, updateAvailable_);
@@ -289,14 +290,16 @@ private:
             if (wParam == 2 && result && !result->path.empty()) {
                 downloadedUpdatePath_ = result->path;
                 downloadedUpdateSha256_ = result->sha256;
-            } else if (wParam == 0 || wParam == 1) {
-                // Up to date, or the re-download failed after the old staged file was
-                // deleted: never leave a path or hash pointing at a file that is gone.
+            } else if (wParam == 0 || wParam == 1 || wParam == 4) {
+                // Up to date, or the re-download failed or did not verify and the old
+                // staged file was deleted: never leave a path or hash pointing at a file
+                // that is gone.
                 downloadedUpdatePath_.clear();
                 downloadedUpdateSha256_.clear();
             }
             updateDownloaded_ = next == takeoff::UpdateCheckState::Ready;
-            updateAvailable_ = updateDownloaded_ || next == takeoff::UpdateCheckState::Available;
+            updateAvailable_ = updateDownloaded_ || next == takeoff::UpdateCheckState::Available ||
+                next == takeoff::UpdateCheckState::Unverified;
             updateState_ = next;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
@@ -1181,6 +1184,7 @@ private:
                 std::wstring tag;
                 std::wstring htmlUrl;
                 std::wstring assetUrl;
+                takeoff::ReleaseAssets assets;
                 // The handler takes ownership of the posted result, so only
                 // release it once the post is known to have succeeded - it
                 // fails if shutdown got there first.
@@ -1192,7 +1196,7 @@ private:
                         p.release();
                     }
                 };
-                if (!takeoff::QueryLatestReleaseInfo(host, path, tag, htmlUrl, assetUrl)) {
+                if (!takeoff::QueryLatestReleaseInfo(host, path, tag, htmlUrl, assetUrl, &assets)) {
                     post(kUpdateCheckCompletedMessage, 3);
                     return;
                 }
@@ -1201,13 +1205,19 @@ private:
                     // A file left in the staging folder by an earlier session has no
                     // hash pinned by this session (the folder is user-writable), so
                     // it is downloaded again rather than trusted for an elevated install.
-                    if (!assetUrl.empty() && !stagingPath.empty()) {
-                        DeleteFileW(stagingPath.c_str());
+                    // US-040: the download only counts once its signature checks out.
+                    if (!assets.exe.empty() && !stagingPath.empty()) {
                         post(kUpdateProgressMessage, 0);
                         std::string sha256;
-                        if (takeoff::DownloadUpdateFile(assetUrl, stagingPath, &sha256)) {
+                        switch (takeoff::DownloadAndVerifyUpdate(assets, tag, stagingPath, sha256)) {
+                        case takeoff::UpdateDownloadOutcome::Verified:
                             post(kUpdateCheckCompletedMessage, 2, stagingPath, std::move(sha256));
                             return;
+                        case takeoff::UpdateDownloadOutcome::Unverified:
+                            post(kUpdateCheckCompletedMessage, 4);
+                            return;
+                        case takeoff::UpdateDownloadOutcome::DownloadFailed:
+                            break;
                         }
                     }
                     post(kUpdateCheckCompletedMessage, 1);
@@ -4065,7 +4075,8 @@ private:
             if (!takeoff::IsUpdateRowClickable(updateState_)) return;
             if (updateState_ == takeoff::UpdateCheckState::Ready) {
                 RestartToUpdate();
-            } else if (updateState_ == takeoff::UpdateCheckState::Available) {
+            } else if (updateState_ == takeoff::UpdateCheckState::Available ||
+                       updateState_ == takeoff::UpdateCheckState::Unverified) {
                 const std::wstring url = takeoff::ReleasePageUrlOrDefault(updateReleaseUrl_);
                 ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             } else {
@@ -7945,7 +7956,7 @@ private:
             DrawSettingsRow(kRowCheckForUpdatesOnStart, AboutUpdatesCardTop() + offsetY, L"Check on startup",
                 L"Check for updates when Lean Launcher starts", {}, true, settings_.checkForUpdates);
             DrawSettingsRow(kRowAboutCheckUpdates, AboutUpdatesCardTop() + kSettingsRowHeight + offsetY, L"Check now",
-                takeoff::FormatLastUpdateCheck(lastUpdateCheck_),
+                takeoff::UpdateRowDescription(updateState_, takeoff::FormatLastUpdateCheck(lastUpdateCheck_)),
                 takeoff::UpdateRowText(updateState_, updateTag_), false, false, true);
 
             drawCard(L"LINKS", AboutLinksHeaderTop(), AboutLinksCardTop(), 1);

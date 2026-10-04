@@ -71,6 +71,63 @@ jobs:
           Write-Output "sha256=$archiveName.sha256" >> $env:GITHUB_OUTPUT
           Write-Output "version_exe=cmake/Release/$versionExeName" >> $env:GITHUB_OUTPUT
 
+      # US-040: sign the exe's hash so the launcher can prove an update is the
+      # official release. Publishes LeanLauncher.exe.sha256, one line
+      # "<sha256>  LeanLauncher.exe  <tag>", and its minisign signature
+      # LeanLauncher.exe.minisig (legacy "Ed" format, -l). Any failure here fails
+      # the release: an unsigned release would leave every launcher unable to
+      # auto-update to it. The private key only ever exists in the
+      # MINISIGN_SECRET_KEY secret and, for the length of this step, in a temp file.
+      - name: Sign update hash (minisign)
+        shell: pwsh
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publicKey = 'RWShv7QHXkVKEAzaW1aa8XxLrSVCGpRt8eRHE3EqhiB0p5aA5jNQ6i5Q'  # key ID 104A455E07B4BFA1
+          $minisignUrl = 'https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip'
+          $minisignSha256 = '37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479'
+          $noBom = [System.Text.UTF8Encoding]::new($false)
+
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$') { throw "Unexpected release tag '$tag'" }
+          if ([string]::IsNullOrWhiteSpace($env:MINISIGN_SECRET_KEY)) { throw 'The MINISIGN_SECRET_KEY secret is not available' }
+          # The launcher has this same public key compiled in; never sign with a key it does not trust.
+          if (-not (Select-String -Path src/updates.h -Pattern $publicKey -SimpleMatch -Quiet)) {
+            throw 'The public key in release.yml does not match kUpdatePublicKey in src/updates.h'
+          }
+
+          # minisign itself: pinned release, hash checked before it is run.
+          $zip = Join-Path $env:RUNNER_TEMP 'minisign.zip'
+          Invoke-WebRequest -Uri $minisignUrl -OutFile $zip
+          if ((Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower() -ne $minisignSha256) { throw 'minisign download does not match the pinned hash' }
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'minisign')
+          $minisign = Join-Path $env:RUNNER_TEMP 'minisign/minisign-win64/x86_64/minisign.exe'
+
+          $exe = Join-Path $PWD.Path 'cmake/Release/LeanLauncher.exe'
+          $signedFile = Join-Path $PWD.Path 'cmake/Release/LeanLauncher.exe.sha256'
+          $sigFile = Join-Path $PWD.Path 'cmake/Release/LeanLauncher.exe.minisig'
+          $hash = (Get-FileHash -Path $exe -Algorithm SHA256).Hash.ToLower()
+          $signedText = "$hash  LeanLauncher.exe  $tag`n"
+          [System.IO.File]::WriteAllText($signedFile, $signedText, $noBom)
+
+          $keyFile = Join-Path $env:RUNNER_TEMP 'minisign.key'
+          try {
+            [System.IO.File]::WriteAllText($keyFile, ($env:MINISIGN_SECRET_KEY.Trim() -replace "`r`n", "`n") + "`n", $noBom)
+            & $minisign -S -l -s $keyFile -x $sigFile -t "tag=$tag" -m $signedFile
+            if ($LASTEXITCODE -ne 0) { throw "minisign -S failed with exit code $LASTEXITCODE" }
+          } finally {
+            if (Test-Path $keyFile) { Remove-Item -Force $keyFile }
+          }
+
+          # Verify what will be published, the way anyone can: public key only.
+          & $minisign -V -P $publicKey -x $sigFile -m $signedFile
+          if ($LASTEXITCODE -ne 0) { throw "minisign -V failed with exit code $LASTEXITCODE" }
+          if ([System.IO.File]::ReadAllText($signedFile) -cne $signedText) { throw 'The signed file changed after signing' }
+          if ((Get-FileHash -Path $exe -Algorithm SHA256).Hash.ToLower() -ne $hash) { throw 'The exe changed after hashing' }
+          Write-Output "Signed $tag, LeanLauncher.exe sha256 $hash"
+
       - name: Extract Changelog Section
         id: notes
         shell: pwsh
@@ -90,6 +147,13 @@ jobs:
             Set-Content -Path $notesPath -Value "_No CHANGELOG.md entry found for $version._" -Encoding utf8
           }
 
+          # US-040: once the signing step publishes the update signature files,
+          # say what they are so nobody wonders whether they need to download them.
+          if (Test-Path "cmake/Release/LeanLauncher.exe.minisig") {
+            $note = '_`LeanLauncher.exe.sha256` and `LeanLauncher.exe.minisig` are for automatic update verification. You do not need to download them; just use `LeanLauncher.exe`._'
+            Add-Content -Path $notesPath -Encoding utf8 -Value @('', '', $note)
+          }
+
           Write-Output "notes_file=$notesPath" >> $env:GITHUB_OUTPUT
 
       - name: Create GitHub Release
@@ -99,6 +163,8 @@ jobs:
           files: |
             ${{ steps.package.outputs.version_exe }}
             cmake/Release/LeanLauncher.exe
+            cmake/Release/LeanLauncher.exe.sha256
+            cmake/Release/LeanLauncher.exe.minisig
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.sha256 }}
           body_path: ${{ steps.notes.outputs.notes_file }}

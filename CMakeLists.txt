@@ -10,6 +10,9 @@ add_executable(${target} WIN32
     src/settings.h
     src/updates.h
     src/sha256.h
+    src/sha512.h
+    src/ed25519.h
+    src/minisign.h
     src/update_apply.h
     src/calculator.h
     src/obsidian_config.h
