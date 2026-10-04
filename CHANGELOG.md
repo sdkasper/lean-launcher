@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.1.1] - 2026-10-04
+
+### Added
+- **Support badge** - a small heart and "Support" badge in the middle of the launcher's bottom row opens the LeanProductivity shop page (https://kspr.me/cheers) in your browser, for anyone who wants to chip in. It is only a link: the launcher sends nothing and fetches nothing. It makes room for the "Update Available" button and the Pomodoro timer, and you can hide it any time with Settings > General > WINDOW > **Show support badge**.
+
 ## [2.1.0] - 2026-10-04
 
 ### Added

@@ -47,6 +47,8 @@ struct Settings {
     // Remember last search: the next open brings the previous query back, selected.
     bool keepOpenOnFocusLoss = false;
     bool restoreLastQuery = false;
+    // The small heart + "Support" badge in the launcher footer (links to the shop page). On by default, hideable.
+    bool showSupportBadge = true;
     bool enableFileSearch = true;
     bool enableWebSearch = true;
     // US-041: lock/sleep/restart/... command rows. Off = no command rows.

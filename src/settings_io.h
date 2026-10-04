@@ -78,6 +78,7 @@ inline constexpr BoolField kBools[] = {
     {"CheckForUpdates", &Settings::checkForUpdates},
     {"KeepOpenOnFocusLoss", &Settings::keepOpenOnFocusLoss},
     {"RestoreLastQuery", &Settings::restoreLastQuery},
+    {"ShowSupportBadge", &Settings::showSupportBadge},
     {"FileSearchEnabled", &Settings::enableFileSearch},
     {"WebSearchEnabled", &Settings::enableWebSearch},
     {"SystemCommandsEnabled", &Settings::enableSystemCommands},

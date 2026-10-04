@@ -4263,6 +4263,13 @@ int main() {
         io::ImportResult behaviourBack = io::ParseImport(behaviourJson, defaults);
         Check(behaviourBack.ok && behaviourBack.changed == 2 && behaviourBack.settings.keepOpenOnFocusLoss &&
               behaviourBack.settings.restoreLastQuery, "both behaviour settings import");
+        // The footer support badge: on by default, can be hidden, and the choice survives export and import.
+        Check(defaults.showSupportBadge, "support badge is shown by default");
+        takeoff::Settings hidden = defaults;
+        hidden.showSupportBadge = false;
+        io::ImportResult hiddenBack = io::ParseImport(io::ExportJson(hidden, {}, {}, L"2.1.0"), defaults);
+        Check(hiddenBack.ok && hiddenBack.changed == 1 && !hiddenBack.settings.showSupportBadge,
+            "hiding the support badge exports and imports");
         {
             using namespace leanlauncher::window_behavior;
             takeoff::Settings off;

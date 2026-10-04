@@ -713,6 +713,7 @@ private:
                 settings_.showTrayIcon = ReadDword(key, L"ShowTrayIcon", 1) != 0;
                 settings_.keepOpenOnFocusLoss = ReadDword(key, L"KeepOpenOnFocusLoss", 0) != 0;
                 settings_.restoreLastQuery = ReadDword(key, L"RestoreLastQuery", 0) != 0;
+                settings_.showSupportBadge = ReadDword(key, L"ShowSupportBadge", 1) != 0;
                 // Fallback must match settings_.checkForUpdates's coded default (false,
                 // per NFR-003: no release pipeline yet, opt-in only). A fallback of 1
                 // here would silently re-enable background update checks the moment
@@ -1052,6 +1053,7 @@ private:
                 {L"ShowTrayIcon", settings_.showTrayIcon ? 1u : 0u},
                 {L"KeepOpenOnFocusLoss", settings_.keepOpenOnFocusLoss ? 1u : 0u},
                 {L"RestoreLastQuery", settings_.restoreLastQuery ? 1u : 0u},
+                {L"ShowSupportBadge", settings_.showSupportBadge ? 1u : 0u},
                 {L"CheckForUpdates", settings_.checkForUpdates ? 1u : 0u},
                 {L"FileSearchEnabled", settings_.enableFileSearch ? 1u : 0u},
                 {L"WebSearchEnabled", settings_.enableWebSearch ? 1u : 0u},
@@ -1694,7 +1696,8 @@ private:
     static constexpr int kRowSnippetsImport = 66;
     static constexpr int kRowKeepOpenOnFocusLoss = 67;  // issue #6
     static constexpr int kRowRestoreLastQuery = 68;
-    static constexpr int kSettingsMaxRow = 68;
+    static constexpr int kRowShowSupportBadge = 69;
+    static constexpr int kSettingsMaxRow = 69;
     static constexpr int kRowCheckForUpdatesOnStart = 6;  // shown in About's UPDATES card
 
     // Every tab except Obsidian (an accordion) and About (fixed layout) is an
@@ -1712,7 +1715,7 @@ private:
     };
     static constexpr int kShortcutRows[] = {0, 1, 2, 3};
     static constexpr int kStartupRows[] = {4, 5};
-    static constexpr int kWindowRows[] = {kRowKeepOpenOnFocusLoss, kRowRestoreLastQuery};
+    static constexpr int kWindowRows[] = {kRowKeepOpenOnFocusLoss, kRowRestoreLastQuery, kRowShowSupportBadge};
     static constexpr int kBackupRows[] = {kRowAboutExportSettings, kRowAboutImportSettings};
     static constexpr int kSearchSourceRows[] = {7, 8, kRowWebSearchEngine};
     static constexpr int kSearchPrefixRows[] = {kRowFileSearchPrefix, kRowWebSearchPrefix, kRowAppSearchPrefix};
@@ -4152,6 +4155,12 @@ private:
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
+        if (row == kRowShowSupportBadge) {
+            settings_.showSupportBadge = !settings_.showSupportBadge;
+            SaveSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
         if (row == kRowPomodoroLog) {
             settings_.pomodoroLog = !settings_.pomodoroLog;
             SaveSettings();
@@ -6140,6 +6149,10 @@ private:
                 }
                 return;
             }
+            if (PointInSupportBadge(x, y)) {
+                ShellExecuteW(nullptr, L"open", takeoff::kSupportUrl, nullptr, nullptr, SW_SHOWNORMAL);
+                return;
+            }
             if (x >= width_ / 2) {
                 ToggleActions();
             } else if (HasResult()) {
@@ -6177,7 +6190,7 @@ private:
         if (const int result = ResultAtPoint(x, y); result >= 0) {
             selected_ = result;
             LaunchSelected(true);
-        } else if (y >= FooterTop() && x < width_ / 2 && !PointInPreview(x, y)) {
+        } else if (y >= FooterTop() && x < width_ / 2 && !PointInPreview(x, y) && !PointInSupportBadge(x, y)) {
             LaunchSelected(true);
         }
     }
@@ -6280,6 +6293,10 @@ private:
         if (mouseKnown_ && std::abs(x - mouseX_) < 1 && std::abs(y - mouseY_) < 1) return;
         mouseX_ = x; mouseY_ = y;
         if (!mouseKnown_) { mouseKnown_ = true; return; }
+        if (const bool hovered = PointInSupportBadge(x, y); hovered != supportHovered_) {
+            supportHovered_ = hovered;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
         if (updateAvailable_) {
             const bool hovered = PointInUpdateIndicator(x, y);
             if (hovered != updateHovered_) {
@@ -7057,6 +7074,36 @@ private:
         return x >= 20.0f && x <= adminWidth;
     }
 
+    // Centre of the footer, the slot the update button and the Pomodoro timer
+    // also use - so it only shows while neither of them does.
+    bool SupportBadgeVisible() const {
+        return settings_.showSupportBadge && page_ == Page::Launcher && !updateAvailable_ && !pomodoro_;
+    }
+
+    D2D1_RECT_F SupportBadgeRect() const {
+        const float cx = width_ / 2.0f;
+        return D2D1::RectF(cx - 42.0f, FooterTop() + 8.0f, cx + 42.0f, height_ - 8.0f);
+    }
+
+    bool PointInSupportBadge(float x, float y) const {
+        if (!SupportBadgeVisible()) return false;
+        const auto rect = SupportBadgeRect();
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    }
+
+    void DrawSupportBadge() {
+        if (!SupportBadgeVisible()) return;
+        const auto rect = SupportBadgeRect();
+        const bool hovering = mouseKnown_ && PointInSupportBadge(mouseX_, mouseY_);
+        if (hovering && !highContrast_) Fill(rect, D2D1::ColorF(1, 1, 1, 0.06f), 6.0f);
+        brush_->SetColor(highContrast_ ? Foreground() : D2D1::ColorF(1, 1, 1, hovering ? 0.28f : 0.14f));
+        target_->DrawRoundedRectangle(D2D1::RoundedRect(rect, 6.0f, 6.0f), brush_.Get(), 1.0f);
+        Text(L"♥", D2D1::RectF(rect.left + 9.0f, rect.top, rect.left + 27.0f, rect.bottom), hintFormat_.Get(),
+            highContrast_ ? Foreground() : D2D1::ColorF(0xF43F5E));
+        Text(L"Support", D2D1::RectF(rect.left + 27.0f, rect.top, rect.right - 4.0f, rect.bottom), hintFormat_.Get(),
+            (hovering || highContrast_) ? Foreground() : Muted());
+    }
+
     void DrawUpdateIndicator() {
         if (!updateAvailable_) return;
         const auto rect = UpdateIndicatorRect();
@@ -7311,6 +7358,7 @@ private:
                 hintFormat_.Get(), Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
             Key(L"↵", width_ - 48, top + (kFooterHeight - 22) / 2, 28);
         }
+        DrawSupportBadge();
         if (updateAvailable_) {
             DrawUpdateIndicator();
         } else if (pomodoro_ && page_ == Page::Launcher) {
@@ -7842,6 +7890,8 @@ private:
                 L"Close with Esc, the hotkey or by launching something", {}, true, settings_.keepOpenOnFocusLoss);
             DrawSettingsRow(kRowRestoreLastQuery, rowY(kRowRestoreLastQuery), L"Remember last search",
                 L"Reopen with your previous search selected, so typing replaces it", {}, true, settings_.restoreLastQuery);
+            DrawSettingsRow(kRowShowSupportBadge, rowY(kRowShowSupportBadge), L"Show support badge",
+                L"The small heart in the footer that links to the shop page", {}, true, settings_.showSupportBadge);
             DrawSettingsRow(kRowAboutExportSettings, rowY(kRowAboutExportSettings), L"Export settings...",
                 L"Save your settings to a file, to move them to another PC", {}, false, false, true);
             DrawSettingsRow(kRowAboutImportSettings, rowY(kRowAboutImportSettings),
@@ -8264,6 +8314,7 @@ private:
     uint64_t lastUpdateCheck_ = 0;
     std::wstring releasesUrl_ = takeoff::kDefaultReleasesUrl;
     std::wstring apiHost_ = takeoff::kDefaultApiHost;
+    bool supportHovered_ = false;
     std::wstring apiPath_ = takeoff::kDefaultApiPath;
     std::thread indexWorkerThread_;
     HANDLE indexStopEvent_ = nullptr;
