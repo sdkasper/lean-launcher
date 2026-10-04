@@ -3959,6 +3959,7 @@ private:
         settingsEdit_.text = currentValue;
         settingsEdit_.anchor = 0;
         settingsEdit_.caret = currentValue.size();
+        settingsTextScroll_ = 0;
         settingsStatus_.clear();
         ResetCaret();
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -6780,7 +6781,7 @@ private:
             DWRITE_HIT_TEST_METRICS hit{};
             layout->HitTestTextPosition(static_cast<UINT32>(input_.caret), FALSE, &caret, &y, &hit);
             const float available = right - kTextLeft - 3;
-            textScroll_ = (std::max)(0.0f, (std::max)(caret - available, (std::min)(textScroll_, caret)));
+            textScroll_ = leanlauncher::window_behavior::ScrollToCaret(textScroll_, caret, available);
             const float origin = kTextLeft - textScroll_;
             caretX_ = std::clamp(origin + caret, kTextLeft, right - 2);
             DWRITE_TEXT_METRICS metrics{};
@@ -7375,6 +7376,51 @@ private:
             highContrast_ && enabled ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0xF6F6F7), 7);
     }
 
+    // The Settings text field being edited: the live buffer across the whole
+    // row, left-aligned, scrolled to keep the caret in view, with the real
+    // caret and selection (same approach as DrawSearch). The caret is steady:
+    // the blink timer only runs on the launcher page.
+    void DrawSettingsEditField(float top) {
+        const float left = 32, right = width_ - 36;
+        const auto color = highContrast_ ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0x6EA8FE);
+        Fill(D2D1::RectF(left - 8, top + 7, right + 8, top + kSettingsRowHeight - 7),
+            highContrast_ ? SystemColor(COLOR_HIGHLIGHT) : D2D1::ColorF(0, 0, 0, 0.28f), 5.0f);
+        auto layout = Layout(settingsEdit_.text, hintFormat_.Get(), 32768, kSettingsRowHeight);
+        if (!layout) return;
+        float caret = 0, y = 0;
+        DWRITE_HIT_TEST_METRICS hit{};
+        layout->HitTestTextPosition(static_cast<UINT32>(settingsEdit_.caret), FALSE, &caret, &y, &hit);
+        settingsTextScroll_ = leanlauncher::window_behavior::ScrollToCaret(settingsTextScroll_, caret,
+            right - left - 3);
+        const float origin = left - settingsTextScroll_;
+        DWRITE_TEXT_METRICS metrics{};
+        layout->GetMetrics(&metrics);
+        const float textTop = top + (kSettingsRowHeight - metrics.height) / 2;
+        target_->PushAxisAlignedClip(D2D1::RectF(left, top, right, top + kSettingsRowHeight),
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        if (settingsEdit_.HasSelection()) {
+            const UINT32 start = static_cast<UINT32>(settingsEdit_.Start());
+            const UINT32 length = static_cast<UINT32>(settingsEdit_.End() - settingsEdit_.Start());
+            UINT32 count = 0;
+            layout->HitTestTextRange(start, length, origin, textTop, nullptr, 0, &count);
+            std::vector<DWRITE_HIT_TEST_METRICS> selections(count);
+            if (count && SUCCEEDED(layout->HitTestTextRange(start, length, origin, textTop,
+                    selections.data(), count, &count))) {
+                for (const auto& selection : selections) {
+                    Fill(D2D1::RectF(selection.left, selection.top,
+                        selection.left + selection.width, selection.top + selection.height),
+                        highContrast_ ? SystemColor(COLOR_HIGHLIGHT) : D2D1::ColorF(0.42f, 0.62f, 0.95f, 0.35f), 2);
+                }
+            }
+        } else {
+            Fill(D2D1::RectF(origin + caret, textTop, origin + caret + 1.5f, textTop + metrics.height),
+                color, 0.5f);
+        }
+        brush_->SetColor(color);
+        target_->DrawTextLayout(D2D1::Point2F(origin, textTop), layout.Get(), brush_.Get());
+        target_->PopAxisAlignedClip();
+    }
+
     void DrawSettingsRow(int index, float top, std::wstring_view title,
         std::wstring_view description, std::wstring_view value = {}, bool toggle = false,
         bool enabled = false, bool plainValue = false, bool editable = false) {
@@ -7389,10 +7435,14 @@ private:
         const auto primary = highContrast_ && selected ? SystemColor(COLOR_HIGHLIGHTTEXT) : Foreground();
         const auto secondary = highContrast_ && selected ? primary : Muted();
 
-        Text(title, D2D1::RectF(32, top + 4, width_ - 260, top + 26),
-            resultFormat_.Get(), primary);
-        Text(description, D2D1::RectF(32, top + 24, width_ - 260, top + 44),
-            hintFormat_.Get(), secondary);
+        // The edit field takes the whole row, so the title and description step aside.
+        const bool editingThisRow = editable && index == editingRow_ && index != recordingRow_;
+        if (!editingThisRow) {
+            Text(title, D2D1::RectF(32, top + 4, width_ - 260, top + 26),
+                resultFormat_.Get(), primary);
+            Text(description, D2D1::RectF(32, top + 24, width_ - 260, top + 44),
+                hintFormat_.Get(), secondary);
+        }
 
         if (toggle) {
             DrawToggle(width_ - 36, top + kSettingsRowHeight / 2, enabled);
@@ -7400,15 +7450,8 @@ private:
             Text(L"Press keys\u2026", D2D1::RectF(width_ - 240, top, width_ - 36, top + kSettingsRowHeight),
                 hintFormat_.Get(), highContrast_ ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0x6EA8FE),
                 DWRITE_TEXT_ALIGNMENT_TRAILING);
-        } else if (editable && index == editingRow_) {
-            // Live edit buffer, not the (not-yet-committed) `value` argument.
-            // No true caret hit-testing here, unlike the main search box -
-            // a trailing bar is a deliberately simple stand-in, adequate for
-            // a short Settings field.
-            const std::wstring editText = settingsEdit_.text + L"\u2502";
-            Text(editText, D2D1::RectF(width_ - 260, top, width_ - 36, top + kSettingsRowHeight),
-                hintFormat_.Get(), highContrast_ ? SystemColor(COLOR_HIGHLIGHTTEXT) : D2D1::ColorF(0x6EA8FE),
-                DWRITE_TEXT_ALIGNMENT_TRAILING);
+        } else if (editingThisRow) {
+            DrawSettingsEditField(top);
         } else if (plainValue || editable) {
             Text(value, D2D1::RectF(width_ - 260, top, width_ - 36, top + kSettingsRowHeight),
                 hintFormat_.Get(), secondary, DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -8176,6 +8219,7 @@ private:
     mutable std::vector<int> obsidianRowsCache_;
     mutable bool obsidianRowsCacheEnabled_ = false;
     mutable int obsidianRowsCacheSection_ = -1;
+    float settingsTextScroll_ = 0;  // horizontal scroll of the Settings edit field
     float textScroll_ = 0, caretX_ = kTextLeft, mouseX_ = 0, mouseY_ = 0;
     float settingsScroll_ = 0.0f;
     bool settingsDraggingScroll_ = false;

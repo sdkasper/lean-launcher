@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <string>
 
 #include "search.h"
@@ -23,6 +24,14 @@ inline void RestoreQuery(takeoff::SearchInput& input, const std::wstring& last) 
     if (last.empty()) return;
     input.text = last.substr(0, takeoff::SearchInput::kLimit);
     input.SelectAll();
+}
+
+// Horizontal scroll for a single-line text field: the smallest change to
+// `scroll` that keeps the caret (x offset into the text) inside the visible
+// `available` width, never negative. Shared by the search box and the Settings
+// edit field.
+inline float ScrollToCaret(float scroll, float caret, float available) {
+    return (std::max)(0.0f, (std::max)(caret - available, (std::min)(scroll, caret)));
 }
 
 }  // namespace window_behavior

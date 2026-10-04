@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [Unreleased]
+
+### Fixed
+- **Editing a Settings text field now shows the whole value** - the field being edited used to be a small right-aligned box that only showed the end of a long value (a vault path, a note override), and its caret was always drawn at the end even after you moved it with the arrow keys (#6). The field now takes the full width of the row, is left-aligned, scrolls to keep the caret in view, and shows the real caret position and selection.
+
 ## [2.0.4] - 2026-10-04
 
 ### Fixed

@@ -3932,6 +3932,14 @@ int main() {
             takeoff::SearchInput empty;
             RestoreQuery(empty, L"");
             Check(empty.text.empty() && !empty.HasSelection(), "nothing remembered leaves the box empty");
+
+            // The caret is kept inside the visible width of a text field.
+            Check(ScrollToCaret(0, 50, 200) == 0, "a caret inside the field does not scroll");
+            Check(ScrollToCaret(0, 500, 200) == 300, "a caret past the right edge scrolls just enough");
+            Check(ScrollToCaret(300, 120, 200) == 120, "a caret left of the view scrolls back to it");
+            Check(ScrollToCaret(300, 400, 200) == 300, "a caret already in view keeps the scroll");
+            Check(ScrollToCaret(300, 0, 200) == 0, "scroll returns to zero at the start of the text");
+            Check(ScrollToCaret(0, 10, -5) == 15, "a degenerate width still keeps the caret reachable");
         }
 
         // A changed setting is applied; others are kept.
