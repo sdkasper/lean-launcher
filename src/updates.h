@@ -25,7 +25,7 @@
 
 namespace takeoff {
 
-inline constexpr wchar_t kAppVersion[] = L"2.1.1";
+inline constexpr wchar_t kAppVersion[] = L"2.2.0";
 inline constexpr wchar_t kRepoUrl[] = L"https://github.com/sdkasper/lean-launcher";
 // Opened by the footer "Support" badge (a donation / shop page, never fetched by the launcher itself).
 inline constexpr wchar_t kSupportUrl[] = L"https://kspr.me/cheers";
@@ -62,7 +62,8 @@ inline std::vector<int> ParseVersion(std::wstring_view v) {
     bool hasNum = false;
     for (wchar_t ch : v) {
         if (ch >= L'0' && ch <= L'9') {
-            current = current * 10 + (ch - L'0');
+            // Saturate instead of overflowing on an absurdly long digit run.
+            current = current > 99999999 ? 999999999 : current * 10 + (ch - L'0');
             hasNum = true;
         } else if (ch == L'.' || ch == L'-') {
             if (hasNum) {
@@ -360,12 +361,16 @@ inline std::wstring GetUpdateStagingPath(std::wstring_view tag) {
     return {};
 }
 
+inline constexpr DWORD kMaxUpdateDownloadBytes = 64u * 1024u * 1024u;
+
 // `outSha256`, when given, receives the lowercase SHA-256 of exactly the bytes
 // received from the network (only meaningful when the call returns true).
 inline bool DownloadUpdateFile(std::wstring_view initialUrl, const std::wstring& destPath,
                                std::string* outSha256 = nullptr) {
     if (initialUrl.empty() || destPath.empty()) return false;
     if (outSha256) outSha256->clear();
+    // https and GitHub hosts only, for the first request and for every hop.
+    if (!IsAllowedUpdateUrl(initialUrl)) return false;
     Sha256 hasher;
 
     std::wstring currentUrl(initialUrl);
@@ -392,7 +397,9 @@ inline bool DownloadUpdateFile(std::wstring_view initialUrl, const std::wstring&
 
     WinHttpSetTimeouts(session, 15000, 15000, 15000, 30000);
 
-    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    // WinHTTP must not follow redirects itself (it would follow https to
+    // http and off GitHub): the loop below reads each Location and checks it.
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
     WinHttpSetOption(session, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
 
     bool downloadSuccess = false;
@@ -451,6 +458,7 @@ inline bool DownloadUpdateFile(std::wstring_view initialUrl, const std::wstring&
                     currentUrl = locBuf.data();
                     WinHttpCloseHandle(request);
                     WinHttpCloseHandle(connect);
+                    if (!IsAllowedUpdateUrl(currentUrl)) break;  // off GitHub, or not https: refuse
                     continue;
                 }
             }
@@ -481,6 +489,10 @@ inline bool DownloadUpdateFile(std::wstring_view initialUrl, const std::wstring&
                     }
                     hasher.Update(buffer.data(), bytesRead);
                     totalDownloaded += bytesRead;
+                    if (totalDownloaded > kMaxUpdateDownloadBytes) {  // far larger than any release
+                        readOk = false;
+                        break;
+                    }
                 } else {
                     readOk = false;
                     break;

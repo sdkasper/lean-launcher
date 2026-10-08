@@ -18,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#include "obsidian_config.h"
 #include "search.h"
 
 namespace leanlauncher {
@@ -34,7 +35,7 @@ constexpr DWORD kVaultWatchFilter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_C
 struct NoteItem {
     std::wstring title;
     std::wstring normTitle;
-    std::wstring relativeRef;    // forward-slash, no extension - vault-relative
+    std::wstring relativeRef;    // forward-slash, vault-relative, no ".md" (bases and canvases keep their extension)
     std::wstring folderDisplay;  // forward-slash parent folder path; empty at vault root
 };
 
@@ -67,7 +68,12 @@ inline NoteItem BuildNoteItem(const fs::path& vaultRoot, const fs::path& notePat
     fs::path rel = notePath.lexically_relative(vaultRoot);
     if (rel.empty() || *rel.begin() == L"..") rel = notePath.filename();
 
+    // Markdown refs drop ".md"; bases and canvases keep their extension so
+    // the ref still names the right file (see NoteRefHasExtension).
     std::wstring relativeRef = (rel.parent_path() / rel.stem()).wstring();
+    if (_wcsicmp(rel.extension().c_str(), L".md") != 0 || NoteRefHasExtension(relativeRef)) {
+        relativeRef = rel.wstring();
+    }
     std::replace(relativeRef.begin(), relativeRef.end(), L'\\', L'/');
     item.relativeRef = relativeRef;
 
@@ -204,7 +210,8 @@ private:
                 }
                 if (!ec && entry.is_regular_file(ec)) {
                     const std::wstring ext = entry.path().extension().wstring();
-                    if (_wcsicmp(ext.c_str(), L".md") == 0) {
+                    if (_wcsicmp(ext.c_str(), L".md") == 0 || _wcsicmp(ext.c_str(), L".base") == 0 ||
+                        _wcsicmp(ext.c_str(), L".canvas") == 0) {
                         items.push_back(BuildNoteItem(vaultPath_, entry.path()));
                     }
                 }

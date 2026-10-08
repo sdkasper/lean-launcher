@@ -543,6 +543,30 @@ inline std::wstring BuildObsidianCliCommandLine(
            L" open path=" + QuoteCommandLineArgument(relativeFilePath);
 }
 
+// A note ref is the vault-relative path without ".md". Bases and canvases are
+// not markdown, so their refs keep the extension; a markdown file whose own
+// name ends in .md/.base/.canvas (e.g. "Report.base.md") keeps ".md" for the
+// same reason. This says whether a ref already carries its extension.
+inline bool RefEndsWith(std::wstring_view ref, std::wstring_view ext) {
+    return ref.size() > ext.size() &&
+           _wcsicmp(std::wstring(ref.substr(ref.size() - ext.size())).c_str(), std::wstring(ext).c_str()) == 0;
+}
+
+inline bool NoteRefHasExtension(std::wstring_view ref) {
+    return RefEndsWith(ref, L".md") || RefEndsWith(ref, L".base") || RefEndsWith(ref, L".canvas");
+}
+
+// True for refs of non-markdown vault files (.base, .canvas): they are
+// searched and opened by name, but have nothing to preview.
+inline bool IsNonMarkdownNoteRef(std::wstring_view ref) {
+    return RefEndsWith(ref, L".base") || RefEndsWith(ref, L".canvas");
+}
+
+// Vault-relative file path (forward slashes kept) for a note ref.
+inline std::wstring NoteRefToRelativeFilePath(const std::wstring& relativeNoteRef) {
+    return NoteRefHasExtension(relativeNoteRef) ? relativeNoteRef : relativeNoteRef + L".md";
+}
+
 // Posted back to the launcher window when a background note-open attempt
 // finishes; wParam is 1 on success, 0 on failure. WM_APP + 8 and + 9 are
 // taken by kFilesReadyMessage and kNotesReadyMessage, + 1 through + 7 by
@@ -568,7 +592,7 @@ inline bool OpenNoteInObsidian(const std::wstring& vaultPath, const std::wstring
     if (cliPath.empty()) return false;
 
     const std::wstring vaultName = fs::path(vaultPath).filename().wstring();
-    const std::wstring relativeFilePath = relativeNoteRef + L".md";
+    const std::wstring relativeFilePath = NoteRefToRelativeFilePath(relativeNoteRef);
     const std::wstring commandLine = BuildObsidianCliCommandLine(cliPath, vaultName, relativeFilePath);
 
     SECURITY_ATTRIBUTES saAttr{};
@@ -650,7 +674,7 @@ inline bool OpenNoteInObsidian(const std::wstring& vaultPath, const std::wstring
 inline std::wstring ResolveNoteAbsolutePath(const std::wstring& vaultPath, const std::wstring& relativeNoteRef) {
     std::wstring relBackslash(relativeNoteRef);
     std::replace(relBackslash.begin(), relBackslash.end(), L'/', L'\\');
-    return (fs::path(vaultPath) / (relBackslash + L".md")).wstring();
+    return (fs::path(vaultPath) / NoteRefToRelativeFilePath(relBackslash)).wstring();
 }
 
 }  // namespace obsidian

@@ -2467,9 +2467,14 @@ private:
                 for (const auto& note : noteResults) {
                     AppEntry entry;
                     entry.category = AppCategory::NoteJump;
+                    // A base or canvas shows its extension so it reads apart
+                    // from a note of the same name.
+                    const std::wstring shownTitle = leanlauncher::obsidian::IsNonMarkdownNoteRef(note.relativeRef)
+                        ? note.title + note.relativeRef.substr(note.relativeRef.rfind(L'.'))
+                        : note.title;
                     entry.name = note.folderDisplay.empty()
-                        ? note.title
-                        : note.title + L" - " + note.folderDisplay;
+                        ? shownTitle
+                        : shownTitle + L" - " + note.folderDisplay;
                     entry.path = note.relativeRef;
                     entry.parameters = note.title;
                     entry.iconPath = L"notepad.exe";
@@ -4609,6 +4614,10 @@ private:
                 content->body = PreviewCategoryLabel(app);
             } else if (leanlauncher::obsidian::IsUnsafeVaultRelativePath(app.path)) {
                 content->status = L"This note is outside the vault";
+            } else if (leanlauncher::obsidian::IsNonMarkdownNoteRef(app.path)) {
+                // A base or canvas is a query or a drawing, not text: nothing to show here.
+                content->kind = pv::PreviewKind::None;
+                content->body = PreviewCategoryLabel(app);
             } else {
                 // ResolveNoteAbsolutePath appends ".md" itself. Obsidian is never started.
                 path = leanlauncher::obsidian::ResolveNoteAbsolutePath(obsidianVaultPath_, app.path);

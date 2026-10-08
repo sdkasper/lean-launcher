@@ -10,6 +10,17 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.2.0] - 2026-10-08
+
+### Added
+- **Find Obsidian Bases and Canvases by name** - the note index (the `o` prefix) now also lists `.base` and `.canvas` files, so `o dashboard` can jump straight to a Base or a canvas and open it in Obsidian. They show with their extension (`Books Base.base`) so they read apart from a note of the same name. Only the name is indexed; the preview panel shows no content for them, since a Base is a query and a canvas is a drawing, not text.
+
+### Changed
+- **Stricter update downloads (NFR-017)** - the launcher now checks every redirect while downloading an update and refuses `http://` or any host other than GitHub's, instead of letting Windows follow redirects on its own. The download is also capped at 64 MB.
+
+### Fixed
+- A version number with an absurdly long run of digits could overflow while the launcher compared versions; it now saturates safely.
+
 ## [2.1.1] - 2026-10-04
 
 ### Added

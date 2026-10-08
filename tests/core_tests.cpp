@@ -539,6 +539,29 @@ int main() {
     Check(!IsNewerVersion(L"v1.0", L"1.0.0"), "v1.0 is not newer than 1.0.0");
     Check(!IsNewerVersion(L"0.9.9", L"1.0.0"), "0.9.9 is not newer than 1.0.0");
     Check(!IsNewerVersion(L"v1.0.0-beta", L"1.0.0"), "v1.0.0-beta is not newer than 1.0.0");
+    // NFR-017: a huge digit run saturates instead of overflowing (was undefined behaviour).
+    {
+        const std::wstring huge = L"v99999999999999999999999999.1.0";
+        const auto parts = ParseVersion(huge);
+        Check(parts.size() == 3 && parts[0] > 0 && parts[1] == 1, "ParseVersion saturates a huge digit run without overflow");
+        Check(IsNewerVersion(huge, L"2.1.1") && !IsNewerVersion(L"2.1.1", huge),
+            "a saturated huge version compares as newer, deterministically");
+    }
+    // NFR-017: DownloadUpdateFile refuses http and off-GitHub URLs before any network or file work.
+    {
+        wchar_t tmpDir[MAX_PATH]{};
+        GetTempPathW(MAX_PATH, tmpDir);
+        const std::wstring dest = std::wstring(tmpDir) + L"LeanLauncherRefusedDownload.exe";
+        DeleteFileW(dest.c_str());
+        std::string sha;
+        Check(!DownloadUpdateFile(L"http://github.com/sdkasper/lean-launcher/releases/download/v1/LeanLauncher.exe", dest, &sha) &&
+                  !DownloadUpdateFile(L"https://evil.example.com/LeanLauncher.exe", dest, &sha) &&
+                  !DownloadUpdateFile(L"https://github.com.evil.example.com/LeanLauncher.exe", dest, &sha),
+            "DownloadUpdateFile refuses http and non-GitHub URLs");
+        Check(sha.empty() && GetFileAttributesW(dest.c_str()) == INVALID_FILE_ATTRIBUTES &&
+                  GetFileAttributesW((dest + L".tmp").c_str()) == INVALID_FILE_ATTRIBUTES,
+            "a refused download leaves no file and no hash behind");
+    }
 
     // 24-hour update interval logic checks
     Check(ShouldCheckForUpdates(0, 100000, true), "check when never checked before");
@@ -3688,6 +3711,32 @@ int main() {
         Check(root.relativeRef == L"Standup", "BuildNoteItem relative ref for a vault-root note has no folder prefix");
         Check(root.folderDisplay.empty(), "BuildNoteItem folder display is empty for a vault-root note");
 
+        // Bases and canvases are indexed by name; their ref keeps the extension.
+        const NoteItem base = BuildNoteItem(vaultRoot, vaultRoot / L"90 Organize" / L"Bases" / L"Books Base.base");
+        Check(base.title == L"Books Base" && base.relativeRef == L"90 Organize/Bases/Books Base.base",
+            "BuildNoteItem keeps the .base extension in the ref and drops it from the title");
+        const NoteItem canvas = BuildNoteItem(vaultRoot, vaultRoot / L"Mind Map.CANVAS");
+        Check(canvas.title == L"Mind Map" && canvas.relativeRef == L"Mind Map.CANVAS",
+            "BuildNoteItem keeps a .canvas extension (any case) in the ref");
+        // A markdown file named like a base must not collide with a real base.
+        const NoteItem baseNote = BuildNoteItem(vaultRoot, vaultRoot / L"Report.base.md");
+        Check(baseNote.title == L"Report.base" && baseNote.relativeRef == L"Report.base.md",
+            "BuildNoteItem keeps .md on a note whose name ends in .base");
+        Check(!IsNonMarkdownNoteRef(baseNote.relativeRef) && IsNonMarkdownNoteRef(base.relativeRef) &&
+                  !IsNonMarkdownNoteRef(root.relativeRef),
+            "IsNonMarkdownNoteRef is true for bases and canvases only");
+        Check(NoteRefToRelativeFilePath(L"Standup") == L"Standup.md" &&
+                  NoteRefToRelativeFilePath(L"A/Books Base.base") == L"A/Books Base.base" &&
+                  NoteRefToRelativeFilePath(L"Report.base.md") == L"Report.base.md",
+            "NoteRefToRelativeFilePath appends .md only to a ref without an extension");
+        Check(ResolveNoteAbsolutePath(L"D:\\Vault", L"A/Books Base.base") == L"D:\\Vault\\A\\Books Base.base",
+            "ResolveNoteAbsolutePath does not append .md to a base");
+        Check(BuildObsidianCliCommandLine(L"C:\\CLI\\Obsidian.com", L"Vault", NoteRefToRelativeFilePath(base.relativeRef))
+                      .find(L"Books Base.base") != std::wstring::npos &&
+                  BuildObsidianCliCommandLine(L"C:\\CLI\\Obsidian.com", L"Vault", NoteRefToRelativeFilePath(base.relativeRef))
+                      .find(L".base.md") == std::wstring::npos,
+            "the CLI open path for a base keeps its own extension");
+
         // Building an item must be lexical (no per-note disk access): fs::relative
         // canonicalises both paths and cost ~400 us per note, so a 10k-note
         // vault burned ~4 s of CPU per rescan (issue #7). Ceiling is ~10x the
@@ -3736,6 +3785,9 @@ int main() {
             std::ofstream(tempVault / L"06 BJ" / L"10 Daily" / L"2026-09-14.md") << "# Daily\n";
             std::ofstream(tempVault / L"06 BJ" / L"Standup.md") << "# Standup (duplicate title)\n";
             std::ofstream(tempVault / L".obsidian" / L"plugins" / L"ignored.md") << "should not be indexed\n";
+            std::ofstream(tempVault / L"06 BJ" / L"Projects Dashboard.base") << "views:\n  - type: table\n";
+            std::ofstream(tempVault / L"Mind Map.canvas") << "{}\n";
+            std::ofstream(tempVault / L"readme.txt") << "not a note\n";
         }
 
         NoteIndex::Instance().Start(tempVault.wstring());
@@ -3743,8 +3795,16 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
         Check(NoteIndex::Instance().IsReady(), "NoteIndex becomes ready against a temp vault");
-        Check(NoteIndex::Instance().Count() == 3,
-            "NoteIndex indexes exactly the 3 .md notes outside .obsidian/");
+        Check(NoteIndex::Instance().Count() == 5,
+            "NoteIndex indexes the 3 .md notes plus the .base and .canvas by name, outside .obsidian/, no other files");
+
+        auto baseResults = NoteIndex::Instance().Search(L"dashboard", 10);
+        Check(baseResults.size() == 1 && baseResults[0].title == L"Projects Dashboard" &&
+                  baseResults[0].relativeRef == L"06 BJ/Projects Dashboard.base",
+            "NoteIndex.Search finds a .base by name and its ref keeps the extension");
+        auto canvasResults = NoteIndex::Instance().Search(L"mind map", 10);
+        Check(canvasResults.size() == 1 && canvasResults[0].relativeRef == L"Mind Map.canvas",
+            "NoteIndex.Search finds a .canvas by name and its ref keeps the extension");
 
         auto results = NoteIndex::Instance().Search(L"standup", 10);
         Check(results.size() == 2, "NoteIndex.Search finds both duplicate-titled notes");
