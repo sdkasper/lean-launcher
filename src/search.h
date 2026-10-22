@@ -37,7 +37,8 @@ enum class AppCategory : uint8_t {
     Url,      // US-042 typed http(s) URL
     Info,     // non-clickable status row, e.g. "Folder not found" (US-043)
     Pomodoro,  // US-049 timer row (start, stop, replace)
-    Snippet    // US-050 snippet row (insert into the previous window)
+    Snippet,   // US-050 snippet row (insert into the previous window)
+    Window     // US-065 open window row (switch to it); path is the window handle
 };
 
 inline bool IsCombiningMark(wchar_t ch) { return ch >= 0x0300 && ch <= 0x036F; }

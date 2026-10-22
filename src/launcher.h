@@ -733,6 +733,7 @@ private:
                 settings_.enableTimeZones = ReadDword(key, L"TimeZonesEnabled", 1) != 0;
                 settings_.enablePomodoro = ReadDword(key, L"PomodoroEnabled", 1) != 0;
                 settings_.enableSnippets = ReadDword(key, L"SnippetsEnabled", 0) != 0;
+                settings_.enableWindowSwitcher = ReadDword(key, L"WindowSwitcherEnabled", 0) != 0;
                 settings_.pomodoroLog = ReadDword(key, L"PomodoroLog", 1) != 0;
                 // US-045: preview panel. No old-format migration needed - this
                 // setting didn't exist before SettingsVersion 2, so it's read
@@ -795,6 +796,7 @@ private:
                 readStringSetting(L"PomodoroFocusMinutes", settings_.pomodoroFocusMinutes);
                 readStringSetting(L"PomodoroBreakMinutes", settings_.pomodoroBreakMinutes);
                 readStringSetting(L"SnippetsPrefix", settings_.snippetsPrefix);
+                readStringSetting(L"WindowSwitcherPrefix", settings_.windowSwitcherPrefix);
                 readStringSetting(L"SnippetsPath", settings_.snippetsPath);
                 readStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
                 readStringSetting(L"VaultSearchPillLabel", settings_.vaultSearchPillLabel);
@@ -1070,6 +1072,7 @@ private:
                 {L"TimeZonesEnabled", settings_.enableTimeZones ? 1u : 0u},
                 {L"PomodoroEnabled", settings_.enablePomodoro ? 1u : 0u},
                 {L"SnippetsEnabled", settings_.enableSnippets ? 1u : 0u},
+                {L"WindowSwitcherEnabled", settings_.enableWindowSwitcher ? 1u : 0u},
                 {L"PomodoroLog", settings_.pomodoroLog ? 1u : 0u},
                 {L"PreviewEnabled", settings_.enablePreview ? 1u : 0u},
                 {L"PreviewOpen", settings_.previewOpen ? 1u : 0u},
@@ -1108,6 +1111,7 @@ private:
             writeStringSetting(L"PomodoroFocusMinutes", settings_.pomodoroFocusMinutes);
             writeStringSetting(L"PomodoroBreakMinutes", settings_.pomodoroBreakMinutes);
             writeStringSetting(L"SnippetsPrefix", settings_.snippetsPrefix);
+            writeStringSetting(L"WindowSwitcherPrefix", settings_.windowSwitcherPrefix);
             writeStringSetting(L"SnippetsPath", settings_.snippetsPath);
             writeStringSetting(L"VaultPath", obsidianVaultPath_);
             writeStringSetting(L"VaultSearchPrefix", settings_.vaultSearchPrefix);
@@ -1707,7 +1711,9 @@ private:
     static constexpr int kRowShowSupportBadge = 69;
     static constexpr int kRowOpenNotesInNewTab = 70;  // US-063, in the Obsidian vault search section
     static constexpr int kRowBringObsidianToFront = 71;  // US-064, next to kRowOpenNotesInNewTab
-    static constexpr int kSettingsMaxRow = 71;
+    static constexpr int kRowWindowSwitcherEnabled = 72;  // US-065, Tools tab
+    static constexpr int kRowWindowSwitcherPrefix = 73;
+    static constexpr int kSettingsMaxRow = 73;
     static constexpr int kRowCheckForUpdatesOnStart = 6;  // shown in About's UPDATES card
 
     // Every tab except Obsidian (an accordion) and About (fixed layout) is an
@@ -1736,6 +1742,7 @@ private:
     static constexpr int kSystemCommandRows[] = {kRowSystemCommandsEnabled, kRowSystemCommandsPrefix};
     static constexpr int kPomodoroRows[] = {
         kRowPomodoroEnabled, kRowPomodoroPrefix, kRowPomodoroFocusMinutes, kRowPomodoroBreakMinutes, kRowPomodoroLog};
+    static constexpr int kWindowSwitcherRows[] = {kRowWindowSwitcherEnabled, kRowWindowSwitcherPrefix};
     static constexpr int kSnippetRows[] = {
         kRowSnippetsEnabled, kRowSnippetsPrefix, kRowSnippetsFile, kRowSnippetsOpen, kRowSnippetsImport};
 
@@ -1755,6 +1762,7 @@ private:
         {L"QUICK ANSWERS", kQuickAnswerRows, static_cast<int>(std::size(kQuickAnswerRows))},
         {L"SYSTEM COMMANDS", kSystemCommandRows, static_cast<int>(std::size(kSystemCommandRows))},
         {L"POMODORO", kPomodoroRows, static_cast<int>(std::size(kPomodoroRows))},
+        {L"WINDOW SWITCHER", kWindowSwitcherRows, static_cast<int>(std::size(kWindowSwitcherRows))},
     };
     static constexpr SettingsCard kSnippetCards[] = {
         {L"TEXT EXPANDER", kSnippetRows, static_cast<int>(std::size(kSnippetRows))},
@@ -2199,6 +2207,13 @@ private:
         if (settings_.enableSnippets && snippetIndex_ && !settings_.snippetsPrefix.empty() &&
             leanlauncher::syscmd::TryParseCommandPrefix(input_.text, settings_.snippetsPrefix, snippetFilter)) {
             ShowSnippetResults(Normalize(snippetFilter));
+            return;
+        }
+        // US-065: "d " lists open windows, "d note" narrows them.
+        std::wstring windowFilter;
+        if (settings_.enableWindowSwitcher &&
+            leanlauncher::syscmd::TryParseCommandPrefix(input_.text, settings_.windowSwitcherPrefix, windowFilter)) {
+            ShowWindowResults(Normalize(windowFilter));
             return;
         }
         // US-049: "pomo ..." shows only timer rows.
@@ -3233,6 +3248,52 @@ private:
         if (!ec && stamp != snippetsWriteTime_) ApplySnippetsState();
     }
 
+    // Rows for "d ..." (the window switcher prefix): open windows, best match
+    // first. The window list lives only for this call (NFR-018); each row keeps
+    // its handle, title and process name, and the next rebuild drops them.
+    void ShowWindowResults(const std::wstring& normalizedFilter) {
+        namespace ws = leanlauncher::winswitch;
+        const std::vector<ws::WindowInfo> windows = ws::EnumerateWindows(hwnd_);
+        for (size_t index : ws::Rank(windows, normalizedFilter)) {
+            const ws::WindowInfo& window = windows[index];
+            AppEntry entry;
+            entry.category = AppCategory::Window;
+            entry.name = window.title;
+            entry.path = ws::PathForWindow(window.hwnd);
+            entry.iconPath = window.exePath;
+            entry.parameters = window.processName;  // the second line of the row
+            results_.push_back(apps_.size());
+            apps_.push_back(std::move(entry));
+        }
+        if (results_.empty()) {
+            AppEntry entry;
+            entry.category = AppCategory::Info;
+            entry.name = windows.empty() ? L"No open windows" : L"No matching window";
+            entry.inert = true;
+            results_.push_back(apps_.size());
+            apps_.push_back(std::move(entry));
+        }
+        selected_ = std::clamp(selected_, 0, (std::max)(0, static_cast<int>(results_.size()) - 1));
+        EnsureVisible();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    // Enter on a window row: raise it first, while the launcher still holds the
+    // foreground (Windows allows that), then hide. A failed raise is silent.
+    void RunWindowRow(const AppEntry& app) {
+        namespace ws = leanlauncher::winswitch;
+        HWND target = nullptr;
+        if (!settings_.enableWindowSwitcher || !ws::WindowFromPath(app.path, target)) return;
+        if (!IsWindow(target) || !IsWindowVisible(target)) {  // gone, or the handle now belongs to something else
+            status_ = L"That window is no longer open.";
+            UpdateResults();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        ws::ActivateWindow(target);
+        Hide();
+    }
+
     // Rows for ", ..." (the snippets prefix): label plus trigger, best match first.
     void ShowSnippetResults(const std::wstring& normalizedFilter) {
         namespace sn = leanlauncher::snippets;
@@ -3978,6 +4039,7 @@ private:
         case kRowNoteAddTargetNote: return &settings_.noteAddTargetNote;
         case kRowLogTargetNote: return &settings_.logTargetNote;
         case kRowSnippetsPrefix: return &settings_.snippetsPrefix;
+        case kRowWindowSwitcherPrefix: return &settings_.windowSwitcherPrefix;
         case kRowSnippetsFile: return &settings_.snippetsPath;
         default: return nullptr;
         }
@@ -4240,6 +4302,23 @@ private:
             SaveSettings();
             CancelCommandConfirm();
             UpdateResults();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowWindowSwitcherEnabled) {
+            if (!settings_.enableWindowSwitcher) {
+                // Like snippets: the prefix only joins the conflict check while on.
+                quicklaunch::Settings candidate = settings_;
+                candidate.enableWindowSwitcher = true;
+                if (const wchar_t* problem = leanlauncher::settings_io::detail::PrefixConflict(candidate)) {
+                    settingsStatus_ = std::wstring(problem) + L" Change the window switcher prefix first.";
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                    return;
+                }
+            }
+            settings_.enableWindowSwitcher = !settings_.enableWindowSwitcher;
+            SaveSettings();
+            UpdateResults();  // nothing runs in the background: a window row list just goes away
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
@@ -4596,6 +4675,7 @@ private:
         case AppCategory::Url: return L"URL";
         case AppCategory::Pomodoro: return L"Timer";
         case AppCategory::Snippet: return L"Snippet";
+        case AppCategory::Window: return L"Window";
         case AppCategory::Calculator: return L"Calculator";
         case AppCategory::TaskAdd: return settings_.taskPillLabel;
         case AppCategory::NoteAdd: return settings_.noteAddPillLabel;
@@ -5564,6 +5644,10 @@ private:
             RunSnippetRow(app);
             return;
         }
+        if (app.category == takeoff::AppCategory::Window) {
+            RunWindowRow(app);
+            return;
+        }
         if (app.category == takeoff::AppCategory::Url) {
             // Re-check the scheme: only http(s) is ever handed to the shell.
             if (leanlauncher::typed::ClassifyUrl(app.path) != leanlauncher::typed::UrlKind::Explicit) return;
@@ -5825,7 +5909,7 @@ private:
         actionsPositioned_ = false;
         const AppEntry& app = apps_[results_[selected_]];
         if (app.category == takeoff::AppCategory::Command || app.category == takeoff::AppCategory::Pomodoro ||
-            app.category == takeoff::AppCategory::Snippet) {
+            app.category == takeoff::AppCategory::Snippet || app.category == takeoff::AppCategory::Window) {
             LaunchSelected(false);  // "Run", through the same confirmation
             return;
         }
@@ -5987,6 +6071,7 @@ private:
         if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Command) return 1;
         if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Pomodoro) return 1;
         if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Snippet) return 1;
+        if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Window) return 1;
         if (HasResult() && apps_[results_[selected_]].category == takeoff::AppCategory::Url) return 2;
         return (HasResult() && IsPinnable(apps_[results_[selected_]])) ? 4 : 3;
     }
@@ -6432,6 +6517,7 @@ private:
             if (app.category == takeoff::AppCategory::Info) continue;  // status text only
             if (app.category == takeoff::AppCategory::Pomodoro) continue;
             if (app.category == takeoff::AppCategory::Snippet) continue;
+            if (app.category == takeoff::AppCategory::Window && app.iconPath.empty()) continue;  // no image path to take an icon from
             if (app.category == takeoff::AppCategory::Command) {
                 if (app.path == leanlauncher::syscmd::CommandPath(leanlauncher::syscmd::Command::EmptyRecycleBin)) {
                     RequestRecycleBinInfo();
@@ -7055,6 +7141,8 @@ private:
                 if (!pathMode && (app.category == takeoff::AppCategory::File ||
                                   app.category == takeoff::AppCategory::Folder)) {
                     folderLine = FolderLineFor(app.path, width_ - 158.0f - 60.0f);
+                } else if (app.category == takeoff::AppCategory::Window) {
+                    folderLine = app.parameters;  // US-065: the app the window belongs to
                 }
                 if (folderLine.empty()) {
                     Text(CommandRowText(app), D2D1::RectF(60, top, width_ - 158, top + 40), resultFormat_.Get(),
@@ -7071,6 +7159,7 @@ private:
                     : (app.category == takeoff::AppCategory::Command ? L"Command"
                     : (app.category == takeoff::AppCategory::Url ? L"URL"
                     : (app.category == takeoff::AppCategory::Info ? L""
+                    : (app.category == takeoff::AppCategory::Window ? L"Window"
                     : (app.category == takeoff::AppCategory::Snippet ? L"Snippet"
                     : (app.category == takeoff::AppCategory::Pomodoro ? L"Timer"
                     : (app.category == takeoff::AppCategory::System ? L"System"
@@ -7080,7 +7169,7 @@ private:
                     : (app.category == takeoff::AppCategory::NoteAdd ? settings_.noteAddPillLabel.c_str()
                     : (app.category == takeoff::AppCategory::LogAdd ? settings_.logPillLabel.c_str()
                     : (app.category == takeoff::AppCategory::NoteJump ? settings_.vaultSearchPillLabel.c_str()
-                    : (app.category == takeoff::AppCategory::WebSearch ? settings_.webSearchPillLabel.c_str() : L"Application")))))))))))));
+                    : (app.category == takeoff::AppCategory::WebSearch ? settings_.webSearchPillLabel.c_str() : L"Application"))))))))))))));
                 Text(categoryLabel,
                     D2D1::RectF(width_ - 154, top, width_ - 28, top + 40), hintFormat_.Get(),
                     highContrast_ && selected ? textColor : Muted(), DWRITE_TEXT_ALIGNMENT_TRAILING);
@@ -7384,6 +7473,10 @@ private:
                 Text(L"Open URL", D2D1::RectF(24, top, 156, height_),
                     hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
                 Key(L"\u21B5", 96, top + (kFooterHeight - 22) / 2, 24);
+            } else if (app.category == takeoff::AppCategory::Window) {
+                Text(L"Switch", D2D1::RectF(24, top, 156, height_),
+                    hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
+                Key(L"↵", 96, top + (kFooterHeight - 22) / 2, 24);
             } else if (app.category == takeoff::AppCategory::Snippet) {
                 Text(L"Insert", D2D1::RectF(24, top, 156, height_),
                     hintFormat_.Get(), actionsOpen_ ? Foreground() : Muted());
@@ -7473,7 +7566,9 @@ private:
                                 app.category == takeoff::AppCategory::Pomodoro);
         const bool isUrl = (app.category == takeoff::AppCategory::Url);
         const bool isSnippet = (app.category == takeoff::AppCategory::Snippet);
-        const wchar_t** labels = isSnippet ? snippetLabels : isCommand ? commandLabels : isUrl ? urlLabels : isCalc ? calcLabels
+        const wchar_t* windowLabels[] = {L"Switch to window"};
+        const bool isWindow = (app.category == takeoff::AppCategory::Window);
+        const wchar_t** labels = isWindow ? windowLabels : isSnippet ? snippetLabels : isCommand ? commandLabels : isUrl ? urlLabels : isCalc ? calcLabels
             : (isTaskAdd ? taskLabels
             : (isNoteAdd ? noteAddLabels
             : (isLogAdd ? logAddLabels
@@ -8045,6 +8140,12 @@ private:
             DrawSettingsRow(kRowPomodoroLog, rowY(kRowPomodoroLog), L"Log finished Pomodoros",
                 L"Add finished focus timers to your log heading - only if today's note exists",
                 {}, true, settings_.pomodoroLog);
+            DrawSettingsRow(kRowWindowSwitcherEnabled, rowY(kRowWindowSwitcherEnabled), L"Window switcher",
+                L"Switch to an open window by its title or app name, like d notes. Lists windows only when asked",
+                {}, true, settings_.enableWindowSwitcher);
+            DrawSettingsRow(kRowWindowSwitcherPrefix, rowY(kRowWindowSwitcherPrefix), L"Window switcher prefix",
+                L"Type this followed by a space to list open windows",
+                settings_.windowSwitcherPrefix, false, false, false, true);
         }
 
         if (settingsCategory_ == SettingsCategory::Snippets) {

@@ -21,6 +21,8 @@
 #include <system_error>
 #include <vector>
 
+#include "window_switcher.h"
+
 namespace leanlauncher {
 namespace obsidian {
 
@@ -719,21 +721,7 @@ inline bool RaiseObsidianWindow() {
     if (!found) return false;
 
     if (IsIconic(found)) ShowWindow(found, SW_RESTORE);
-    if (SetForegroundWindow(found)) return true;
-
-    const HWND front = GetForegroundWindow();
-    const DWORD frontThread = front ? GetWindowThreadProcessId(front, nullptr) : 0;
-    const DWORD thisThread = GetCurrentThreadId();
-    const bool attached = frontThread != 0 && frontThread != thisThread &&
-        AttachThreadInput(thisThread, frontThread, TRUE) != FALSE;
-    BringWindowToTop(found);
-    const bool raised = SetForegroundWindow(found) != FALSE;
-    if (attached) AttachThreadInput(thisThread, frontThread, FALSE);
-    if (!raised) {
-        FLASHWINFO flash{sizeof(flash), found, FLASHW_ALL | FLASHW_TIMERNOFG, 3, 0};
-        FlashWindowEx(&flash);
-    }
-    return raised;
+    return winswitch::BringWindowToForeground(found);  // shared with US-065
 }
 
 // Converts a vault-relative note ref (forward slashes, no extension, as

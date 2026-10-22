@@ -75,6 +75,10 @@ struct Settings {
     // only while this is on. Never exported or imported (see settings_io.h).
     bool enableSnippets = false;
     std::wstring snippetsPrefix = L",";
+    // US-065: "d <text>" lists open windows (d for desktop) and switches to one. Off by
+    // default; nothing is listed or kept while it is off. "w" is the web prefix.
+    bool enableWindowSwitcher = false;
+    std::wstring windowSwitcherPrefix = L"d";
     // Empty = %APPDATA%\LeanLauncher\snippets.yml.
     std::wstring snippetsPath;
     // Default matches the Google preset in search.h's kWebSearchPresets -

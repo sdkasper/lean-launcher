@@ -100,6 +100,7 @@ inline constexpr BoolField kBools[] = {
     {"LogEnabled", &Settings::logEnabled},
     {"OpenNotesInNewTab", &Settings::openNotesInNewTab},
     {"BringObsidianToFront", &Settings::bringObsidianToFront},
+    {"WindowSwitcherEnabled", &Settings::enableWindowSwitcher},
 };
 
 inline constexpr TextField kTexts[] = {
@@ -131,6 +132,7 @@ inline constexpr TextField kTexts[] = {
     {"PomodoroFocusMinutes", &Settings::pomodoroFocusMinutes, TextKind::Minutes},
     {"PomodoroBreakMinutes", &Settings::pomodoroBreakMinutes, TextKind::Minutes},
     {"SnippetsPrefix", &Settings::snippetsPrefix, TextKind::Prefix},
+    {"WindowSwitcherPrefix", &Settings::windowSwitcherPrefix, TextKind::Prefix},
     {"SnippetsPath", &Settings::snippetsPath, TextKind::SnippetsFile},
 };
 
@@ -407,6 +409,7 @@ inline std::vector<std::wstring> Prefixes(const Settings& s) {
     for (const auto& f : kTexts) {
         if (f.kind != TextKind::Prefix) continue;
         if (f.member == &Settings::snippetsPrefix && !s.enableSnippets) continue;
+        if (f.member == &Settings::windowSwitcherPrefix && !s.enableWindowSwitcher) continue;
         out.push_back(s.*(f.member));
     }
     return out;

@@ -22,6 +22,7 @@
 #include "../src/preview.h"
 #include "../src/snippets.h"
 #include "../src/window_behavior.h"
+#include "../src/window_switcher.h"
 #include "reference_scorer.h"
 
 #include <chrono>
@@ -5525,6 +5526,94 @@ int main() {
         const auto dupAtCap = sn::MergeSnippets(atCap, {{L"t1", L"y", L""}, {L"last", L"y", L""}});
         Check(dupAtCap.added == 0 && dupAtCap.overflow == 0 && dupAtCap.duplicates == 2,
               "duplicates at the cap are duplicates, not overflow");
+    }
+
+    {
+        // US-065: window switcher - which windows count, how they rank, the row path, and the setting.
+        namespace ws = leanlauncher::winswitch;
+        namespace io = leanlauncher::settings_io;
+        ws::WindowTraits normal;
+        normal.visible = true;
+        normal.hasTitle = true;
+        Check(ws::IsSwitchable(normal), "a visible, titled, unowned window is switchable");
+        ws::WindowTraits hidden = normal;
+        hidden.visible = false;
+        Check(!ws::IsSwitchable(hidden), "an invisible window is not switchable");
+        ws::WindowTraits untitled = normal;
+        untitled.hasTitle = false;
+        Check(!ws::IsSwitchable(untitled), "a window without a title is not switchable");
+        ws::WindowTraits owned = normal;
+        owned.hasOwner = true;
+        Check(!ws::IsSwitchable(owned), "an owned window (a dialog) is not switchable");
+        ws::WindowTraits tool = normal;
+        tool.toolWindow = true;
+        Check(!ws::IsSwitchable(tool), "a tool window is not switchable");
+        tool.appWindow = true;
+        Check(ws::IsSwitchable(tool), "a tool window that also has WS_EX_APPWINDOW is switchable");
+        ws::WindowTraits deleted = normal;
+        deleted.deletedFromTaskList = true;
+        Check(!ws::IsSwitchable(deleted), "a window marked ITaskList_Deleted is not switchable");
+        ws::WindowTraits cloaked = normal;
+        cloaked.cloaked = true;
+        Check(!ws::IsSwitchable(cloaked), "a cloaked window is not switchable");
+        ws::WindowTraits core = normal;
+        core.coreWindow = true;
+        Check(!ws::IsSwitchable(core), "a Windows.UI.Core.CoreWindow is not switchable");
+        ws::WindowTraits self = normal;
+        self.isSelf = true;
+        Check(!ws::IsSwitchable(self), "the launcher's own window is not switchable");
+        Check(ws::IsCoreWindowClass(L"Windows.UI.Core.CoreWindow") && !ws::IsCoreWindowClass(L"Notepad") &&
+              !ws::IsCoreWindowClass(L""), "the CoreWindow class name is recognised exactly");
+
+        Check(ws::ProcessDisplayName(L"C:\\Windows\\System32\\notepad.exe") == L"notepad", "the process name drops folder and extension");
+        Check(ws::ProcessDisplayName(L"C:\\x\\Tool.v2.exe") == L"Tool.v2", "only the last extension is dropped");
+        Check(ws::ProcessDisplayName(L"foo") == L"foo" && ws::ProcessDisplayName(L"").empty(),
+              "a bare or empty image name is handled");
+        Check(ws::IsApplicationFrameHost(L"C:\\Windows\\System32\\ApplicationFrameHost.exe") &&
+              ws::IsApplicationFrameHost(L"applicationframehost.exe") && !ws::IsApplicationFrameHost(L"C:\\x\\notepad.exe") &&
+              !ws::IsApplicationFrameHost(L""), "ApplicationFrameHost is recognised by file name, ignoring case");
+
+        const std::vector<ws::WindowInfo> open = {
+            {nullptr, L"Untitled - Notepad", L"notepad"},
+            {nullptr, L"Calculator", L"CalculatorApp"},
+            {nullptr, L"Inbox - Outlook", L"olk"},
+        };
+        const std::vector<size_t> everything = {0, 1, 2};
+        Check(ws::Rank(open, takeoff::Normalize(L"")) == everything, "an empty filter lists every window in z-order");
+        Check(ws::Rank(open, takeoff::Normalize(L"calc")) == std::vector<size_t>{1}, "a title part narrows the list");
+        Check(ws::Rank(open, takeoff::Normalize(L"olk")) == std::vector<size_t>{2}, "the process name matches too");
+        Check(ws::Rank(open, takeoff::Normalize(L"zzzz")).empty(), "no match gives an empty list");
+        const std::vector<ws::WindowInfo> twoChromes = {
+            {nullptr, L"chrome settings", L"msedge"},
+            {nullptr, L"Docs", L"chrome"},
+        };
+        Check(ws::Rank(twoChromes, takeoff::Normalize(L"chrome")) == (std::vector<size_t>{1, 0}),
+              "an exact process-name match outranks a title match");
+
+        const HWND sample = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x1A2B));
+        HWND parsed = nullptr;
+        Check(ws::WindowFromPath(ws::PathForWindow(sample), parsed) && parsed == sample, "a window handle survives the row path");
+        Check(!ws::WindowFromPath(L"", parsed) && !ws::WindowFromPath(L"hwnd:", parsed) &&
+              !ws::WindowFromPath(L"hwnd:0", parsed) && !ws::WindowFromPath(L"hwnd:12x", parsed) &&
+              !ws::WindowFromPath(L"C:\\a.exe", parsed) && !ws::WindowFromPath(L"hwnd:99999999999999999999999", parsed),
+              "anything that is not a plain handle number is refused");
+
+        takeoff::Settings defaults;
+        Check(!defaults.enableWindowSwitcher && defaults.windowSwitcherPrefix == L"d",
+              "the window switcher is off by default with the prefix d");
+        takeoff::Settings on = defaults;
+        on.enableWindowSwitcher = true;
+        Check(io::detail::PrefixConflict(on) == nullptr, "the default window prefix d clashes with no other prefix");
+        takeoff::Settings clash = on;
+        clash.windowSwitcherPrefix = L"w";
+        Check(io::detail::PrefixConflict(clash) != nullptr, "the web prefix w is refused for the window switcher");
+        clash.enableWindowSwitcher = false;
+        Check(io::detail::PrefixConflict(clash) == nullptr, "an unused window prefix does not block other prefixes");
+        const std::string windowJson = io::ExportJson(on, {}, {}, L"2.3.0");
+        Check(windowJson.find("WindowSwitcherEnabled") != std::string::npos &&
+              windowJson.find("WindowSwitcherPrefix") != std::string::npos, "the window switcher settings are exported");
+        io::ImportResult windowBack = io::ParseImport(windowJson, defaults);
+        Check(windowBack.ok && windowBack.settings.enableWindowSwitcher, "the window switcher setting imports");
     }
 
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";

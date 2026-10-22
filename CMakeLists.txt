@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(LeanLauncher VERSION 2.3.0 LANGUAGES CXX)
+project(LeanLauncher VERSION 2.4.0 LANGUAGES CXX)
 
 function(add_launcher target)
 add_executable(${target} WIN32
@@ -29,6 +29,7 @@ add_executable(${target} WIN32
     src/preview.h
     src/snippets.h
     src/window_behavior.h
+    src/window_switcher.h
     src/expander.h
     src/LeanLauncher.manifest
     src/LeanLauncher.rc
