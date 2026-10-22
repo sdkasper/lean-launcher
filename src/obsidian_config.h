@@ -534,13 +534,18 @@ inline std::wstring FindObsidianCliPath() {
 }
 
 // Assembles the full CreateProcessW command line for
-// "obsidian open vault=<name> path=<relative-file-path>", quoting each
+// "obsidian open vault=<name> path=<relative-file-path> [newtab]", quoting each
 // argument as needed. Kept separate from OpenNoteInObsidian so the
-// assembly logic is unit-testable without spawning a process.
+// assembly logic is unit-testable without spawning a process. `newTab`
+// (US-063) appends the CLI's own `newtab` flag, so the note opens beside the
+// current tab instead of replacing it.
 inline std::wstring BuildObsidianCliCommandLine(
-    const std::wstring& cliPath, const std::wstring& vaultName, const std::wstring& relativeFilePath) {
-    return QuoteCommandLineArgument(cliPath) + L" vault=" + QuoteCommandLineArgument(vaultName) +
+    const std::wstring& cliPath, const std::wstring& vaultName, const std::wstring& relativeFilePath,
+    bool newTab = false) {
+    std::wstring commandLine = QuoteCommandLineArgument(cliPath) + L" vault=" + QuoteCommandLineArgument(vaultName) +
            L" open path=" + QuoteCommandLineArgument(relativeFilePath);
+    if (newTab) commandLine += L" newtab";
+    return commandLine;
 }
 
 // A note ref is the vault-relative path without ".md". Bases and canvases are
@@ -587,13 +592,14 @@ constexpr UINT kKnownVaultsReadyMessage = WM_APP + 11;
 // failure, not a guarantee Obsidian found the note. Blocks for as long as
 // the CLI takes to answer (seconds, on a cold Obsidian start), so callers
 // must run it off the UI thread.
-inline bool OpenNoteInObsidian(const std::wstring& vaultPath, const std::wstring& relativeNoteRef) {
+inline bool OpenNoteInObsidian(const std::wstring& vaultPath, const std::wstring& relativeNoteRef,
+    bool newTab = false) {
     const std::wstring cliPath = FindObsidianCliPath();
     if (cliPath.empty()) return false;
 
     const std::wstring vaultName = fs::path(vaultPath).filename().wstring();
     const std::wstring relativeFilePath = NoteRefToRelativeFilePath(relativeNoteRef);
-    const std::wstring commandLine = BuildObsidianCliCommandLine(cliPath, vaultName, relativeFilePath);
+    const std::wstring commandLine = BuildObsidianCliCommandLine(cliPath, vaultName, relativeFilePath, newTab);
 
     SECURITY_ATTRIBUTES saAttr{};
     saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
@@ -666,6 +672,68 @@ inline bool OpenNoteInObsidian(const std::wstring& vaultPath, const std::wstring
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     return succeeded;
+}
+
+// US-064: whether `imagePath` is Obsidian's own executable, matched on the
+// file name alone (case-insensitive) so a helper such as ObsidianHelper.exe or
+// a file in an Obsidian folder is never taken for it.
+inline bool IsObsidianExeName(std::wstring_view imagePath) {
+    const size_t sep = imagePath.find_last_of(L"\\/");
+    const std::wstring_view name = sep == std::wstring_view::npos ? imagePath : imagePath.substr(sep + 1);
+    constexpr std::wstring_view kExeName = L"Obsidian.exe";
+    return name.size() == kExeName.size() && _wcsnicmp(name.data(), kExeName.data(), kExeName.size()) == 0;
+}
+
+// US-064: the window is only raised once the CLI has answered `Opened:` and
+// only when the user turned the setting on.
+inline bool ShouldRaiseObsidian(bool settingOn, bool noteOpened) {
+    return settingOn && noteOpened;
+}
+
+// US-064: brings Obsidian's main window to the front. Takes the topmost
+// visible, unowned, titled top-level window of Obsidian.exe (EnumWindows runs
+// top to bottom in z-order, so with several vaults open that is the one used
+// last). Windows may refuse SetForegroundWindow to a process that does not hold
+// the foreground; the fallback borrows the foreground thread's input state for
+// one call, and if that fails too the taskbar button flashes instead. Returns
+// whether the window now has the foreground. Never blocks: no waiting on Obsidian.
+inline bool RaiseObsidianWindow() {
+    HWND found = nullptr;
+    EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+        if (!IsWindowVisible(hwnd) || GetWindow(hwnd, GW_OWNER) != nullptr) return TRUE;
+        if ((GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0) return TRUE;
+        if (GetWindowTextLengthW(hwnd) == 0) return TRUE;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (pid == 0) return TRUE;
+        HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!process) return TRUE;
+        wchar_t image[MAX_PATH * 2]{};
+        DWORD size = static_cast<DWORD>(std::size(image));
+        const bool queried = QueryFullProcessImageNameW(process, 0, image, &size) != FALSE;
+        CloseHandle(process);
+        if (!queried || !IsObsidianExeName(std::wstring_view(image, size))) return TRUE;
+        *reinterpret_cast<HWND*>(lParam) = hwnd;
+        return FALSE;
+    }, reinterpret_cast<LPARAM>(&found));
+    if (!found) return false;
+
+    if (IsIconic(found)) ShowWindow(found, SW_RESTORE);
+    if (SetForegroundWindow(found)) return true;
+
+    const HWND front = GetForegroundWindow();
+    const DWORD frontThread = front ? GetWindowThreadProcessId(front, nullptr) : 0;
+    const DWORD thisThread = GetCurrentThreadId();
+    const bool attached = frontThread != 0 && frontThread != thisThread &&
+        AttachThreadInput(thisThread, frontThread, TRUE) != FALSE;
+    BringWindowToTop(found);
+    const bool raised = SetForegroundWindow(found) != FALSE;
+    if (attached) AttachThreadInput(thisThread, frontThread, FALSE);
+    if (!raised) {
+        FLASHWINFO flash{sizeof(flash), found, FLASHW_ALL | FLASHW_TIMERNOFG, 3, 0};
+        FlashWindowEx(&flash);
+    }
+    return raised;
 }
 
 // Converts a vault-relative note ref (forward slashes, no extension, as

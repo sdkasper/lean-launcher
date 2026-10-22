@@ -239,8 +239,12 @@ private:
             return 0;
         }
         case kNoteOpenResultMessage: {
-            // Success needs no UI: the launcher already hid itself and
-            // Obsidian now has the foreground.
+            // Success needs no message: the launcher already hid itself. The
+            // CLI does not bring Obsidian forward, so the raise (US-064, off
+            // by default) happens here, once the CLI has answered Opened:.
+            if (leanlauncher::obsidian::ShouldRaiseObsidian(settings_.bringObsidianToFront, wParam != 0)) {
+                if constexpr (!kUiTest) leanlauncher::obsidian::RaiseObsidianWindow();
+            }
             if (wParam == 0) {
                 ShowWindow(hwnd_, SW_SHOWNORMAL);
                 SetForegroundWindow(hwnd_);
@@ -745,6 +749,8 @@ private:
                 settings_.taskAddEnabled = ReadDword(key, L"TaskAddEnabled", 1) != 0;
                 settings_.noteAddEnabled = ReadDword(key, L"NoteAddEnabled", 1) != 0;
                 settings_.logEnabled = ReadDword(key, L"LogEnabled", 1) != 0;
+                settings_.openNotesInNewTab = ReadDword(key, L"OpenNotesInNewTab", 0) != 0;
+                settings_.bringObsidianToFront = ReadDword(key, L"BringObsidianToFront", 0) != 0;
                 settings_.quickOpenTarget =
                     std::clamp(static_cast<int>(ReadDword(key, L"QuickOpenTarget", 0)), 0, kQuickOpenTargetCount - 1);
                 const DWORD low = ReadDword(key, L"LastUpdateCheckLow", 0);
@@ -1076,6 +1082,8 @@ private:
                 {L"TaskAddEnabled", settings_.taskAddEnabled ? 1u : 0u},
                 {L"NoteAddEnabled", settings_.noteAddEnabled ? 1u : 0u},
                 {L"LogEnabled", settings_.logEnabled ? 1u : 0u},
+                {L"OpenNotesInNewTab", settings_.openNotesInNewTab ? 1u : 0u},
+                {L"BringObsidianToFront", settings_.bringObsidianToFront ? 1u : 0u},
                 {L"QuickOpenTarget", static_cast<DWORD>(settings_.quickOpenTarget)},
             };
             bool saved = true;
@@ -1697,7 +1705,9 @@ private:
     static constexpr int kRowKeepOpenOnFocusLoss = 67;  // issue #6
     static constexpr int kRowRestoreLastQuery = 68;
     static constexpr int kRowShowSupportBadge = 69;
-    static constexpr int kSettingsMaxRow = 69;
+    static constexpr int kRowOpenNotesInNewTab = 70;  // US-063, in the Obsidian vault search section
+    static constexpr int kRowBringObsidianToFront = 71;  // US-064, next to kRowOpenNotesInNewTab
+    static constexpr int kSettingsMaxRow = 71;
     static constexpr int kRowCheckForUpdatesOnStart = 6;  // shown in About's UPDATES card
 
     // Every tab except Obsidian (an accordion) and About (fixed layout) is an
@@ -1813,6 +1823,8 @@ private:
             rows.push_back(kRowVaultSearchPrefix);
             rows.push_back(kRowVaultSearchPillLabel);
             rows.push_back(kRowQuickOpenTarget);
+            rows.push_back(kRowOpenNotesInNewTab);
+            rows.push_back(kRowBringObsidianToFront);
         }
 
         rows.push_back(kRowTaskSummary);
@@ -4121,6 +4133,18 @@ private:
             InvalidateRect(hwnd_, nullptr, FALSE);
             return;
         }
+        if (row == kRowOpenNotesInNewTab) {
+            settings_.openNotesInNewTab = !settings_.openNotesInNewTab;
+            SaveSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
+        if (row == kRowBringObsidianToFront) {
+            settings_.bringObsidianToFront = !settings_.bringObsidianToFront;
+            SaveSettings();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return;
+        }
         if (row == kRowTaskAddEnabled) {
             settings_.taskAddEnabled = !settings_.taskAddEnabled;
             SaveSettings();
@@ -5567,9 +5591,10 @@ private:
             const HWND hwnd = hwnd_;
             const std::wstring vaultPath = obsidianVaultPath_;
             const std::wstring noteRef = app.path;
+            const bool newTab = settings_.openNotesInNewTab;
             try {
-                std::thread([hwnd, vaultPath, noteRef] {
-                    const bool opened = leanlauncher::obsidian::OpenNoteInObsidian(vaultPath, noteRef);
+                std::thread([hwnd, vaultPath, noteRef, newTab] {
+                    const bool opened = leanlauncher::obsidian::OpenNoteInObsidian(vaultPath, noteRef, newTab);
                     PostMessageW(hwnd, leanlauncher::obsidian::kNoteOpenResultMessage,
                         opened ? 1 : 0, 0);
                 }).detach();
@@ -5658,6 +5683,26 @@ private:
                 SaveRecent();
             }
         }
+    }
+
+    // US-062: the text for a file or folder row's second line - its parent
+    // folder, cut from the front to fit `maxWidth` so the end of the path (the
+    // part that tells two same-named files apart) stays visible. Empty when
+    // the item has no parent folder to show. Built at draw time from the
+    // stored path; nothing is kept per entry.
+    std::wstring FolderLineFor(const std::wstring& path, float maxWidth) const {
+        const std::wstring_view folder = leanlauncher::typed::ParentFolderOf(path);
+        if (folder.empty()) return {};
+        auto layout = Layout(folder, hintFormat_.Get(), 4096.0f);
+        DWRITE_TEXT_METRICS metrics{};
+        if (!layout || FAILED(layout->GetMetrics(&metrics)) || metrics.width <= maxWidth) {
+            return std::wstring(folder);
+        }
+        // Proportional guess at how many characters fit, minus one for the
+        // ellipsis; Text() still end-trims if the guess runs a pixel long.
+        const size_t fits = static_cast<size_t>(
+            static_cast<float>(folder.size()) * (std::max)(0.0f, maxWidth) / metrics.width);
+        return leanlauncher::typed::ShortenPathEnd(folder, (std::max<size_t>)(fits, 8));
     }
 
     // Result-row title for a system command: the confirmation prompt while
@@ -6933,6 +6978,7 @@ private:
             return;
         }
         float currentTop = ResultsTop();
+        const bool pathMode = PathModeActive();
         for (int i = firstVisible_; i < static_cast<int>(results_.size()); ++i) {
             const float rowHeight = RowHeight(i);
             if (currentTop + rowHeight > FooterTop() - 4.0f) {
@@ -7002,8 +7048,22 @@ private:
                             DWRITE_TEXT_ALIGNMENT_CENTER);
                     }
                 }
-                Text(CommandRowText(app), D2D1::RectF(60, top, width_ - 158, top + 40), resultFormat_.Get(),
-                    CommandRowDimmed(app) && !(highContrast_ && selected) ? Muted() : textColor);
+                // US-062: a file or folder row gets its containing folder on a
+                // second, smaller line so same-named files can be told apart.
+                // Path completion rows skip it - the folder is already typed.
+                std::wstring folderLine;
+                if (!pathMode && (app.category == takeoff::AppCategory::File ||
+                                  app.category == takeoff::AppCategory::Folder)) {
+                    folderLine = FolderLineFor(app.path, width_ - 158.0f - 60.0f);
+                }
+                if (folderLine.empty()) {
+                    Text(CommandRowText(app), D2D1::RectF(60, top, width_ - 158, top + 40), resultFormat_.Get(),
+                        CommandRowDimmed(app) && !(highContrast_ && selected) ? Muted() : textColor);
+                } else {
+                    Text(app.name, D2D1::RectF(60, top + 1, width_ - 158, top + 22), resultFormat_.Get(), textColor);
+                    Text(folderLine, D2D1::RectF(60, top + 21, width_ - 158, top + 38), hintFormat_.Get(),
+                        highContrast_ && selected ? textColor : Muted());
+                }
                 const bool pinned = PinRank(results_[i]) >= 0;
                 const bool recent = input_.text.empty() &&
                     std::find(recent_.begin(), recent_.end(), results_[i]) != recent_.end();
@@ -7660,6 +7720,16 @@ private:
                 quickOpenDropdownOpen_ ? L"Tap to collapse"
                     : L"Note opened in Obsidian when you type the vault search prefix, a space, and a dot",
                 QuickOpenTargetLabel(settings_.quickOpenTarget), false, false, true);
+            return;
+        case kRowOpenNotesInNewTab:
+            DrawSettingsRow(row, top, L"Open notes in a new tab",
+                L"Open a note, Base or Canvas beside the current Obsidian tab instead of replacing it",
+                {}, true, settings_.openNotesInNewTab);
+            return;
+        case kRowBringObsidianToFront:
+            DrawSettingsRow(row, top, L"Bring Obsidian to the front",
+                L"Raise the Obsidian window after a note opens, so it is not left behind other apps",
+                {}, true, settings_.bringObsidianToFront);
             return;
         case kRowTaskTargetNote:
             DrawSettingsRow(row, top, L"Add task target note",

@@ -245,5 +245,37 @@ inline std::wstring ExplorerFolderArgs(std::wstring_view folder) {
     return args;
 }
 
+// US-062: the folder a file or folder result sits in, for the second line of
+// its row. No trailing backslash, except on a drive root ("C:\"), which would
+// otherwise read as "C:". Empty when there is no parent to show (a bare name,
+// a drive root, or a bare server name).
+inline std::wstring_view ParentFolderOf(std::wstring_view path) {
+    while (path.size() > 3 && (path.back() == L'\\' || path.back() == L'/')) path.remove_suffix(1);
+    if (path.size() == 3 && path[1] == L':') return {};  // a drive root has no parent
+    const size_t sep = path.find_last_of(L"\\/");
+    if (sep == std::wstring_view::npos) return {};
+    if (sep == 2 && path[1] == L':') return path.substr(0, 3);  // "C:\file" -> "C:\"
+    if (sep <= 1) return {};  // "\file", "\\server": nothing to show
+    return path.substr(0, sep);
+}
+
+// US-062: fits a folder path into `maxChars` by cutting from the front and
+// keeping the end, which is the part that tells two same-named files apart:
+// "C:\Users\Sam\Projects\Alpha\Docs" -> "...\Alpha\Docs" (with a real
+// ellipsis character). The cut moves forward to the next backslash when that
+// leaves at least a few characters, so it does not end mid-name.
+inline std::wstring ShortenPathEnd(std::wstring_view path, size_t maxChars) {
+    if (path.size() <= maxChars) return std::wstring(path);
+    if (maxChars == 0) return {};
+    std::wstring out(1, L'\u2026');
+    if (maxChars == 1) return out;
+    std::wstring_view tail = path.substr(path.size() - (maxChars - 1));
+    constexpr size_t kMinKept = 4;
+    const size_t sep = tail.find(L'\\');
+    if (sep != std::wstring_view::npos && tail.size() - sep >= kMinKept) tail = tail.substr(sep);
+    out.append(tail);
+    return out;
+}
+
 } // namespace typed
 } // namespace leanlauncher

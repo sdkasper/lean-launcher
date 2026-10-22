@@ -2700,6 +2700,32 @@ int main() {
               L"\"C:\\Program Files\\Obsidian\\Obsidian.com\" vault=\"Lean Notes\" open "
               L"path=\"06 BJ/10 Daily/2026-09-14.md\"",
             "BuildObsidianCliCommandLine quotes each argument that needs it, vault= still before the command");
+
+        // US-063: the optional newtab flag goes last, after path=, and is absent unless asked for.
+        Check(BuildObsidianCliCommandLine(L"C:\\CLI\\Obsidian.com", L"Vault", L"Note.md", true) ==
+              L"C:\\CLI\\Obsidian.com vault=Vault open path=Note.md newtab",
+            "BuildObsidianCliCommandLine appends newtab after path= when a new tab is requested");
+        Check(BuildObsidianCliCommandLine(L"C:\\CLI\\Obsidian.com", L"Vault", L"Note.md", false) ==
+              BuildObsidianCliCommandLine(L"C:\\CLI\\Obsidian.com", L"Vault", L"Note.md"),
+            "a new tab is off unless asked for, so the command line matches v2.2.0");
+        Check(BuildObsidianCliCommandLine(L"C:\\CLI\\Obsidian.com", L"Lean Notes", L"90 Organize/Books Base.base", true) ==
+              L"C:\\CLI\\Obsidian.com vault=\"Lean Notes\" open path=\"90 Organize/Books Base.base\" newtab",
+            "a Base opens in a new tab with its own extension and a quoted path");
+
+        // US-064: raising the Obsidian window after the CLI answers.
+        Check(IsObsidianExeName(L"C:\\Users\\Sam\\AppData\\Local\\Programs\\Obsidian\\Obsidian.exe"),
+            "Obsidian.exe in its install folder is recognised");
+        Check(IsObsidianExeName(L"c:\\apps\\obsidian\\OBSIDIAN.EXE"), "the exe name is matched without case");
+        Check(IsObsidianExeName(L"Obsidian.exe"), "a bare exe name is recognised");
+        Check(!IsObsidianExeName(L"C:\\Tools\\ObsidianHelper.exe"), "a longer exe name is not Obsidian");
+        Check(!IsObsidianExeName(L"C:\\Tools\\NotObsidian.exe"), "an exe name ending in the Obsidian name is not Obsidian");
+        Check(!IsObsidianExeName(L"C:\\Obsidian\\Obsidian.exe.bak"), "a different extension is not Obsidian");
+        Check(!IsObsidianExeName(L"C:\\Obsidian\\notes.txt"), "a file in an Obsidian folder is not Obsidian");
+        Check(!IsObsidianExeName(L""), "an empty path is not Obsidian");
+        Check(ShouldRaiseObsidian(true, true), "the window is raised when the setting is on and the CLI answered Opened:");
+        Check(!ShouldRaiseObsidian(false, true), "the window is not raised when the setting is off");
+        Check(!ShouldRaiseObsidian(true, false), "the window is not raised when the note did not open");
+        Check(!ShouldRaiseObsidian(false, false), "nothing is raised when the setting is off and the note did not open");
     }
 
     {
@@ -4032,6 +4058,37 @@ int main() {
         Check(ti::ExplorerFolderArgs(L"C:\\") == L"C:\\", "explorer fallback leaves a drive root as is");
         Check(ti::ExplorerFolderArgs(L"\\\\nas\\share\\") == L"\"\\\\nas\\share\"",
               "explorer fallback handles a network share");
+
+        // US-062: the folder line on file and folder result rows.
+        const auto parentOf = [](std::wstring_view path) { return std::wstring(ti::ParentFolderOf(path)); };
+        Check(parentOf(L"C:\\Temp\\tc021\\a\\readme.txt") == L"C:\\Temp\\tc021\\a",
+              "the parent of a file is its folder");
+        Check(parentOf(L"C:\\Temp\\tc021") == L"C:\\Temp", "the parent of a folder is the folder above it");
+        Check(parentOf(L"C:\\Temp\\tc021\\") == L"C:\\Temp", "a trailing backslash on a folder path is ignored");
+        Check(parentOf(L"C:\\readme.txt") == L"C:\\", "a file in a drive root shows the drive root with its backslash");
+        Check(parentOf(L"C:\\").empty(), "a drive root has no parent");
+        Check(parentOf(L"readme.txt").empty(), "a bare name has no parent");
+        Check(parentOf(L"").empty(), "an empty path has no parent");
+        Check(parentOf(L"\\\\nas\\share\\docs\\a.txt") == L"\\\\nas\\share\\docs", "a network path keeps its share");
+        Check(parentOf(L"\\\\nas\\share\\a.txt") == L"\\\\nas\\share", "a file in a share root shows the share");
+        Check(parentOf(L"\\\\nas").empty(), "a bare server name has no parent");
+        Check(parentOf(L"C:/Temp/a.txt") == L"C:/Temp", "forward slashes are accepted");
+        Check(parentOf(L"C:\\Users\\Sam\\Dokumente \u00fcber\\a.txt") == L"C:\\Users\\Sam\\Dokumente \u00fcber",
+              "non-ASCII folder names pass through");
+
+        const std::wstring longFolder = L"C:\\Users\\Sam\\Projects\\Alpha\\Docs";
+        Check(ti::ShortenPathEnd(longFolder, 100) == longFolder, "a path that fits is left alone");
+        Check(ti::ShortenPathEnd(longFolder, longFolder.size()) == longFolder, "a path that exactly fits is left alone");
+        Check(ti::ShortenPathEnd(longFolder, 15) == L"\u2026\\Alpha\\Docs",
+              "a long path loses its front, keeps the end, and cuts at a backslash");
+        Check(ti::ShortenPathEnd(longFolder, 15).size() <= 15, "a shortened path never exceeds the budget");
+        Check(ti::ShortenPathEnd(L"C:\\AVeryLongFolderNameWithoutAnySeparators", 12) == L"\u2026ySeparators",
+              "with no backslash in the kept tail, it is cut exactly at the budget");
+        Check(ti::ShortenPathEnd(longFolder, 1) == L"\u2026", "a budget of one is just the ellipsis");
+        Check(ti::ShortenPathEnd(longFolder, 0).empty(), "a budget of zero is empty");
+        Check(ti::ShortenPathEnd(L"", 10).empty(), "an empty path stays empty");
+        Check(ti::ShortenPathEnd(L"C:\\LongFolderName\\ab", 5) == L"\u2026e\\ab",
+              "a cut is not moved forward to a backslash when that would keep only a few characters");
     }
 
     // -----------------------------------------------------------------------------
@@ -4330,6 +4387,24 @@ int main() {
         io::ImportResult hiddenBack = io::ParseImport(io::ExportJson(hidden, {}, {}, L"2.1.0"), defaults);
         Check(hiddenBack.ok && hiddenBack.changed == 1 && !hiddenBack.settings.showSupportBadge,
             "hiding the support badge exports and imports");
+        // US-063: opening notes in a new tab is off by default and survives export and import.
+        Check(!defaults.openNotesInNewTab, "opening notes in a new tab is off by default");
+        takeoff::Settings newTab = defaults;
+        newTab.openNotesInNewTab = true;
+        const std::string newTabJson = io::ExportJson(newTab, {}, {}, L"2.3.0");
+        Check(newTabJson.find("OpenNotesInNewTab") != std::string::npos, "the new-tab setting is exported");
+        io::ImportResult newTabBack = io::ParseImport(newTabJson, defaults);
+        Check(newTabBack.ok && newTabBack.changed == 1 && newTabBack.settings.openNotesInNewTab,
+            "the new-tab setting imports");
+        // US-064: bringing Obsidian to the front is off by default and survives export and import.
+        Check(!defaults.bringObsidianToFront, "bringing Obsidian to the front is off by default");
+        takeoff::Settings toFront = defaults;
+        toFront.bringObsidianToFront = true;
+        const std::string toFrontJson = io::ExportJson(toFront, {}, {}, L"2.3.0");
+        Check(toFrontJson.find("BringObsidianToFront") != std::string::npos, "the bring-to-front setting is exported");
+        io::ImportResult toFrontBack = io::ParseImport(toFrontJson, defaults);
+        Check(toFrontBack.ok && toFrontBack.changed == 1 && toFrontBack.settings.bringObsidianToFront,
+            "the bring-to-front setting imports");
         {
             using namespace leanlauncher::window_behavior;
             takeoff::Settings off;

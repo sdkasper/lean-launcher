@@ -928,20 +928,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
         LauncherWindow launcher;
         if (launcher.Create(instance)) {
             const HWND hwnd = launcher.Handle();
-            std::thread indexThread([hwnd] {
-                const HRESULT indexComResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-                auto apps = std::make_unique<std::vector<AppEntry>>();
-                try {
-                    *apps = BuildAppIndex();
-                } catch (const fs::filesystem_error&) {
-                    // An inaccessible shell entry must not terminate the launcher.
-                }
-                if (PostMessageW(hwnd, kAppsReadyMessage, 0,
-                        reinterpret_cast<LPARAM>(apps.get()))) {
-                    apps.release();
-                }
-                if (SUCCEEDED(indexComResult)) CoUninitialize();
-            });
+            // The initial app scan runs on LauncherWindow's own index worker
+            // (IndexWorkerMain), which also owns every later rescan.
             if (!startMinimized) {
                 PostMessageW(hwnd, kShowLauncherMessage, 0, 0);
             }
@@ -951,7 +939,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int nCmdShow) {
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
-            indexThread.join();
             // A shutdown can overtake the asynchronous index and icon delivery.
             while (PeekMessageW(&message, nullptr, kAppsReadyMessage, kAppsReadyMessage, PM_REMOVE)) {
                 delete reinterpret_cast<std::vector<AppEntry>*>(message.lParam);

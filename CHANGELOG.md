@@ -10,6 +10,16 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.3.0] - 2026-10-22
+
+### Added
+- **The folder is shown under each file and folder result** - a file or folder row now carries its parent folder on a second, smaller line, so files with the same name can be told apart without opening them. A long path is cut from the front so the end of it (the part that differs) stays visible. Applications, commands, notes and the rows of path completion (where you already typed the folder) look as before.
+- **Open notes in a new Obsidian tab (opt-in)** - Settings > Obsidian > Vault search > **Open notes in a new tab**. Off by default; when on, a note, Base or canvas opened from the launcher (`o <text>`, Quick open) opens beside the tab you are using instead of replacing it. It is saved, exported and imported with your other settings.
+- **Bring Obsidian to the front (opt-in)** - Settings > Obsidian > Vault search > **Bring Obsidian to the front**. Off by default; Obsidian's own command line opens the note but leaves the window behind whatever app was in front, so with this on the launcher raises the Obsidian window once the note has opened. If Windows refuses to move the window forward, its taskbar button flashes instead. It is saved, exported and imported with your other settings.
+
+### Changed
+- The app list was built twice at every start, on two threads at once; it is now built once, which trims the work done in the first seconds after launch.
+
 ## [2.2.0] - 2026-10-08
 
 ### Added

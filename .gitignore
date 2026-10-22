@@ -53,3 +53,6 @@ Thumbs.db
 *.key
 *.minisig
 minisign.key
+
+# Local triage and planning notes
+.planning/

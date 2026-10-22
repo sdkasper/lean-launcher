@@ -98,6 +98,8 @@ inline constexpr BoolField kBools[] = {
     {"TaskAddEnabled", &Settings::taskAddEnabled},
     {"NoteAddEnabled", &Settings::noteAddEnabled},
     {"LogEnabled", &Settings::logEnabled},
+    {"OpenNotesInNewTab", &Settings::openNotesInNewTab},
+    {"BringObsidianToFront", &Settings::bringObsidianToFront},
 };
 
 inline constexpr TextField kTexts[] = {

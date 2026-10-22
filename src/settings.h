@@ -106,6 +106,12 @@ struct Settings {
     bool taskAddEnabled = true;
     bool noteAddEnabled = true;
     bool logEnabled = true;
+    // US-063: open a note, Base or Canvas from the launcher in a new Obsidian
+    // tab (the CLI's `newtab`) instead of replacing the current one.
+    bool openNotesInNewTab = false;
+    // US-064: raise the Obsidian window once a note has opened (the CLI
+    // itself leaves Obsidian behind whatever app was in front).
+    bool bringObsidianToFront = false;
 
     std::wstring vaultSearchPrefix = L"o";
     std::wstring vaultSearchPillLabel = L"Jump";
