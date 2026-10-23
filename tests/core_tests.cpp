@@ -1843,8 +1843,6 @@ int main() {
         const std::wstring testCachePath = (testCacheDir / L"startup_cache_test.bin").wstring();
         DeleteFileW(testCachePath.c_str()); // ensure a clean cold start
 
-        fs::path currentPath = fs::current_path();
-        fs::path repoPath = FileIndex::FindVerifiedProjectRoot(currentPath);
         if (repoPath.empty()) repoPath = currentPath;
 
         FileIndex::Instance().Start(nullptr, repoPath.wstring(), testCachePath);
@@ -1998,7 +1996,6 @@ int main() {
         // scanning unrelated real directories.
         fs::path testRoot = fs::current_path() / L"llfi_incremental_test_root";
         fs::path scanTarget = testRoot / L"scan_target";
-        std::error_code ec;
         fs::remove_all(testRoot, ec);
         fs::create_directories(scanTarget, ec);
         {
@@ -2118,7 +2115,6 @@ int main() {
 
         fs::path testRoot = fs::current_path() / L"llfi_user_exclusions_test_root";
         fs::path excludedSub = testRoot / L"excluded_sub";
-        std::error_code ec;
         fs::remove_all(testRoot, ec);
         fs::create_directories(excludedSub, ec);
         {
@@ -2202,7 +2198,6 @@ int main() {
         fs::path testRoot = fs::current_path() / L"llfi_warmexcl_root";
         fs::path scanRoot = testRoot / L"scanroot";
         fs::path hiddenDir = scanRoot / L"hiddenfolder";
-        std::error_code ec;
         fs::remove_all(testRoot, ec);
         fs::create_directories(hiddenDir, ec);
         {
@@ -2309,7 +2304,6 @@ int main() {
         fs::path scanRoot = testRoot / L"scanroot";
         fs::path hiddenDir = scanRoot / L"hiddenfolder";
         fs::path stableDir = scanRoot / L"stabledir";
-        std::error_code ec;
         fs::remove_all(testRoot, ec);
         fs::create_directories(hiddenDir, ec);
         fs::create_directories(stableDir, ec);
@@ -4157,9 +4151,9 @@ int main() {
                                                0xa2, 0xde, 0xf9, 0xde, 0x14, 0,    0,    0,    0,    0,    0,
                                                0,    0,    0,    0,    0,    0,    0,    0,    0,    0x10};
             for (int i = 0; i < 32; ++i) {
-                const int sum = nonCanonical[32 + i] + kOrder[i] + carry;
-                nonCanonical[32 + i] = static_cast<uint8_t>(sum & 255);
-                carry = sum >> 8;
+                const int limb = nonCanonical[32 + i] + kOrder[i] + carry;
+                nonCanonical[32 + i] = static_cast<uint8_t>(limb & 255);
+                carry = limb >> 8;
             }
             Check(!Ed25519Verify(nonCanonical.data(), &msg2, 1, pk2.data()), "a non-canonical S is rejected");
         }
@@ -4303,7 +4297,6 @@ int main() {
         // The staged files on disk: what ApplyUpdateAndRestart and the elevated helper re-check.
         {
             namespace fs = std::filesystem;
-            std::error_code ec;
             const fs::path dir = fs::temp_directory_path(ec) / L"ll-us040-staged-test";
             fs::remove_all(dir, ec);
             fs::create_directories(dir, ec);
