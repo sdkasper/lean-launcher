@@ -14,6 +14,7 @@ further down for reference.
 
 ### Added
 - **Window switcher (opt-in)** - Settings > Tools > **Window switcher**. Off by default; when on, type `d ` (d for desktop) and part of a window title or app name to list the open windows that match, then press `Enter` to switch to one. `d ` alone lists every window Alt+Tab would show. A minimized window is restored first, a Store app is listed under its real app name, and the launcher never waits on a window that is not responding. The prefix can be changed in Settings. Windows are looked up only when you type the prefix; nothing is kept while the feature is off. It is saved, exported and imported with your other settings.
+- **Keyboard shortcuts for Settings** - `Ctrl+,` opens Settings on the tab you last used, and `Ctrl+1` to `Ctrl+6` jump to the General, Search, Tools, Snippets, Obsidian and About tabs. They do nothing while you record a hotkey, edit a field or have a dropdown open. `Ctrl+,` in Settings goes back, like `Esc`.
 
 ### Changed
 - The Obsidian "bring to the front" step now shares its window-raising code with the window switcher, and no longer waits on a window that is not responding.

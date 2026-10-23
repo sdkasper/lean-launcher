@@ -5609,5 +5609,16 @@ int main() {
         Check(windowBack.ok && windowBack.settings.enableWindowSwitcher, "the window switcher setting imports");
     }
 
+    {
+        // US-066: Ctrl+1..6 pick a Settings tab by its position in the strip.
+        namespace sl = leanlauncher::settings_layout;
+        Check(sl::TabIndexForDigitKey('1', 6) == 0, "Ctrl+1 picks the first Settings tab");
+        Check(sl::TabIndexForDigitKey('6', 6) == 5, "Ctrl+6 picks the sixth Settings tab");
+        Check(sl::TabIndexForDigitKey('7', 6) == -1, "Ctrl+7 picks nothing when there are six tabs");
+        Check(sl::TabIndexForDigitKey('0', 6) == -1, "Ctrl+0 picks no Settings tab");
+        Check(sl::TabIndexForDigitKey('A', 6) == -1, "a letter picks no Settings tab");
+        Check(sl::TabIndexForDigitKey('1', 0) == -1, "no tabs means no tab is picked");
+    }
+
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";
 }

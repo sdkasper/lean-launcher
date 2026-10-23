@@ -66,5 +66,14 @@ constexpr float RowTop(const Card* cards, std::size_t count, int row) {
     return CardTop(cards, count, static_cast<std::size_t>(slot.card)) + slot.rank * kRowHeight;
 }
 
+// US-066: Ctrl+1..Ctrl+9 name tabs by position. Returns the 0-based tab index
+// for the digit key `key` ('1'..'9'), or -1 if it is not a digit or there is no
+// tab at that position.
+constexpr int TabIndexForDigitKey(unsigned key, int tabCount) {
+    if (key < '1' || key > '9') return -1;
+    const int index = static_cast<int>(key - '1');
+    return index < tabCount ? index : -1;
+}
+
 } // namespace settings_layout
 } // namespace leanlauncher

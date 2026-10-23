@@ -2102,6 +2102,18 @@ private:
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
+    // Tab strip click and Ctrl+1..6 (US-066) both land here.
+    void SelectSettingsCategory(SettingsCategory cat) {
+        if (editingRow_ >= 0) CancelEditingRow();
+        obsidianExpandedSection_ = -1;
+        settingsCategory_ = cat;
+        settingsScroll_ = 0.0f;
+        if (!IsRowInCategory(settingsSelected_, settingsCategory_)) {
+            settingsSelected_ = FirstRowInCategory(settingsCategory_);
+        }
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
     void CloseSettings() {
         page_ = Page::Launcher;
         recordingRow_ = -1;
@@ -5302,6 +5314,19 @@ private:
                 HandleRecordingKey(key, control, shift, alt);
                 return 0;
             }
+            if (control && !alt && !shift) {
+                // US-066: Ctrl+1..6 jump to a tab; Ctrl+, goes back like Esc.
+                const int tab = leanlauncher::settings_layout::TabIndexForDigitKey(
+                    static_cast<unsigned>(key), static_cast<int>(std::size(kSettingsCategories)));
+                if (tab >= 0) {
+                    SelectSettingsCategory(kSettingsCategories[tab]);
+                    return 0;
+                }
+                if (key == VK_OEM_COMMA) {
+                    if ((lParam & 0x40000000) == 0) CloseSettings();
+                    return 0;
+                }
+            }
             if (key == VK_ESCAPE || (alt && key == VK_LEFT)) {
                 CloseSettings();
             } else if (key == VK_UP || (key == VK_TAB && shift)) {
@@ -5357,6 +5382,11 @@ private:
             // Held down, Ctrl+P toggles once: auto-repeats (lParam bit 30,
             // "key was already down") neither flap the width nor rewrite the registry.
             if ((lParam & 0x40000000) == 0) TogglePreview();
+            return 0;
+        }
+        if (key == VK_OEM_COMMA && control && !shift && !alt) {
+            // US-066: Ctrl+, opens Settings on the tab it was last left on.
+            if ((lParam & 0x40000000) == 0) OpenSettings(settingsCategory_);
             return 0;
         }
         if (actionsOpen_) {
@@ -6193,14 +6223,7 @@ private:
                 for (auto cat : kSettingsCategories) {
                     const auto r = CategoryTabRect(cat);
                     if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
-                        if (editingRow_ >= 0) CancelEditingRow();
-                        obsidianExpandedSection_ = -1;
-                        settingsCategory_ = cat;
-                        settingsScroll_ = 0.0f;
-                        if (!IsRowInCategory(settingsSelected_, settingsCategory_)) {
-                            settingsSelected_ = FirstRowInCategory(settingsCategory_);
-                        }
-                        InvalidateRect(hwnd_, nullptr, FALSE);
+                        SelectSettingsCategory(cat);
                         return;
                     }
                 }

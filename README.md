@@ -93,6 +93,8 @@ Entirely optional and off by default until you point it at a vault.
 | `Ctrl+C` | Copy selected text or calculation result |
 | `Ctrl+K` | Open actions menu (copy path, copy calculation, admin, etc.) |
 | `Ctrl+P` | Toggle the preview panel |
+| `Ctrl+,` | Open Settings (on the tab you last used); press again in Settings to go back |
+| `Ctrl+1` ... `Ctrl+6` | In Settings, jump to the General, Search, Tools, Snippets, Obsidian or About tab |
 | `Escape` | Clear query or close |
 
 *Hotkeys, and every Obsidian action's prefix, can be customized anytime from the in-app Settings (gear icon).*
