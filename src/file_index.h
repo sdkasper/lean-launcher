@@ -574,6 +574,13 @@ public:
                 entries[i].lastKnownMtime = fs::file_time_type(fs::file_time_type::duration(rep));
             }
             for (auto& e : entries) newPool.Intern(e.path, e.normPath); // rebuild index map in original order
+            // Intern() merges entries that share a normalized path, so a table
+            // with such duplicates leaves the pool shorter than dirCount, and
+            // SetMtime(i) below (and every chunk's parentDirIndex) would then
+            // index past the end of the pool - a heap write on startup (issue #12).
+            // A saved cache never has duplicates, so treat one as corrupt and
+            // let the caller walk the disk again.
+            if (newPool.Size() != dirCount) return false;
             for (uint32_t i = 0; i < dirCount; ++i) newPool.SetMtime(i, entries[i].lastKnownMtime);
 
             auto newSnapshot = std::make_shared<IndexSnapshot>();

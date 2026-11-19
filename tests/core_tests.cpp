@@ -1823,6 +1823,65 @@ int main() {
         Check(!FileIndex::Instance().LoadIndexCache(oobCachePath),
               "LoadIndexCache rejects an out-of-range parentDirIndex instead of leaving a crash in Search()");
 
+        // Issue #12: Intern() merges directories that share a normalized path, so
+        // a directory table with such duplicates leaves the pool shorter than
+        // dirCount, and loading it wrote past the end of the pool on startup. It
+        // must be rejected (and the index already loaded left alone). The header
+        // is written in full, exclusions field included, so these files get past
+        // the early checks and really reach the directory table.
+        {
+            uint64_t exclusionsRep = 0;
+            {
+                std::ifstream saved(cachePath, std::ios::binary);
+                saved.seekg(8);  // after the magic and the format version
+                saved.read(reinterpret_cast<char*>(&exclusionsRep), sizeof(exclusionsRep));
+                Check(static_cast<bool>(saved), "the saved cache yields its exclusions field for the duplicate-path tests");
+            }
+            // Entries from `duplicateFrom` on share the normalized path of entry 0.
+            auto writeDirTable = [&](const std::wstring& path, uint32_t dirCount, uint32_t duplicateFrom) {
+                std::ofstream out(path, std::ios::binary);
+                auto put32 = [&out](uint32_t v) { out.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
+                auto putString = [&](const std::wstring& str) {
+                    put32(static_cast<uint32_t>(str.size()));
+                    out.write(reinterpret_cast<const char*>(str.data()), str.size() * sizeof(wchar_t));
+                };
+                put32(takeoff::kCacheMagic);
+                put32(takeoff::kCacheFormatVersion);
+                out.write(reinterpret_cast<const char*>(&exclusionsRep), sizeof(exclusionsRep));
+                put32(dirCount);
+                for (uint32_t i = 0; i < dirCount; ++i) {
+                    putString(L"D:/Dup/dir" + std::to_wstring(i));
+                    putString(L"d dup dir" + std::to_wstring(i >= duplicateFrom ? 0u : i));
+                    const fs::file_time_type::rep mtimeRep = 0;
+                    out.write(reinterpret_cast<const char*>(&mtimeRep), sizeof(mtimeRep));
+                }
+                put32(0);  // chunkCount
+            };
+            const std::wstring dupAllPath = (testCacheDir / L"cache_dup_all_test.bin").wstring();
+            const std::wstring dupOnePath = (testCacheDir / L"cache_dup_one_test.bin").wstring();
+            const std::wstring uniquePath = (testCacheDir / L"cache_dup_control_test.bin").wstring();
+            writeDirTable(dupAllPath, 300, 1);     // 299 entries repeat entry 0's path
+            writeDirTable(dupOnePath, 100, 99);    // exactly one repeat among 100
+            writeDirTable(uniquePath, 300, 0xFFFFFFFFu);  // the same file shape with no duplicates
+
+            Check(!FileIndex::Instance().LoadIndexCache(dupAllPath),
+                  "LoadIndexCache rejects a directory table whose entries share one normalized path");
+            Check(!FileIndex::Instance().LoadIndexCache(dupOnePath),
+                  "LoadIndexCache rejects a directory table with a single duplicated normalized path");
+            auto afterRejected = FileIndex::Instance().Search(L"a.txt");
+            Check(!afterRejected.empty() && afterRejected[0].path == L"D:\\Cache\\Test\\a.txt",
+                  "a rejected duplicate-path cache leaves the already loaded index untouched");
+            Check(FileIndex::Instance().LoadIndexCache(uniquePath) &&
+                      FileIndex::Instance().TestOnlyPool().Size() == 300,
+                  "the same hand-built cache without duplicates loads (the rejections are about the duplicates)");
+            Check(FileIndex::Instance().LoadIndexCache(cachePath),
+                  "the real cache loads again after the duplicate-path cases");
+
+            DeleteFileW(dupAllPath.c_str());
+            DeleteFileW(dupOnePath.c_str());
+            DeleteFileW(uniquePath.c_str());
+        }
+
         DeleteFileW(cachePath.c_str());
         DeleteFileW(corruptCachePath.c_str());
         DeleteFileW(garbledCachePath.c_str());

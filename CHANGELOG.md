@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.6.1] - 2026-11-19
+
+### Fixed
+- **A damaged file-search cache can no longer crash Lean Launcher at startup** - the saved file index (`%LOCALAPPDATA%\LeanLauncher\file_index.cache`) is read back when the launcher starts. If its folder list held two entries that count as the same folder, reading it wrote past the end of a list in memory, which could end in a crash right at launch. Such a cache is now treated as damaged: it is ignored and the index is built again from the disk, like any other unreadable cache. This closes the crash mechanism found in the crash reports from #12; what put a bad cache on that PC is not known yet, so the reporter has been asked to confirm.
+
 ## [2.6.0] - 2026-11-19
 
 ### Added
