@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.5.0] - 2026-11-19
+
+### Added
+- **Cycle the Settings tabs with the keyboard** - `Ctrl+Tab` moves to the next Settings tab and `Ctrl+Shift+Tab` to the previous one, wrapping around at both ends, like in a browser. They follow the same rules as `Ctrl+1` to `Ctrl+6`: nothing happens while you record a hotkey, edit a field or have a dropdown open. Suggested in Discussion #13.
+
 ## [2.4.0] - 2026-10-23
 
 ### Added

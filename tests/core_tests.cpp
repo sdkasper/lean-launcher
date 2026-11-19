@@ -5618,6 +5618,15 @@ int main() {
         Check(sl::TabIndexForDigitKey('0', 6) == -1, "Ctrl+0 picks no Settings tab");
         Check(sl::TabIndexForDigitKey('A', 6) == -1, "a letter picks no Settings tab");
         Check(sl::TabIndexForDigitKey('1', 0) == -1, "no tabs means no tab is picked");
+
+        // Discussion #13: Ctrl+Tab / Ctrl+Shift+Tab cycle the tabs and wrap.
+        Check(sl::CycleTabIndex(0, 6, false) == 1, "Ctrl+Tab moves to the next Settings tab");
+        Check(sl::CycleTabIndex(5, 6, false) == 0, "Ctrl+Tab wraps from the last tab to the first");
+        Check(sl::CycleTabIndex(2, 6, true) == 1, "Ctrl+Shift+Tab moves to the previous Settings tab");
+        Check(sl::CycleTabIndex(0, 6, true) == 5, "Ctrl+Shift+Tab wraps from the first tab to the last");
+        Check(sl::CycleTabIndex(-1, 6, false) == 0, "an unknown current tab cycles forward to the first");
+        Check(sl::CycleTabIndex(9, 6, true) == 5, "an out-of-range current tab cycles back to the last");
+        Check(sl::CycleTabIndex(0, 0, false) == -1, "no tabs means nothing to cycle");
     }
 
     std::cout << "All search, calculator, text editing, hotkey, and settings scroll checks passed in " << elapsed << "ms.\n";

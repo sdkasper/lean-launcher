@@ -5314,6 +5314,17 @@ private:
                 HandleRecordingKey(key, control, shift, alt);
                 return 0;
             }
+            if (control && !alt && key == VK_TAB) {
+                // Discussion #13: Ctrl+Tab / Ctrl+Shift+Tab cycle the tabs, like a browser.
+                int current = -1;
+                for (std::size_t i = 0; i < std::size(kSettingsCategories); ++i) {
+                    if (kSettingsCategories[i] == settingsCategory_) current = static_cast<int>(i);
+                }
+                const int tab = leanlauncher::settings_layout::CycleTabIndex(
+                    current, static_cast<int>(std::size(kSettingsCategories)), shift);
+                if (tab >= 0) SelectSettingsCategory(kSettingsCategories[tab]);
+                return 0;
+            }
             if (control && !alt && !shift) {
                 // US-066: Ctrl+1..6 jump to a tab; Ctrl+, goes back like Esc.
                 const int tab = leanlauncher::settings_layout::TabIndexForDigitKey(

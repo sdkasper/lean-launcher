@@ -75,5 +75,14 @@ constexpr int TabIndexForDigitKey(unsigned key, int tabCount) {
     return index < tabCount ? index : -1;
 }
 
+// Discussion #13: Ctrl+Tab / Ctrl+Shift+Tab cycle the tab strip, wrapping at
+// both ends. `current` outside 0..tabCount-1 starts from the first (forward) or
+// last (backward) tab. Returns -1 when there are no tabs.
+constexpr int CycleTabIndex(int current, int tabCount, bool backward) {
+    if (tabCount <= 0) return -1;
+    if (current < 0 || current >= tabCount) return backward ? tabCount - 1 : 0;
+    return backward ? (current + tabCount - 1) % tabCount : (current + 1) % tabCount;
+}
+
 } // namespace settings_layout
 } // namespace leanlauncher

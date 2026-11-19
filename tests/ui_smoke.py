@@ -225,6 +225,53 @@ try:
     key(0x1B)
     check(u.IsWindowVisible(hwnd) and query() == "", "Escape returns from settings to search")
 
+    # Discussion #13: Ctrl+Tab / Ctrl+Shift+Tab cycle the Settings tabs and wrap.
+    # The UI exposes no "active tab" value, so read it from the screen: the active
+    # tab sits in a lighter pill than the other five. Compare each tab's pill
+    # interior with the others' (a relative measure, since whole-frame brightness
+    # varies between captures).
+    def ctrl_shift_key(code):
+        u.keybd_event(0x11, 0, 0, 0)
+        u.keybd_event(0x10, 0, 0, 0)
+        pump(0.1)
+        key(code)
+        u.keybd_event(0x10, 0, 2, 0)
+        u.keybd_event(0x11, 0, 2, 0)
+        pump(0.1)
+
+    pill_x = (164, 236, 304, 364, 442, 532)  # just inside each tab's left edge (96 dpi)
+    tab_count = len(pill_x)
+
+    def active_tab():
+        image = capture().convert("L")
+        levels = []
+        for x in pill_x:
+            box = tuple(int(v * scale) for v in (x, 14, x + 4, 32))
+            levels.append(sum(image.crop(box).getdata()) / max(1, image.crop(box).width * image.crop(box).height))
+        ranked = sorted(range(tab_count), key=lambda i: levels[i], reverse=True)
+        # Demand a clear winner so a blank or non-Settings page cannot pass by chance.
+        check(levels[ranked[0]] - levels[ranked[1]] > 3,
+              f"one Settings tab is clearly highlighted (levels {[round(v, 1) for v in levels]})")
+        return ranked[0]
+
+    click(722, 32)  # gear: open Settings
+    for n in range(tab_count):
+        ctrl_key(0x31 + n)  # Ctrl+1..Ctrl+6 pick a tab; also proves active_tab() reads each one
+        check(active_tab() == n, f"Ctrl+{n + 1} highlights Settings tab {n + 1}")
+    capture("07-settings-last-tab.png")
+    ctrl_key(0x31)
+    for n in range(1, tab_count):
+        ctrl_key(0x09)  # Ctrl+Tab
+        check(active_tab() == n, f"Ctrl+Tab moves to Settings tab {n + 1}")
+    ctrl_key(0x09)
+    check(active_tab() == 0, "Ctrl+Tab wraps from the last Settings tab to the first")
+    ctrl_shift_key(0x09)  # Ctrl+Shift+Tab
+    check(active_tab() == tab_count - 1, "Ctrl+Shift+Tab wraps from the first Settings tab to the last")
+    ctrl_shift_key(0x09)
+    check(active_tab() == tab_count - 2, "Ctrl+Shift+Tab moves to the previous Settings tab")
+    key(0x1B)
+    check(u.IsWindowVisible(hwnd) and query() == "", "Escape returns from settings after cycling tabs")
+
     # Click the actual footer action, then exercise menu navigation and dismissal.
     footer_y = (rect.bottom - rect.top) / scale - 21
     click(640, footer_y)
