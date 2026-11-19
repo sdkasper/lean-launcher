@@ -69,7 +69,7 @@
 Entirely optional and off by default until you point it at a vault.
 
 - **Auto-detected vault picker** - reads Obsidian's own `obsidian.json` to find every vault on your machine; click (or press Enter on) the Obsidian Vault row in Settings to pick one from a dropdown list (mouse or Up/Down/Enter/Esc)
-- **Quick task capture** (`t <text>`, default prefix) - appends `- [ ] <text>` to today's daily note (or your task target note) and hides the launcher immediately. Obsidian is never opened or focused.
+- **Quick task capture** (`t <text>`, default prefix) - appends `- [ ] <text>` to today's daily note (or your task target note) and hides the launcher immediately. Obsidian is never opened or focused. To put a tag or other text in front of every task, set **Add task text** in Settings > Obsidian > Add task (for example `#todo`, so `t buy milk` writes `- [ ] #todo buy milk`); it is empty by default.
 - **Quick note capture** (`a <text>`, default prefix) - appends a plain line (not a checkbox) to today's daily note (or your note target), for anything that isn't a task
 - **Quick log capture** (`l <text>`, default prefix) - inserts a timestamped line (`- HH:MM: <text>`) at the end of a configured heading's section (default `## Log`) in today's daily note (or your log target note), for a running log without opening Obsidian
 - **Capture target notes** - optionally send tasks, notes, or log entries to a specific note (e.g. `Inbox/Tasks`) instead of the daily note, set per action in Settings

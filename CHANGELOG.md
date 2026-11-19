@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.6.0] - 2026-11-19
+
+### Added
+- **Text in front of every captured task (optional)** - Settings > Obsidian > Add task > **Add task text**. Empty by default; set it to a tag such as `#todo` and `t buy milk` writes `- [ ] #todo buy milk`. It is one short line of up to 64 characters, is added to the first line of a multi-line task only, and is saved, exported and imported with your other settings. The note (`a`) and log (`l`) captures are unchanged. Suggested in Discussion #8.
+
 ## [2.5.0] - 2026-11-19
 
 ### Added

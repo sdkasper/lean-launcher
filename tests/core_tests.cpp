@@ -3249,6 +3249,22 @@ int main() {
 
     {
         Check(BuildTaskLine(L"buy milk") == L"- [ ] buy milk\n", "BuildTaskLine basic construction");
+        // Discussion #8: an optional text between the checkbox and the task.
+        Check(BuildTaskLine(L"some task", L"#todo") == L"- [ ] #todo some task\n",
+              "BuildTaskLine puts the task text prefix after the checkbox");
+        Check(BuildTaskLine(L"some task", L"") == BuildTaskLine(L"some task"),
+              "an empty task text prefix leaves the line as before");
+        Check(BuildTaskLine(L"line1\r\nline2", L"#todo") == L"- [ ] #todo line1\n  line2\n",
+              "the task text prefix is only added to the first line of a multi-line task");
+        {
+            std::wstring cleaned = L"keep";
+            Check(NormalizeTaskTextPrefix(L"  #todo  ", cleaned) && cleaned == L"#todo",
+                  "NormalizeTaskTextPrefix trims surrounding spaces");
+            Check(NormalizeTaskTextPrefix(L"\t ", cleaned) && cleaned.empty(),
+                  "NormalizeTaskTextPrefix turns blanks into nothing");
+            Check(!NormalizeTaskTextPrefix(L"a\rb", cleaned), "NormalizeTaskTextPrefix rejects a carriage return");
+            Check(!NormalizeTaskTextPrefix(L"a\tb", cleaned), "NormalizeTaskTextPrefix rejects an inner tab");
+        }
         Check(BuildTaskLine(L"line1\r\nline2") == L"- [ ] line1\n  line2\n",
             "BuildTaskLine indents a pasted second line under the bullet so it stays one task");
         Check(BuildTaskLine(L"") == L"- [ ] \n", "BuildTaskLine tolerates empty text");
@@ -4513,6 +4529,31 @@ int main() {
         Check(check(&takeoff::Settings::logTargetNote, L"C:\\x").error != nullptr,
               "the shared check rejects a target note outside the vault");
         Check(check(&takeoff::Settings::logHeading, L"anything").value == L"anything", "plain text passes unchanged");
+
+        // Discussion #8: text written between the checkbox and the task.
+        takeoff::Settings taskTextDefaults;
+        Check(taskTextDefaults.taskTextPrefix.empty(), "the task text prefix is empty by default");
+        Check(check(&takeoff::Settings::taskTextPrefix, L"  #todo \t").value == L"#todo",
+              "the shared check trims the task text prefix");
+        Check(check(&takeoff::Settings::taskTextPrefix, L"#todo").error == nullptr,
+              "a tag is a valid task text prefix");
+        Check(check(&takeoff::Settings::taskTextPrefix, L"").error == nullptr &&
+              check(&takeoff::Settings::taskTextPrefix, L"   ").value.empty(),
+              "an empty or blank task text prefix is valid and clears it");
+        Check(check(&takeoff::Settings::taskTextPrefix, L"#a\n#b").error != nullptr,
+              "the shared check rejects a task text prefix with a line break");
+        Check(check(&takeoff::Settings::taskTextPrefix, std::wstring(65, L'x').c_str()).error != nullptr,
+              "the shared check rejects a task text prefix over 64 characters");
+        Check(check(&takeoff::Settings::taskTextPrefix, std::wstring(64, L'x').c_str()).error == nullptr,
+              "a task text prefix of exactly 64 characters is accepted");
+        takeoff::Settings withTaskText = defaults;
+        withTaskText.taskTextPrefix = L"#todo ✅";
+        const io::ImportResult taskTextBack = io::ParseImport(io::ExportJson(withTaskText, {}, {}, L"2.6.0"), defaults);
+        Check(taskTextBack.ok && taskTextBack.settings.taskTextPrefix == L"#todo ✅",
+              "the task text prefix is exported and imported");
+        Check(io::ParseImport(R"({"format":"lean-launcher-settings","schemaVersion":1,"settings":{"TaskTextPrefix":"a\nb"}})", defaults)
+                  .settings.taskTextPrefix.empty(),
+              "an imported task text prefix with a line break is skipped");
 
         // Whole-file rejections.
         Check(!io::ParseImport("not json", defaults).ok, "garbage is rejected");

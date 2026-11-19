@@ -344,9 +344,35 @@ inline std::wstring BuildListItem(const std::wstring& lead, std::wstring_view te
     return item;
 }
 
-// Builds a Markdown checklist line for one task.
-inline std::wstring BuildTaskLine(std::wstring_view text) {
-    return BuildListItem(L"- [ ] ", text);
+// Longest text accepted for the task text prefix (a tag, an emoji, a short phrase).
+inline constexpr size_t kMaxTaskTextPrefix = 64;
+
+// Checks and cleans the text written before every captured task: one line,
+// no control characters, at most kMaxTaskTextPrefix characters, surrounding
+// spaces dropped. Empty (or only spaces) is valid and means "add nothing".
+inline bool NormalizeTaskTextPrefix(std::wstring_view proposed, std::wstring& out) {
+    out.clear();
+    const size_t first = proposed.find_first_not_of(L" \t");
+    if (first == std::wstring_view::npos) return true;
+    const size_t last = proposed.find_last_not_of(L" \t");
+    const std::wstring_view trimmed = proposed.substr(first, last - first + 1);
+    if (trimmed.size() > kMaxTaskTextPrefix) return false;
+    for (const wchar_t ch : trimmed) {
+        if (ch < 0x20 || ch == 0x7F) return false;
+    }
+    out.assign(trimmed);
+    return true;
+}
+
+// Builds a Markdown checklist line for one task. `textPrefix` (already
+// normalized, may be empty) goes between the checkbox and the task text.
+inline std::wstring BuildTaskLine(std::wstring_view text, std::wstring_view textPrefix = {}) {
+    std::wstring lead = L"- [ ] ";
+    if (!textPrefix.empty()) {
+        lead.append(textPrefix);
+        lead += L' ';
+    }
+    return BuildListItem(lead, text);
 }
 
 // Builds plain text (no bullet, no checklist) for the "a " prefix: each line
@@ -493,8 +519,9 @@ inline bool AppendLine(const std::wstring& notePath, const std::wstring& line) {
 }
 
 // Appends one task checklist line to the note at notePath.
-inline bool AppendTask(const std::wstring& notePath, std::wstring_view taskText) {
-    return AppendLine(notePath, BuildTaskLine(taskText));
+inline bool AppendTask(const std::wstring& notePath, std::wstring_view taskText,
+                       std::wstring_view textPrefix = {}) {
+    return AppendLine(notePath, BuildTaskLine(taskText, textPrefix));
 }
 
 // Appends one plain text line (the "a " prefix) to the note at notePath.

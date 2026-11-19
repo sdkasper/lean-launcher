@@ -59,7 +59,7 @@ namespace detail {
 using takeoff::HotkeyBinding;
 using takeoff::Settings;
 
-enum class TextKind { Plain, Prefix, TargetNote, WebTemplate, Minutes, SnippetsFile };
+enum class TextKind { Plain, Prefix, TargetNote, WebTemplate, Minutes, SnippetsFile, TaskText };
 
 struct BoolField { const char* key; bool Settings::*member; };
 struct TextField { const char* key; std::wstring Settings::*member; TextKind kind; };
@@ -116,6 +116,7 @@ inline constexpr TextField kTexts[] = {
     {"TaskPrefix", &Settings::taskPrefix, TextKind::Prefix},
     {"TaskPillLabel", &Settings::taskPillLabel, TextKind::Plain},
     {"TaskPreviewPrefix", &Settings::taskPreviewPrefix, TextKind::Plain},
+    {"TaskTextPrefix", &Settings::taskTextPrefix, TextKind::TaskText},
     {"NoteAddPrefix", &Settings::noteAddPrefix, TextKind::Prefix},
     {"NoteAddPillLabel", &Settings::noteAddPillLabel, TextKind::Plain},
     {"NoteAddPreviewPrefix", &Settings::noteAddPreviewPrefix, TextKind::Plain},
@@ -477,6 +478,11 @@ inline TextCheck CheckTextSetting(const takeoff::Settings& current, std::wstring
         break;
     case TextKind::SnippetsFile:
         result.error = leanlauncher::snippets::SnippetsPathProblem(proposed);
+        break;
+    case TextKind::TaskText:
+        if (!obsidian::NormalizeTaskTextPrefix(proposed, result.value)) {
+            result.error = L"Use one short line of text, up to 64 characters, e.g. #todo";
+        }
         break;
     case TextKind::Plain:
         break;

@@ -123,6 +123,9 @@ struct Settings {
     std::wstring taskPrefix = L"t";
     std::wstring taskPillLabel = L"Task";
     std::wstring taskPreviewPrefix = L"Add task: ";
+    // Text written between the checkbox and the task, e.g. "#todo" turns
+    // "t buy milk" into "- [ ] #todo buy milk". Empty (default) = nothing added.
+    std::wstring taskTextPrefix;
 
     std::wstring noteAddPrefix = L"a";
     std::wstring noteAddPillLabel = L"Note";

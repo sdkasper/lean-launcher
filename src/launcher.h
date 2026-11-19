@@ -803,6 +803,7 @@ private:
                 readStringSetting(L"TaskPrefix", settings_.taskPrefix);
                 readStringSetting(L"TaskPillLabel", settings_.taskPillLabel);
                 readStringSetting(L"TaskPreviewPrefix", settings_.taskPreviewPrefix);
+                readStringSetting(L"TaskTextPrefix", settings_.taskTextPrefix);
                 readStringSetting(L"NoteAddPrefix", settings_.noteAddPrefix);
                 readStringSetting(L"NoteAddPillLabel", settings_.noteAddPillLabel);
                 readStringSetting(L"NoteAddPreviewPrefix", settings_.noteAddPreviewPrefix);
@@ -1119,6 +1120,7 @@ private:
             writeStringSetting(L"TaskPrefix", settings_.taskPrefix);
             writeStringSetting(L"TaskPillLabel", settings_.taskPillLabel);
             writeStringSetting(L"TaskPreviewPrefix", settings_.taskPreviewPrefix);
+            writeStringSetting(L"TaskTextPrefix", settings_.taskTextPrefix);
             writeStringSetting(L"NoteAddPrefix", settings_.noteAddPrefix);
             writeStringSetting(L"NoteAddPillLabel", settings_.noteAddPillLabel);
             writeStringSetting(L"NoteAddPreviewPrefix", settings_.noteAddPreviewPrefix);
@@ -1713,7 +1715,8 @@ private:
     static constexpr int kRowBringObsidianToFront = 71;  // US-064, next to kRowOpenNotesInNewTab
     static constexpr int kRowWindowSwitcherEnabled = 72;  // US-065, Tools tab
     static constexpr int kRowWindowSwitcherPrefix = 73;
-    static constexpr int kSettingsMaxRow = 73;
+    static constexpr int kRowTaskTextPrefix = 74;  // Discussion #8, in the Add task section
+    static constexpr int kSettingsMaxRow = 74;
     static constexpr int kRowCheckForUpdatesOnStart = 6;  // shown in About's UPDATES card
 
     // Every tab except Obsidian (an accordion) and About (fixed layout) is an
@@ -1841,6 +1844,7 @@ private:
             rows.push_back(kRowTaskPrefix);
             rows.push_back(kRowTaskPillLabel);
             rows.push_back(kRowTaskPreviewPrefix);
+            rows.push_back(kRowTaskTextPrefix);
             rows.push_back(kRowTaskTargetNote);
         }
 
@@ -4038,6 +4042,7 @@ private:
         case kRowTaskPrefix: return &settings_.taskPrefix;
         case kRowTaskPillLabel: return &settings_.taskPillLabel;
         case kRowTaskPreviewPrefix: return &settings_.taskPreviewPrefix;
+        case kRowTaskTextPrefix: return &settings_.taskTextPrefix;
         case kRowNoteAddPrefix: return &settings_.noteAddPrefix;
         case kRowNoteAddPillLabel: return &settings_.noteAddPillLabel;
         case kRowNoteAddPreviewPrefix: return &settings_.noteAddPreviewPrefix;
@@ -5628,7 +5633,7 @@ private:
                 return;
             }
             Hide();
-            const bool ok = leanlauncher::obsidian::AppendTask(app.path, app.parameters);
+            const bool ok = leanlauncher::obsidian::AppendTask(app.path, app.parameters, settings_.taskTextPrefix);
             if (!ok) {
                 ShowWindow(hwnd_, SW_SHOWNORMAL);
                 SetForegroundWindow(hwnd_);
@@ -7795,6 +7800,10 @@ private:
         case kRowTaskPreviewPrefix:
             DrawSettingsRow(row, top, L"Add task preview", L"Text shown before what you typed, e.g. \"Add task: buy milk\"",
                 settings_.taskPreviewPrefix, false, false, false, true);
+            return;
+        case kRowTaskTextPrefix:
+            DrawSettingsRow(row, top, L"Add task text", L"Written before every task, e.g. #todo gives \"- [ ] #todo buy milk\"",
+                settings_.taskTextPrefix, false, false, false, true);
             return;
         case kRowNoteAddSummary:
             DrawObsidianSectionSummary(row, top, kSectionNoteAdd, L"Add to note",
