@@ -27,13 +27,23 @@ namespace fs = std::filesystem;
 
 constexpr UINT kFilesReadyMessage = WM_APP + 8;
 constexpr uint32_t kCacheMagic = 0x4C4C4649; // "LLFI"
+// Every cache file ends with this marker followed by a uint64 holding the size of
+// everything before the marker (format 4). A file cut short, zero-filled by a
+// crash, or with extra bytes appended cannot satisfy both.
+constexpr uint32_t kCacheEndMarker = 0x444E4C4C; // "LLND"
+// SaveIndexCache writes <cache>.tmp and swaps it over the real file.
+constexpr wchar_t kCacheTempSuffix[] = L".tmp";
 // Bumped to 2 (US-019): the cache now carries the exclusions file's mtime so a
 // cache written before an exclusions edit can be rejected instead of silently
 // keeping now-excluded content searchable forever.
 //
 // Bumped to 3 (issue #4): cached normalized names are now accent-folded, so a
 // cache written before folding must be rebuilt.
-constexpr uint32_t kCacheFormatVersion = 3;
+//
+// Bumped to 4 (2.6.2): the file now ends with kCacheEndMarker and a size field,
+// and is written to a temp file and swapped in, so a cache cut short or
+// zero-filled by a crash is rejected instead of trusted (issue #12).
+constexpr uint32_t kCacheFormatVersion = 4;
 
 template <typename T>
 void WriteRaw(std::ofstream& out, const T& value) {
@@ -192,6 +202,14 @@ public:
     enum class Phase { Idle, FirstWalk, Loaded, IncrementalRescan };
 
     Phase GetPhase() const { return phase_.load(); }
+
+    // A launcher killed in the middle of SaveIndexCache leaves <cache>.tmp behind.
+    // It is never read, only overwritten by the next save, so it is just removed
+    // at startup to not leave a multi-megabyte orphan on disk.
+    static void RemoveStaleCacheTemp(const std::wstring& cachePath) {
+        if (cachePath.empty()) return;
+        DeleteFileW((cachePath + kCacheTempSuffix).c_str());
+    }
 
     static std::wstring DefaultCachePath() {
         wchar_t localAppData[MAX_PATH]{};
@@ -478,6 +496,14 @@ public:
     // are only ever appended (Intern), never removed or reordered, and the
     // only wholesale replacements (LoadIndexCache, ResetForTest) cannot run
     // concurrently with this - the worker thread is the sole caller of both.
+    //
+    // The file is written to <path>.tmp and swapped over the real cache with
+    // MoveFileExW, so the cache on disk is always the previous complete file or
+    // the new complete one - a launcher killed mid-save only leaves a stray .tmp
+    // (removed at startup). The end marker and size field written after the body
+    // let LoadIndexCache reject anything cut short or zero-filled anyway.
+    // No FlushFileBuffers: that would only matter for an OS crash, and costs a
+    // forced disk write on every save.
     bool SaveIndexCache(const std::wstring& path) const {
         std::shared_ptr<const IndexSnapshot> snapshot;
         size_t poolSize = 0;
@@ -486,9 +512,28 @@ public:
             snapshot = snapshot_;
             poolSize = pool_.Size();
         }
-        std::ofstream out(path, std::ios::binary | std::ios::trunc);
-        if (!out) return false;
+        const std::wstring tmpPath = path + kCacheTempSuffix;
+        bool written = false;
+        {
+            std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+            if (!out) return false;
+            WriteCacheBody(out, snapshot, poolSize);
+            if (out) {
+                const uint64_t payloadSize = static_cast<uint64_t>(out.tellp());
+                WriteRaw(out, kCacheEndMarker);
+                WriteRaw(out, payloadSize);
+                out.flush();
+            }
+            written = static_cast<bool>(out);
+        }  // closed before the rename
+        if (written && MoveFileExW(tmpPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) return true;
+        DeleteFileW(tmpPath.c_str());
+        return false;
+    }
 
+    // Header, directory table and item chunks - everything before the trailer.
+    void WriteCacheBody(std::ofstream& out, const std::shared_ptr<const IndexSnapshot>& snapshot,
+                        size_t poolSize) const {
         WriteRaw(out, kCacheMagic);
         WriteRaw(out, kCacheFormatVersion);
         // Staleness field for the user exclusions (US-019). An exclusions edit
@@ -516,7 +561,7 @@ public:
             WriteRaw(out, mtime.time_since_epoch().count());
         }
 
-        if (!snapshot) { WriteRaw(out, uint32_t{0}); return static_cast<bool>(out); }
+        if (!snapshot) { WriteRaw(out, uint32_t{0}); return; }
         const uint32_t chunkCount = static_cast<uint32_t>(snapshot->chunksByDir.size());
         WriteRaw(out, chunkCount);
         for (uint32_t i = 0; i < chunkCount; ++i) {
@@ -531,7 +576,6 @@ public:
                 WriteRaw(out, item.isDirectory);
             }
         }
-        return static_cast<bool>(out);
     }
 
     bool LoadIndexCache(const std::wstring& path) {
@@ -553,6 +597,24 @@ public:
         if (fs::file_time_type(fs::file_time_type::duration(exclusionsRep)) != CurrentExclusionsMtime()) {
             return false;
         }
+
+        // The trailer first: the file must end with the end marker and a size
+        // field equal to everything before it. A cache cut short, zero-filled
+        // by a crash, or with extra bytes is rejected here, before the body is
+        // parsed or any length field in it can drive an allocation.
+        const std::streampos bodyStart = in.tellg();
+        in.seekg(0, std::ios::end);
+        const std::streamoff fileSize = in.tellg();
+        constexpr std::streamoff kTrailerSize = sizeof(uint32_t) + sizeof(uint64_t);
+        if (fileSize < kTrailerSize) return false;
+        in.seekg(fileSize - kTrailerSize);
+        uint32_t endMarker = 0;
+        uint64_t payloadSize = 0;
+        if (!ReadRaw(in, endMarker) || !ReadRaw(in, payloadSize)) return false;
+        if (endMarker != kCacheEndMarker || payloadSize != static_cast<uint64_t>(fileSize - kTrailerSize)) {
+            return false;
+        }
+        in.seekg(bodyStart);
 
         // A corrupt file can carry a garbled length field (e.g. a bit-flip
         // producing len ~= 0xFFFFFFFF) for dirCount/chunkCount/itemCount or
@@ -615,6 +677,9 @@ public:
                 newSnapshot->totalCount += items->size();
                 newSnapshot->chunksByDir[i] = std::move(items);
             }
+
+            // The body must end exactly where the trailer starts.
+            if (static_cast<uint64_t>(in.tellg()) != payloadSize) return false;
 
             std::lock_guard<std::mutex> lock(mutex_);
             pool_ = std::move(newPool);
@@ -1738,6 +1803,7 @@ private:
         // Initial background index: try loading a persisted cache first so a
         // warm start doesn't pay for a full disk walk; fall back to a real
         // walk (and persist its result) if there's no usable cache.
+        RemoveStaleCacheTemp(cachePath_);
         bool loadedFromCache = !cachePath_.empty() && LoadIndexCache(cachePath_);
         if (loadedFromCache) {
             phase_ = Phase::Loaded;

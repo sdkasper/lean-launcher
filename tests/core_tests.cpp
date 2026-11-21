@@ -56,6 +56,7 @@ int main() {
     Check(MatchScore(Normalize(L"Café München"), Normalize(L"cafe munchen")) > 0, "multi-word accent-insensitive match");
     // The file-index cache stores normalized names; old caches hold unfolded ones.
     Check(takeoff::kCacheFormatVersion >= 3, "cache format bumped so pre-folding caches are rebuilt");
+    Check(takeoff::kCacheFormatVersion >= 4, "cache format bumped so caches without the end marker are rebuilt");
     Check(MatchScore(L"code", L"code") > MatchScore(L"code editor", L"code"), "exact first");
     Check(MatchScore(L"code editor", L"code") > MatchScore(L"visual code", L"code"), "prefix first");
     Check(MatchScore(L"visual studio code", L"vsc") > 0, "fuzzy match");
@@ -1770,6 +1771,15 @@ int main() {
             saved.read(reinterpret_cast<char*>(&exclusionsRep), sizeof(exclusionsRep));
             Check(static_cast<bool>(saved), "the saved cache yields its exclusions field for the hand-built cache tests");
         }
+        // v4 trailer for the hand-built caches: end marker, then the size of everything
+        // before it. Without a valid trailer LoadIndexCache would reject these files
+        // before reaching the check each one is about.
+        auto writeTrailer = [](std::ofstream& f) {
+            const uint64_t payloadSize = static_cast<uint64_t>(f.tellp());
+            const uint32_t marker = takeoff::kCacheEndMarker;
+            f.write(reinterpret_cast<const char*>(&marker), sizeof(marker));
+            f.write(reinterpret_cast<const char*>(&payloadSize), sizeof(payloadSize));
+        };
 
         FileIndex::Instance().Stop(); // stops the background thread; LoadIndexCache below unconditionally
                                        // overwrites pool_/snapshot_ regardless of what they held before
@@ -1796,6 +1806,7 @@ int main() {
             garbled.write(reinterpret_cast<const char*>(&version), sizeof(version));
             garbled.write(reinterpret_cast<const char*>(&exclusionsRep), sizeof(exclusionsRep));
             garbled.write(reinterpret_cast<const char*>(&hugeDirCount), sizeof(hugeDirCount));
+            writeTrailer(garbled);
             garbled.close();
         }
         Check(!FileIndex::Instance().LoadIndexCache(garbledCachePath),
@@ -1830,6 +1841,7 @@ int main() {
             put32(9999); // parentDirIndex: out of bounds
             const bool isDir = false;
             oob.write(reinterpret_cast<const char*>(&isDir), sizeof(isDir));
+            writeTrailer(oob);
             oob.close();
         }
         Check(!FileIndex::Instance().LoadIndexCache(oobCachePath),
@@ -1861,6 +1873,7 @@ int main() {
                     out.write(reinterpret_cast<const char*>(&mtimeRep), sizeof(mtimeRep));
                 }
                 put32(0);  // chunkCount
+                writeTrailer(out);
             };
             const std::wstring dupAllPath = (testCacheDir / L"cache_dup_all_test.bin").wstring();
             const std::wstring dupOnePath = (testCacheDir / L"cache_dup_one_test.bin").wstring();
@@ -1888,6 +1901,7 @@ int main() {
                 // 300 entries of (path length, norm length, mtime), then chunkCount, all zero
                 const std::string zeros(300 * (4 + 4 + sizeof(fs::file_time_type::rep)) + 4, '\0');
                 zero.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+                writeTrailer(zero);
             }
             Check(!FileIndex::Instance().LoadIndexCache(zeroTablePath),
                   "LoadIndexCache rejects a zero-filled directory table (every empty path collides)");
@@ -1904,6 +1918,109 @@ int main() {
             DeleteFileW(dupOnePath.c_str());
             DeleteFileW(uniquePath.c_str());
             DeleteFileW(zeroTablePath.c_str());
+        }
+
+        // Atomic save (2.6.2). SaveIndexCache writes <path>.tmp and swaps it in with
+        // MoveFileExW, so the real cache is always a complete file or the previous
+        // one. The file ends with an end marker plus the size of everything before
+        // it, so a truncated or zero-filled file is rejected instead of trusted.
+        {
+            const std::wstring atomicPath = (testCacheDir / L"cache_atomic_test.bin").wstring();
+            const std::wstring atomicTmp = atomicPath + takeoff::kCacheTempSuffix;
+            const std::wstring mutatedPath = (testCacheDir / L"cache_atomic_mutated_test.bin").wstring();
+            auto exists = [](const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; };
+            auto readAll = [](const std::wstring& p) {
+                std::ifstream f(p, std::ios::binary);
+                return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            };
+            auto writeAll = [](const std::wstring& p, const std::string& d) {
+                std::ofstream f(p, std::ios::binary | std::ios::trunc);
+                f.write(d.data(), static_cast<std::streamsize>(d.size()));
+            };
+            DeleteFileW(atomicPath.c_str());
+            DeleteFileW(atomicTmp.c_str());
+
+            // A save over an existing (here: junk) file replaces it and leaves no temp file.
+            writeAll(atomicPath, "an older cache that is not a cache");
+            Check(FileIndex::Instance().SaveIndexCache(atomicPath), "an atomic save replaces an existing file");
+            Check(!exists(atomicTmp), "a finished save leaves no .tmp file behind");
+            Check(FileIndex::Instance().LoadIndexCache(atomicPath), "the replaced cache loads");
+
+            // The trailer: end marker, then the size of everything before it.
+            const std::string good = readAll(atomicPath);
+            constexpr size_t kTrailerSize = sizeof(uint32_t) + sizeof(uint64_t);
+            Check(good.size() > kTrailerSize, "the saved cache is longer than its trailer");
+            uint32_t endMarker = 0;
+            uint64_t payloadSize = 0;
+            std::memcpy(&endMarker, good.data() + good.size() - kTrailerSize, sizeof(endMarker));
+            std::memcpy(&payloadSize, good.data() + good.size() - sizeof(payloadSize), sizeof(payloadSize));
+            Check(endMarker == takeoff::kCacheEndMarker, "the saved cache ends with the end marker");
+            Check(payloadSize == good.size() - kTrailerSize,
+                  "the end marker's size field is the size of everything before it");
+
+            // Anything that is not exactly header + body + a matching trailer is rejected.
+            auto rejects = [&](const std::string& data, const char* label) {
+                writeAll(mutatedPath, data);
+                Check(!FileIndex::Instance().LoadIndexCache(mutatedPath), label);
+            };
+            rejects(good.substr(0, good.size() - kTrailerSize), "LoadIndexCache rejects a cache whose trailer is missing");
+            rejects(good.substr(0, good.size() - 1), "LoadIndexCache rejects a cache cut one byte short");
+            rejects(good.substr(0, good.size() / 2), "LoadIndexCache rejects a cache cut in half");
+            {
+                std::string zeroed = good;
+                std::fill(zeroed.end() - static_cast<std::ptrdiff_t>(kTrailerSize), zeroed.end(), '\0');
+                rejects(zeroed, "LoadIndexCache rejects a cache whose trailer is zero-filled");
+            }
+            {
+                std::string badSize = good;
+                badSize[badSize.size() - sizeof(uint64_t)] ^= 1;
+                rejects(badSize, "LoadIndexCache rejects a cache whose size field is wrong");
+            }
+            {
+                std::string badMarker = good;
+                badMarker[badMarker.size() - kTrailerSize] ^= 1;
+                rejects(badMarker, "LoadIndexCache rejects a cache whose end marker is wrong");
+            }
+            rejects(good + "x", "LoadIndexCache rejects a cache with bytes after the trailer");
+            {
+                // The trailer agrees with the file's length, but the body ends before the
+                // trailer starts: only "the body ends exactly at the trailer" catches this.
+                std::string padded = good.substr(0, good.size() - kTrailerSize) + "JUNK";
+                const uint64_t paddedSize = padded.size();
+                padded.append(reinterpret_cast<const char*>(&endMarker), sizeof(endMarker));
+                padded.append(reinterpret_cast<const char*>(&paddedSize), sizeof(paddedSize));
+                rejects(padded, "LoadIndexCache rejects a cache with bytes between the body and the trailer");
+            }
+            Check(FileIndex::Instance().LoadIndexCache(atomicPath), "the intact cache still loads after the rejections");
+
+            // A save that cannot write its temp file keeps the old cache (a folder sits
+            // where the temp file would go).
+            Check(CreateDirectoryW(atomicTmp.c_str(), nullptr) != 0, "the test can put a folder in the temp file's place");
+            Check(!FileIndex::Instance().SaveIndexCache(atomicPath), "a save that cannot write its temp file reports failure");
+            Check(readAll(atomicPath) == good, "a save that cannot write its temp file keeps the previous cache");
+            RemoveDirectoryW(atomicTmp.c_str());
+
+            // A save that cannot replace the cache (held open without sharing) keeps the
+            // old cache and removes its temp file.
+            HANDLE held = CreateFileW(atomicPath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+            Check(held != INVALID_HANDLE_VALUE, "the test can hold the cache file open without sharing");
+            const bool savedWhileHeld = FileIndex::Instance().SaveIndexCache(atomicPath);
+            CloseHandle(held);
+            Check(!savedWhileHeld, "a save that cannot replace the cache reports failure");
+            Check(!exists(atomicTmp), "a failed replace removes its temp file");
+            Check(readAll(atomicPath) == good, "a failed replace leaves the previous cache untouched");
+
+            // A temp file left by a killed launcher is removed at startup.
+            writeAll(atomicTmp, "half written by a killed launcher");
+            FileIndex::RemoveStaleCacheTemp(atomicPath);
+            Check(!exists(atomicTmp), "a stale .tmp file is removed at startup");
+            Check(exists(atomicPath), "removing a stale .tmp file leaves the real cache alone");
+            FileIndex::RemoveStaleCacheTemp(atomicPath);  // nothing there: must be harmless
+            Check(exists(atomicPath), "removing a .tmp file that does not exist is harmless");
+
+            DeleteFileW(atomicPath.c_str());
+            DeleteFileW(mutatedPath.c_str());
         }
 
         DeleteFileW(cachePath.c_str());

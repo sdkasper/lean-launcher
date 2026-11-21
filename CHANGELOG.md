@@ -10,6 +10,11 @@ Lean Launcher is an independent fork of [Takeoff](https://github.com/akiraeng/ta
 release history below; the inherited pre-fork Takeoff version history is kept
 further down for reference.
 
+## [2.6.2] - 2026-11-21
+
+### Fixed
+- **The file-search cache is saved safely** - Lean Launcher now writes the saved file index (`%LOCALAPPDATA%\LeanLauncher\file_index.cache`) to a temporary file first and swaps it in only when it is complete, so a crash, a forced shutdown or a power loss in the middle of a save can no longer leave a half-written cache behind. The cache file also ends with an end marker and its own size, and a file that is cut short, zero-filled or otherwise incomplete is ignored and the index is built again from the disk. A leftover temporary file from an interrupted save is removed at the next start. This follows up on #12: v2.6.1 stopped a damaged cache from crashing the launcher, this stops the launcher from writing one in the first place. The cache format changed, so the first start after updating rebuilds the file index once.
+
 ## [2.6.1] - 2026-11-19
 
 ### Fixed
