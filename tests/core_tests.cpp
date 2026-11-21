@@ -1873,6 +1873,24 @@ int main() {
                   "LoadIndexCache rejects a directory table whose entries share one normalized path");
             Check(!FileIndex::Instance().LoadIndexCache(dupOnePath),
                   "LoadIndexCache rejects a directory table with a single duplicated normalized path");
+            // A zero-filled directory table, which a crash or a kill in the middle of
+            // the non-atomic cache save can leave behind: the header is valid, and
+            // every entry then parses as an empty path with an empty normalized path,
+            // so all 300 collide on one pool entry.
+            const std::wstring zeroTablePath = (testCacheDir / L"cache_zero_table_test.bin").wstring();
+            {
+                std::ofstream zero(zeroTablePath, std::ios::binary);
+                auto put32 = [&zero](uint32_t v) { zero.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
+                put32(takeoff::kCacheMagic);
+                put32(takeoff::kCacheFormatVersion);
+                zero.write(reinterpret_cast<const char*>(&exclusionsRep), sizeof(exclusionsRep));
+                put32(300);  // dirCount
+                // 300 entries of (path length, norm length, mtime), then chunkCount, all zero
+                const std::string zeros(300 * (4 + 4 + sizeof(fs::file_time_type::rep)) + 4, '\0');
+                zero.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+            }
+            Check(!FileIndex::Instance().LoadIndexCache(zeroTablePath),
+                  "LoadIndexCache rejects a zero-filled directory table (every empty path collides)");
             auto afterRejected = FileIndex::Instance().Search(L"a.txt");
             Check(!afterRejected.empty() && afterRejected[0].path == L"D:\\Cache\\Test\\a.txt",
                   "a rejected duplicate-path cache leaves the already loaded index untouched");
@@ -1885,6 +1903,7 @@ int main() {
             DeleteFileW(dupAllPath.c_str());
             DeleteFileW(dupOnePath.c_str());
             DeleteFileW(uniquePath.c_str());
+            DeleteFileW(zeroTablePath.c_str());
         }
 
         DeleteFileW(cachePath.c_str());
