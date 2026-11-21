@@ -1760,6 +1760,16 @@ int main() {
         const std::wstring corruptCachePath = (testCacheDir / L"cache_corrupt_test.bin").wstring();
         const std::wstring garbledCachePath = (testCacheDir / L"cache_garbled_len_test.bin").wstring();
         Check(FileIndex::Instance().SaveIndexCache(cachePath), "SaveIndexCache writes successfully");
+        // The exclusions field of the saved cache. Every hand-built cache below
+        // writes it right after the version, so the file gets past the early
+        // exclusions check in LoadIndexCache and reaches the code its test is about.
+        uint64_t exclusionsRep = 0;
+        {
+            std::ifstream saved(cachePath, std::ios::binary);
+            saved.seekg(8);  // after the magic and the format version
+            saved.read(reinterpret_cast<char*>(&exclusionsRep), sizeof(exclusionsRep));
+            Check(static_cast<bool>(saved), "the saved cache yields its exclusions field for the hand-built cache tests");
+        }
 
         FileIndex::Instance().Stop(); // stops the background thread; LoadIndexCache below unconditionally
                                        // overwrites pool_/snapshot_ regardless of what they held before
@@ -1784,6 +1794,7 @@ int main() {
             uint32_t hugeDirCount = 0xFFFFFFFFu;
             garbled.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
             garbled.write(reinterpret_cast<const char*>(&version), sizeof(version));
+            garbled.write(reinterpret_cast<const char*>(&exclusionsRep), sizeof(exclusionsRep));
             garbled.write(reinterpret_cast<const char*>(&hugeDirCount), sizeof(hugeDirCount));
             garbled.close();
         }
@@ -1800,6 +1811,7 @@ int main() {
             auto put32 = [&oob](uint32_t v) { oob.write(reinterpret_cast<const char*>(&v), sizeof(v)); };
             put32(takeoff::kCacheMagic);
             put32(takeoff::kCacheFormatVersion);
+            oob.write(reinterpret_cast<const char*>(&exclusionsRep), sizeof(exclusionsRep));
             put32(1); // dirCount: one directory, so index 0 is the only valid parentDirIndex
             const std::wstring dir = L"D:\\Cache\\Test";
             put32(static_cast<uint32_t>(dir.size()));
@@ -1830,13 +1842,6 @@ int main() {
         // is written in full, exclusions field included, so these files get past
         // the early checks and really reach the directory table.
         {
-            uint64_t exclusionsRep = 0;
-            {
-                std::ifstream saved(cachePath, std::ios::binary);
-                saved.seekg(8);  // after the magic and the format version
-                saved.read(reinterpret_cast<char*>(&exclusionsRep), sizeof(exclusionsRep));
-                Check(static_cast<bool>(saved), "the saved cache yields its exclusions field for the duplicate-path tests");
-            }
             // Entries from `duplicateFrom` on share the normalized path of entry 0.
             auto writeDirTable = [&](const std::wstring& path, uint32_t dirCount, uint32_t duplicateFrom) {
                 std::ofstream out(path, std::ios::binary);
